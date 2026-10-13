@@ -5,6 +5,7 @@ pub mod embed;
 pub mod engine;
 pub mod htmlx;
 pub mod item;
+pub mod lm;
 pub mod meta;
 pub mod segment;
 pub mod textstore;

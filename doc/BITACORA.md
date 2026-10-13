@@ -214,3 +214,27 @@ Tamaños por doc (2024-01): vectores 96 B + bitmap 0,13 B; BM25 49 B (fst 5,2 + 
 | pythia-160m | 52,64 | 52,77 | **53,21 (+1,1 %)** |
 **Decisión:** pesos int8 por fila + activaciones int8 por token → matmul ENTERA exacta: resultado
 idéntico en cualquier CPU (escalar, AVX2 o AVX-VNNI) = determinismo para el codificador aritmético.
+
+### E17 — Motor LM propio en Rust (nivel frío) (`hnz lmtest`, modelo `export_lm.py` → `.hnzlm`)
+GPT-NeoX/Pythia W8A8: pesos int8 por fila, activaciones int8 por token, matmul ENTERA exacta;
+LayerNorm/softmax/GELU con exp/erf propias y sumas en orden fijo; RoPE precalculada en el fichero.
+Codificador aritmético binario (estilo LZMA, 16 bits de probabilidad, token = 16 decisiones sobre
+el árbol del vocabulario), cierre mínimo (recorte de ceros). Representación "e" (E15).
+- pythia-70m exportado: 71,7 MB; pythia-160m: 164 MB.
+- **Corrección:** 200/200 registros reales de 2024-01 comprimidos y descomprimidos idénticos;
+  los bytes comprimidos son iguales con núcleo escalar y AVX-VNNI (prueba de determinismo).
+- **Tamaño:** 60,7 B/registro (título+url+texto, con cabecera), 1,467 bits/byte, 77,4 tokens/reg
+  (zstd en bloques de 16 en el mismo mes: ~116 B/reg de texto).
+- **Velocidad de compresión** (16 hilos, un registro por hilo): escalar 9 reg/s → AVX-VNNI con
+  micronúcleo 4×32: **97 reg/s (7.520 tokens/s)**.
+- **Velocidad de descompresión** (lote de 10 registros en paralelo, KV-cache, lockstep):
+  | Implementación | ms/lote (mediana) |
+  |---|---|
+  | rayon, 16 hilos | 1.205-1.865 |
+  | pool "spin" propio, 16 hilos (sobresuscripción con rayon) | 17.304 (patológico) |
+  | **pool spin, 8 hilos (por defecto = mitad de los lógicos)** | **1.033** |
+  | pool spin, 6 / 4 hilos | 1.083 / 1.164 |
+  Por paso (10 activos): matmul capas 0,9 ms, atención 0,7 ms, cabeza de vocabulario 0,9 ms,
+  softmax+decodificador 0,3 ms. El lote dura lo que su registro más largo (pasos = sus tokens).
+**Pendiente:** núcleos más eficientes (~27 GMAC/s/hilo, lejos del pico), modo "fragmento" (decodificar
+solo los primeros ~64 tokens para la lista de resultados) y caché por capas.

@@ -1,0 +1,5 @@
+# AVX2 (x86-64-v3): vectorización de los bucles del LM y del índice vectorial.
+# Las operaciones flotantes de Rust no se fusionan (sin FMA implícita), así que el resultado
+# numérico es el mismo que sin vectorizar: el determinismo del codificador no depende de esto.
+[build]
+rustflags = ["-C", "target-cpu=x86-64-v3"]

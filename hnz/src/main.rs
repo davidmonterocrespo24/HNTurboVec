@@ -120,6 +120,17 @@ enum Cmd {
         #[command(flatten)]
         m: ModelArgs,
     },
+    /// Prueba del nivel frío: comprime y descomprime (en lote) una muestra con el LM y verifica
+    Lmtest {
+        #[arg(long)]
+        seg: PathBuf,
+        #[arg(long, default_value = "models/lm-pythia-70m.hnzlm")]
+        lm: PathBuf,
+        #[arg(long, default_value_t = 200)]
+        n: usize,
+        #[arg(long, default_value_t = 10)]
+        batch: usize,
+    },
     /// Muestra un ítem por id de HN
     Get {
         #[arg(long)]
@@ -182,6 +193,74 @@ fn make_query(text: &str, s: &SearchArgs) -> Result<Query> {
         c_bm25: s.c_bm25,
         vec_cand: None,
     })
+}
+
+fn cmd_lmtest(seg: &Path, lm: &Path, n: usize, batch: usize) -> Result<()> {
+    use hnz::lm::store::LmCodec;
+    let s = Segment::open(seg)?;
+    let t0 = Instant::now();
+    let codec = LmCodec::load(lm)?;
+    eprintln!("modelo {} cargado en {:.0} ms", codec.model.id, t0.elapsed().as_secs_f64() * 1e3);
+    let mut x: u64 = 0x2545F4914F6CDD1D;
+    let docs: Vec<usize> = (0..n)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % s.man.n_docs as u64) as usize
+        })
+        .collect();
+    let recs: Vec<hnz::textstore::TextRec> = docs.iter().map(|&d| s.text.get(d)).collect::<Result<_>>()?;
+    let raw: usize = recs.iter().map(|r| r.title.len() + r.url.len() + r.text.len() + 2).sum();
+    let t1 = Instant::now();
+    let enc: Vec<(Vec<u8>, u64)> = recs.par_iter().map(|r| codec.encode_record(&r.title, &r.url, &r.text)).collect();
+    let te = t1.elapsed().as_secs_f64();
+    let bytes: usize = enc.iter().map(|e| e.0.len()).sum();
+    let toks: u64 = enc.iter().map(|e| e.1).sum();
+    let nfb = enc.iter().filter(|e| e.1 == 0).count();
+    println!(
+        "codificar: {} registros, {:.1} B/reg crudo -> {:.1} B/reg ({:.3} bits/byte), {:.1} tokens/reg, {} con zstd de reserva | {:.0} reg/s ({:.0} tok/s) con {} hilos",
+        n,
+        raw as f64 / n as f64,
+        bytes as f64 / n as f64,
+        bytes as f64 * 8.0 / raw as f64,
+        toks as f64 / n as f64,
+        nfb,
+        n as f64 / te,
+        toks as f64 / te,
+        rayon::current_num_threads()
+    );
+    // decodificar en lotes (como al responder una consulta) y verificar
+    let t2 = Instant::now();
+    let mut bad = 0;
+    let mut times = Vec::new();
+    for (bi, chunk) in enc.chunks(batch).enumerate() {
+        let tb = Instant::now();
+        let refs: Vec<&[u8]> = chunk.iter().map(|e| &e.0[..]).collect();
+        let out = codec.decode_records(&refs, true)?;
+        times.push(tb.elapsed().as_secs_f64() * 1e3);
+        for (j, o) in out.iter().enumerate() {
+            if *o != recs[bi * batch + j] {
+                if bad < 3 {
+                    eprintln!("DIFERENCIA doc {}:\n  orig {:?}\n  dec  {:?}", docs[bi * batch + j], recs[bi * batch + j], o);
+                }
+                bad += 1;
+            }
+        }
+    }
+    times.sort_by(|a, b| a.total_cmp(b));
+    println!(
+        "decodificar en lotes de {}: mediana {:.0} ms/lote, p90 {:.0} ms ({:.1} s total) | errores: {}",
+        batch,
+        times[times.len() / 2],
+        times[times.len() * 9 / 10],
+        t2.elapsed().as_secs_f64(),
+        bad
+    );
+    if bad > 0 {
+        bail!("{bad} registros no coinciden");
+    }
+    Ok(())
 }
 
 fn cmd_eval(root: &Path, file: &Path, k: usize, m: &ModelArgs) -> Result<()> {
@@ -443,6 +522,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Eval { root, file, k, m } => cmd_eval(&root, &file, k, &m)?,
+        Cmd::Lmtest { seg, lm, n, batch } => cmd_lmtest(&seg, &lm, n, batch)?,
         Cmd::Get { seg, id } => {
             let s = Segment::open(&seg)?;
             match s.meta.doc_of_id(id) {
