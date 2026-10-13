@@ -1,0 +1,12 @@
+data/2024/2024-01.parquet (EleutherAI/pythia-70m), 335 B/reg HTML original
+   a) HTML original                 61.1 B/reg    87.1 tokens/reg
+   b) compacta (control)            61.4 B/reg    71.4 tokens/reg
+   c) natural (cota, no rev.)       57.0 B/reg    72.2 tokens/reg
+   d) rev.: \n\n + marcadores       57.7 B/reg    72.5 tokens/reg
+   e) rev.: \n\n + <url>            57.2 B/reg    72.4 tokens/reg
+data/2010/2010-06.parquet (EleutherAI/pythia-70m), 320 B/reg HTML original
+   a) HTML original                 56.8 B/reg    77.3 tokens/reg
+   b) compacta (control)            59.6 B/reg    72.0 tokens/reg
+   c) natural (cota, no rev.)       55.3 B/reg    72.7 tokens/reg
+   d) rev.: \n\n + marcadores       56.3 B/reg    73.1 tokens/reg
+   e) rev.: \n\n + <url>            55.6 B/reg    73.0 tokens/reg

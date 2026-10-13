@@ -109,6 +109,17 @@ enum Cmd {
         #[command(flatten)]
         m: ModelArgs,
     },
+    /// Evalúa la calidad (P@k, MRR) con consultas JSONL {"q":..., "story": id} (relevantes = su hilo)
+    Eval {
+        #[arg(long, default_value = "out")]
+        root: PathBuf,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(short, long, default_value_t = 10)]
+        k: usize,
+        #[command(flatten)]
+        m: ModelArgs,
+    },
     /// Muestra un ítem por id de HN
     Get {
         #[arg(long)]
@@ -169,7 +180,69 @@ fn make_query(text: &str, s: &SearchArgs) -> Result<Query> {
         include_dead: s.dead,
         w_bm25: s.w_bm25,
         c_bm25: s.c_bm25,
+        vec_cand: None,
     })
+}
+
+fn cmd_eval(root: &Path, file: &Path, k: usize, m: &ModelArgs) -> Result<()> {
+    let eng = Engine::open(root)?;
+    let mut emb = Embedder::new(&m.models, &m.ov_libs)?;
+    let qs: Vec<(String, u32)> = std::fs::read_to_string(file)?
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap();
+            (v["q"].as_str().unwrap().to_string(), v["story"].as_u64().unwrap() as u32)
+        })
+        .collect();
+    let t0 = Instant::now();
+    let vecs: Vec<Vec<f32>> = qs.iter().map(|q| emb.embed_query(&q.0)).collect::<Result<_>>()?;
+    eprintln!("{} consultas embebidas en {:.1} ms/consulta", qs.len(), t0.elapsed().as_secs_f64() * 1e3 / qs.len() as f64);
+    let mut configs: Vec<(String, Query)> = Vec::new();
+    let base = Query { k: k + 1, ..Default::default() };
+    configs.push(("vector (2 etapas)".into(), Query { mode: Mode::Vector, ..base.clone() }));
+    configs.push(("vector exacto (asimétrico total)".into(), Query { mode: Mode::Vector, vec_cand: Some(usize::MAX / 2), ..base.clone() }));
+    configs.push(("palabras (BM25)".into(), Query { mode: Mode::Keyword, ..base.clone() }));
+    for &w in &[0.05f32, 0.1, 0.15, 0.25, 0.4] {
+        for &c in &[5.0f32, 10.0, 20.0] {
+            configs.push((format!("híbrida w={w} c={c}"), Query { mode: Mode::Hybrid, w_bm25: w, c_bm25: c, ..base.clone() }));
+        }
+    }
+    println!("{:<36} {:>7} {:>7} {:>9}", "configuración", "P@k", "MRR", "ms/cons.");
+    for (name, tmpl) in &configs {
+        let t = Instant::now();
+        let (mut p, mut mrr) = (0f64, 0f64);
+        for (i, (text, story)) in qs.iter().enumerate() {
+            let q = Query { text: text.clone(), ..tmpl.clone() };
+            let hits = eng.search(&q, Some(&vecs[i]));
+            let mut rel = 0;
+            let mut first = 0usize;
+            let mut n = 0;
+            for h in &hits {
+                let row = eng.segs[h.seg].s.meta.row(h.doc as usize);
+                if row.id == *story {
+                    continue; // la propia story no cuenta
+                }
+                n += 1;
+                if n > k {
+                    break;
+                }
+                if eng.root_id(h.seg, h.doc) == *story {
+                    rel += 1;
+                    if first == 0 {
+                        first = n;
+                    }
+                }
+            }
+            p += rel as f64 / k as f64;
+            if first > 0 {
+                mrr += 1.0 / first as f64;
+            }
+        }
+        let nq = qs.len() as f64;
+        println!("{:<36} {:>7.3} {:>7.3} {:>9.1}", name, p / nq, mrr / nq, t.elapsed().as_secs_f64() * 1e3 / nq);
+    }
+    Ok(())
 }
 
 /// Texto que se indexa con BM25: título + dominio de la url + texto plano.
@@ -369,6 +442,7 @@ fn main() -> Result<()> {
                 let _ = req.respond(resp);
             }
         }
+        Cmd::Eval { root, file, k, m } => cmd_eval(&root, &file, k, &m)?,
         Cmd::Get { seg, id } => {
             let s = Segment::open(&seg)?;
             match s.meta.doc_of_id(id) {

@@ -46,6 +46,8 @@ pub struct Query {
     /// fusión: score = v + w * b / (b + c)
     pub w_bm25: f32,
     pub c_bm25: f32,
+    /// candidatos de la etapa 1 (Hamming) del índice vectorial; None = automático
+    pub vec_cand: Option<usize>,
 }
 
 impl Default for Query {
@@ -61,6 +63,7 @@ impl Default for Query {
             include_dead: false,
             w_bm25: 0.15,
             c_bm25: 10.0,
+            vec_cand: None,
         }
     }
 }
@@ -172,7 +175,8 @@ impl Engine {
                 };
                 let mut cand: Vec<u32> = Vec::new();
                 if let (Some(v), Some(l)) = (&sg.vec, &lut) {
-                    cand.extend(v.search(l, lo as usize, hi as usize, (kc * 10).max(2000), kc).into_iter().map(|x| x.0));
+                    let c1 = q.vec_cand.unwrap_or((kc * 10).max(2000));
+                    cand.extend(v.search(l, lo as usize, hi as usize, c1, kc).into_iter().map(|x| x.0));
                 }
                 if let (Some(b), false) = (&sg.bm25, tps.is_empty()) {
                     cand.extend(b.top_k(&tps, lo, hi, kc).into_iter().map(|x| x.0));
@@ -240,6 +244,25 @@ impl Engine {
             Some((si, doc, _)) => Ok(Some(self.segs[si].s.item(doc)?)),
             None => Ok(None),
         }
+    }
+
+    /// id de la raíz del hilo de un documento (él mismo si no tiene padre).
+    pub fn root_id(&self, seg: usize, doc: u32) -> u32 {
+        let row = self.segs[seg].s.meta.row(doc as usize);
+        let (mut id, mut parent) = (row.id, row.parent);
+        for _ in 0..256 {
+            if parent == 0 {
+                return id;
+            }
+            match self.find_meta(parent) {
+                Some((_, _, r)) => {
+                    id = r.id;
+                    parent = r.parent;
+                }
+                None => return parent,
+            }
+        }
+        id
     }
 
     /// Story raíz de un comentario (recorriendo `parent`).

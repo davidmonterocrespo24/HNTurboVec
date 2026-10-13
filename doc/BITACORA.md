@@ -175,3 +175,42 @@ Segmentos de 1 mes, bloques de 16, zstd-19 + diccionario 112 KB, metadatos en bl
 - **Dos dialectos de HTML en HN:** antiguo (~2007-2012: `&#38; &#60; &#62;`, comillas/apóstrofos/barras
   sin escapar) y moderno (`&amp; &#x27; &#x2F; …`). **Enlaces truncados** ("…", 60-95 caracteres) son
   el 30-40 % de los enlaces → se guardan como (url, longitud).
+
+### E13 — Embeddings de un mes completo en la iGPU (`embed_month.py` → `results_embed_2024-01.txt`)
+364.891 ítems con contenido (de 382.681), buckets de longitud 32/64/128/256 tokens (3,8 % truncados a 256):
+| bucket | docs | docs/s |
+|---|---|---|
+| 32 / 64 / 128 / 256 | 110.360 / 105.631 / 91.087 / 57.813 | 565 / 357 / 163 / 81 |
+**Total 204 docs/s (29,8 min) → 49,3 M en ~2,8 días** (vs 168,8 docs/s sin buckets).
+
+### E14 — Búsqueda completa en Rust (`hnz search` / `hnz eval` → `results_eval_rust.txt`)
+629.434 docs (3 meses), embedding de consulta con OpenVINO desde Rust (IR fp16, CPU).
+Latencias (consulta "burnout…"): embedding 45 ms, búsqueda 6,5 ms, recuperar+descomprimir 1,0 ms;
+carga del modelo 3,8 s (una vez). BM25 solo: búsqueda 1,3-1,7 ms.
+Calidad (300 consultas = títulos de 2024-01, relevantes = comentarios del hilo, k=10):
+| Configuración | P@10 | MRR | ms/consulta |
+|---|---|---|---|
+| vector 2 etapas (Hamming 256 bits → asimétrico 768) | 0,291 | 0,574 | 6,3 |
+| vector exacto (asimétrico sobre todo) | 0,293 | 0,577 | 14,5 |
+| BM25 | 0,201 | 0,466 | 3,4 |
+| **híbrida w=0,15 c=20 (elegida)** | **0,318** | 0,591 | 5,7 |
+(rejilla completa en el fichero; w ∈ 0,05-0,4, c ∈ 5-20: todas entre 0,304 y 0,318)
+Tamaños por doc (2024-01): vectores 96 B + bitmap 0,13 B; BM25 49 B (fst 5,2 + postings 42,9 + normas 1,0).
+
+### E15 — Representación del texto para el LM (`bench_lm_repr.py` → `results_lm_repr.txt`, pythia-70m)
+| Representación | 2024-01 B/reg (tokens) | 2010-06 B/reg (tokens) |
+|---|---|---|
+| a) HTML original | 61,1 (87,1) | 56,8 (77,3) |
+| b) compacta con caracteres de control | 61,4 (71,4) | 59,6 (72,0) |
+| c) "natural" (cota, NO reversible) | 57,0 (72,2) | 55,3 (72,7) |
+| d) reversible: `\n\n` + marcadores de control | 57,7 (72,5) | 56,3 (73,1) |
+| **e) reversible: `\n\n` + enlaces como `<url>`** | **57,2 (72,4)** | **55,6 (73,0)** |
+**Elegida e):** −6 % bytes y −17 % tokens (= decodificación más rápida) frente al HTML.
+
+### E16 — Cuantización del LM (`bench_lm_quant.py` → `results_lm_quant.txt`, representación e)
+| Modelo | fp32 | W8A32 | **W8A8** |
+|---|---|---|---|
+| pythia-70m | 57,21 | 57,42 | **57,94 (+1,3 %)** |
+| pythia-160m | 52,64 | 52,77 | **53,21 (+1,1 %)** |
+**Decisión:** pesos int8 por fila + activaciones int8 por token → matmul ENTERA exacta: resultado
+idéntico en cualquier CPU (escalar, AVX2 o AVX-VNNI) = determinismo para el codificador aritmético.
