@@ -457,7 +457,7 @@ fn main() -> Result<()> {
         Cmd::Build { out, tier, block, level, lm, parquet } => {
             let t0 = Instant::now();
             let (items, deleted) = segment::load_items(&parquet)?;
-            eprintln!("leídos {} ítems ({} borrados omitidos) en {:.1}s", items.len(), deleted, t0.elapsed().as_secs_f64());
+            eprintln!("leídos {} ítems (incluidas {} filas deleted, que se guardan como metadatos) en {:.1}s", items.len(), deleted, t0.elapsed().as_secs_f64());
             let name = out.file_name().unwrap().to_string_lossy().to_string();
             let codec;
             let t = match tier {

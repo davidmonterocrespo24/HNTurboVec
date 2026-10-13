@@ -11,7 +11,7 @@ marcadas con ≈ son de memoria de los papers y no se releyeron.
 | Matryoshka (MRL) | 2205.13147 | Google + UW 2022 | Embeddings truncables | EmbeddingGemma 2 lo trae: 768→512→256→128 |
 | EmbeddingGemma | 2509.20354 | Google 2025 | Modelo 300M, MRL, robusto a cuantización | v1 evaluado (E05/E07) |
 | **EmbeddingGemma 2** | (model card, 2026-10-06) | Google DeepMind | 270M texto (130M transformer + 140M tabla), MRL, 8K ctx | **Elegido** (mejor calidad, E07) |
-| RaBitQ / ext-RaBitQ | 2405.12497 / 2409.09913 | NTU | 1 bit/dim + 2 floats, estimador insesgado | Probado en faiss: peor que binario asimétrico en calidad/byte |
+| RaBitQ / ext-RaBitQ | 2405.12497 / 2409.09913 | NTU | 1 bit/dim + 2 floats, estimador insesgado | Probado en faiss (fidelidad, E05): +7-10 % a igual dimensión pero no mejor por byte que el binario asimétrico; no medido en calidad real |
 | Language Modeling Is Compression | 2309.10668 | Google DeepMind 2023 | LM + codificación aritmética comprime mejor que gzip/zstd | **Nivel frío del texto** (E03) |
 | Training LLMs over Neurally Compressed Text | 2404.03626 | Google DeepMind 2024 | "Equal-info windows": bloques codificados decodificables por separado | Diseño de acceso aleatorio con LM |
 | FineZip / LLMZip | 2409.17141 / 2306.04050 | — | LM compression práctica (batching, fine-tuning) | Ideas de batching |

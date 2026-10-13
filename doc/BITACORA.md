@@ -160,7 +160,8 @@ pequeños; un motor propio int8 será bastante más rápido). Round-trip del tok
 - 2010-06 y 2015-06 tienen filas `deleted` (sin contenido), `kids` no vacíos y saltos de línea crudos
   en `text`; 2024-01 no tiene ninguno de los tres → el formato debe soportar ambos casos.
 - **Decisión:** se guardan sin pérdida texto, título, url, autor, fecha, score, descendants, parent,
-  poll/parts y `dead`. No se guardan las filas `deleted` (vacías) ni el orden de `kids` (la estructura
+  poll/parts y `dead`. [Corregido en E25: las filas `deleted` SÍ se guardan como metadatos, porque
+  descartarlas rompía la cadena de los hilos.] No se guardan las filas `deleted` (vacías) ni el orden de `kids` (la estructura
   del hilo se reconstruye con `parent`; se pierde solo el orden en que HN mostraba las respuestas).
 
 ### E12 — Núcleo en Rust: meta + texto zstd (`hnz build/verify/stats/bench`)
@@ -251,7 +252,7 @@ Ahora **el BM25 pesa casi tanto como el texto** → variantes sobre 2024-01 (300
 | df ≤ 5 % | 47,8 | 0,224 | 0,316 |
 | **df ≤ 2 % (elegida)** | **43,3** | 0,220 | **0,315** |
 | sin tf + df ≤ 5 % | 39,0 | 0,192 | 0,305 |
-**Decisión:** no indexar términos presentes en > 2 % de los documentos (−12 %, calidad igual);
+**Decisión (REVERTIDA en E25):** no indexar términos presentes en > 2 % de los documentos (−12 %, calidad igual);
 la frecuencia del término sí importa (−3 % en híbrida sin ella).
 Embeddings de 2010-06 / 2015-06 en la iGPU: 126-131 docs/s (con la CPU ocupada por el LM).
 
@@ -329,3 +330,32 @@ Pendiente de relanzar, de uno en uno para no agotar la RAM.
   append no admite `set_len` → `L2::open` fallaba y el error se ignoraba). Ahora se abre en lectura/
   escritura y se avisa si falla. Además: caché de títulos de stories y un único lote LM para
   resultados + títulos del hilo.
+
+
+### E25 — Revisión adversarial del sistema y correcciones (workflow de 141 agentes)
+6 revisores en paralelo (formato sin pérdida, LM/codificador, concurrencia/unsafe/cachés, búsqueda,
+CLI/servidor/pipeline, documentación), solo lectura; cada hallazgo lo intentaron refutar 2
+verificadores con enfoques distintos (+1 de desempate). Resultado: **65 hallazgos, 60 confirmados,
+5 refutados**. Correcciones principales (commit "Correcciones de la revisión adversarial"):
+| Problema confirmado | Corrección |
+|---|---|
+| Filtros --by/--type/dead aplicados tras recortar candidatos (podía devolver 0 resultados) | se aplican al generar candidatos: recorrido exacto de metadatos para autor y tipos raros; sobre-muestreo + reintento para el resto |
+| Filas `deleted` descartadas → cadena de hilos rota (141 comentarios en 2010-06) | se guardan como metadatos (bit en meta; 1 byte en el nivel LM) |
+| Poda BM25 por df en cada segmento (E18) → términos frecuentes de un periodo desaparecen | sin poda (decisión E18 revertida) |
+| Tokenizador: "php", "html", "net" como stopwords; "C"/"R" descartadas | buscables |
+| La doc prometía un "CRC por registro" que no existía | 1 byte de comprobación por registro LM (`rec_check`) |
+| Caché L2: clave solo por nombre (texto de otro ítem tras reconstruir), sin validar cabecera ni bloquear | clave con `build_id`, cabecera validada, acceso exclusivo; además no funcionaba en Windows (E24) |
+| `retier`: borraba el original tras verificar 200 docs; `--seg .` destruía el segmento; restos `.retier` servidos como segmentos | conserva `<seg>.old`, verifica 2.000 o todo, limpia si falla, ruta canónica; el motor ignora carpetas transitorias |
+| Segmentos solapados (mensual + anual) → resultados duplicados y `get` fallido | el motor los detecta y se niega a abrir |
+| `build` sobre carpeta existente: un corte deja un segmento mezclado | construcción atómica en `<seg>.building` |
+| `k` sin límite en HTTP (agota memoria) | k ≤ 500 (100 por HTTP) |
+| Pool no seguro ante pánicos; `HNZ_LM_THREADS=0` divide por cero | `catch_unwind` + relanzar; mínimo 1 hilo |
+| id del modelo con muestreo 1/97 bytes | hash completo (se acepta el id antiguo) |
+| Un solo modelo LM por archivo | un modelo por segmento |
+| `pipeline.py`: ~27 GB de RAM al unir un año; 768 bits en frío; año "terminado" aunque falten meses; límite caliente relativo al tramo | unión en streaming (memmap) + `hnz index` por mmap; 512 bits en frío; reconstruye si cambian los meses; límite absoluto respecto al dataset |
+| `make_eval.py` con `>` en PowerShell genera UTF-16 | `--out` en UTF-8; `hnz eval` tolera BOM |
+| Docs desactualizadas ("628 meses": son 239; tokenizador de modelos no generado; requisito x86-64-v3 no documentado) | docs reescritas; `prepare_models.py`; `requirements.txt` |
+Además: lote continuo (`decode_stream`) en verify/retier/rebm25 (antes cada lote esperaba a su
+registro más largo: verify a 24 reg/s).
+Notas de medición: las velocidades de E17 y E20 se midieron con muestras y cargas de CPU distintas
+(E17 con trabajos en paralelo); comparar solo dentro de cada experimento.

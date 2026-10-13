@@ -1,0 +1,10 @@
+leídos 382681 ítems (0 borrados omitidos) en 0.8s
+  texto zstd 3.3s; HTML transformado: moderno 98.2%, antiguo 0.0%, crudo 1.8%
+  BM25: 178736 términos, 8893154 postings (1.7s)
+segmento seg-2024-01 (zstd) listo: 382681 docs en 5.9s
+vectores: 364891/382681 docs con embedding, 768 bits (2.0s)
+OK: 382681 registros idénticos al original (3.4s)
+leídos 82729 ítems (2366 borrados omitidos) en 0.2s
+  LM: 5000/82729 registros (147 reg/s, faltan ~9 min)
+  LM: 10000/82729 registros (144 reg/s, faltan ~8 min)
+  LM: 15000/82729 registros (139 reg/s, faltan ~8 min)
