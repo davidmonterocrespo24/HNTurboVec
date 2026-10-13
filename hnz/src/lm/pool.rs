@@ -24,6 +24,7 @@ pub struct SpinPool {
 }
 
 const SPIN: Duration = Duration::from_millis(3);
+const SPIN_HOT: Duration = Duration::from_micros(20);
 
 impl SpinPool {
     fn new(threads: usize) -> &'static SpinPool {
@@ -43,8 +44,12 @@ impl SpinPool {
                 if self.gen.load(Ordering::Acquire) != seen {
                     break;
                 }
-                if t0.elapsed() < SPIN {
+                let el = t0.elapsed();
+                if el < SPIN_HOT {
                     std::hint::spin_loop();
+                } else if el < SPIN {
+                    // ceder la CPU si otro hilo/proceso la necesita (evita sobresuscripción)
+                    std::thread::yield_now();
                 } else {
                     let g = self.slot.lock().unwrap();
                     if self.gen.load(Ordering::Acquire) == seen {
@@ -96,8 +101,13 @@ impl SpinPool {
             f(i);
             job.done.fetch_add(1, Ordering::Release);
         }
+        let t0 = Instant::now();
         while job.done.load(Ordering::Acquire) < n {
-            std::hint::spin_loop();
+            if t0.elapsed() < SPIN_HOT {
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
         }
     }
 }

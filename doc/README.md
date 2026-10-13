@@ -20,9 +20,13 @@ importa es el uso diario: **rápido, preciso y compacto**. Implementación en **
 
 - [x] Medición del tamaño de HN y de la línea base (investigación previa en Hermes).
 - [x] Benchmarks de almacenamiento, vectores, BM25, calidad real, LM, etiquetas (mes 2024-01).
-- [ ] Experimentos de diseño finales: turbovec con EmbeddingGemma 2, búsqueda en 2 etapas,
-      reranker (alternativa open source a Jev/System One), velocidad de *descompresión* LM.
-- [ ] Construcción del sistema en Rust (ver [05-arquitectura.md](05-arquitectura.md)).
+- [x] EmbeddingGemma 2 en la iGPU (OpenVINO): ~204 docs/s → todo HN en ~2,8 días (E10, E13).
+- [x] Sistema `hnz` en Rust: segmentos con nivel zstd (caliente) y nivel LM (frío), BM25,
+      vectores binarios, búsqueda híbrida con filtros, CLI + HTTP + web, verificación sin pérdida.
+- [x] LM compresor determinista propio (Pythia int8, AVX-VNNI, codificador aritmético) (E17).
+- [~] Optimización: núcleo VNNI 2x4, caché L2, BM25 más compacto, `retier` (implementado, midiendo).
+- [ ] Construcción completa de los 628 meses (`pipeline.py`; días de CPU/iGPU).
+- [ ] Reranker cross-encoder (equivalente open source a Jev/System One) — no probado aún.
 
 ## Entorno
 

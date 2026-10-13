@@ -270,6 +270,14 @@ fn cmd_lmtest(seg: &Path, lm: &Path, n: usize, batch: usize) -> Result<()> {
     let t1 = Instant::now();
     let enc: Vec<(Vec<u8>, u64)> = recs.par_iter().map(|r| codec.encode_record(&r.title, &r.url, &r.text)).collect();
     let te = t1.elapsed().as_secs_f64();
+    {
+        let p: Vec<f64> = hnz::lm::model::PROF.iter().map(|x| x.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e9).collect();
+        let hilos = rayon::current_num_threads() as f64;
+        eprintln!(
+            "  [perfil codificación, s de CPU] matmul capas {:.1}, atención {:.1}, cabeza {:.1}, resto (softmax+codificador+tokenizar) {:.1} de {:.1}",
+            p[0], p[1], p[2], (te * hilos - p[0] - p[1] - p[2]).max(0.0), te * hilos
+        );
+    }
     let bytes: usize = enc.iter().map(|e| e.0.len()).sum();
     let toks: u64 = enc.iter().map(|e| e.1).sum();
     let nfb = enc.iter().filter(|e| e.1 == 0).count();

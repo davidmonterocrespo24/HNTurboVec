@@ -15,9 +15,12 @@ tantivy_idx/
 
 # Rust: compilados
 target/
+target2/
 
 # Salidas del sistema construido (almacén comprimido, índices) — se regeneran con el build
 out/
+out_*/
+_dl/
 store/
 *.hnz
 

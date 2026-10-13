@@ -248,6 +248,9 @@ pub struct EncStats {
 impl LmCodec {
     pub fn load(model_path: &Path) -> Result<Self> {
         let model = LmModel::load(model_path)?;
+        if model.h.vocab > 1 << super::coder::VOCAB_BITS {
+            bail!("vocabulario de {} tokens: el codificador admite hasta {}", model.h.vocab, 1 << super::coder::VOCAB_BITS);
+        }
         let tp = model_path.with_extension("tokenizer.json");
         let tok = Tokenizer::from_file(&tp).map_err(|e| anyhow!("tokenizer {}: {e}", tp.display()))?;
         Ok(Self { model, tok })
@@ -409,6 +412,9 @@ impl LmCodec {
 
 #[derive(Serialize, Deserialize)]
 pub struct LmInfo {
+    /// versión de la definición numérica con la que se comprimió (ver model::MATH_VERSION)
+    #[serde(default = "math_v1")]
+    pub math: u32,
     pub model_id: String,
     pub n_docs: usize,
     pub group: usize,
@@ -459,6 +465,7 @@ pub fn write(dir: &Path, codec: &LmCodec, recs: &[(&str, &str, &str)], progress:
     idx.extend_from_slice(&off.to_le_bytes());
     std::fs::write(dir.join("lm.idx"), idx)?;
     let info = LmInfo {
+        math: super::model::MATH_VERSION,
         model_id: codec.model.id.clone(),
         n_docs: recs.len(),
         group: GROUP,
@@ -468,6 +475,10 @@ pub fn write(dir: &Path, codec: &LmCodec, recs: &[(&str, &str, &str)], progress:
     };
     std::fs::write(dir.join("lm.json"), serde_json::to_string_pretty(&info)?)?;
     Ok(st)
+}
+
+fn math_v1() -> u32 {
+    1
 }
 
 pub struct LmStore {
@@ -498,6 +509,13 @@ impl LmStore {
     }
 
     pub fn check_model(&self, codec: &LmCodec) -> Result<()> {
+        if self.info.math != super::model::MATH_VERSION {
+            bail!(
+                "el segmento se comprimió con la versión numérica {} del LM y este binario usa la {}: recomprímalo (hnz retier)",
+                self.info.math,
+                super::model::MATH_VERSION
+            );
+        }
         if self.info.model_id != codec.model.id {
             bail!("el segmento se comprimió con {} y el modelo cargado es {}", self.info.model_id, codec.model.id);
         }

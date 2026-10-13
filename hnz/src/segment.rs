@@ -142,7 +142,8 @@ pub fn build(items: &[Item], deleted: usize, out: &Path, name: &str, tier: Tier)
         let texts: Vec<String> = chunk.par_iter().map(|it| index_text(&it.title, &it.url, &it.text)).collect();
         b.add_batch(&texts);
     }
-    let info = b.write(out)?;
+    // términos en >2 % de los docs no se indexan: -12 % de tamaño sin pérdida de calidad (E18)
+    let info = b.write_opts(out, true, 0.02)?;
     eprintln!("  BM25: {} términos, {} postings ({:.1}s)", info.n_terms, info.n_postings, t1.elapsed().as_secs_f64());
     let m = Manifest {
         version: 2,

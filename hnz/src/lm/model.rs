@@ -5,7 +5,7 @@
 //! Ambos caminos ejecutan exactamente las mismas operaciones por posición => mismos logits.
 
 use super::kernels::{matmul, quant_row, Q8};
-use super::math::{dot, exp, gelu, layer_norm};
+use super::math::{exp, gelu, layer_norm};
 use anyhow::{bail, Context, Result};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
@@ -231,9 +231,8 @@ impl LmModel {
                 self.rope(&mut row[hd + h * hs..hd + (h + 1) * hs], pos[i]);
             }
             let c = &mut kv[seq_of[i]];
-            debug_assert_eq!(c.k[l].len(), pos[i] * hd);
-            c.k[l].extend_from_slice(&row[hd..2 * hd]);
-            c.v[l].extend_from_slice(&row[2 * hd..3 * hd]);
+            debug_assert_eq!(c.len[l], pos[i]);
+            c.push(l, &row[hd..2 * hd], &row[2 * hd..3 * hd]);
         }
         let scale = 1.0 / (hs as f32).sqrt();
         let mut att = vec![0f32; t * hd];
@@ -244,26 +243,73 @@ impl LmModel {
                 let c = kvr[seq_of[i]];
                 let n = pos[i] + 1;
                 let q = &qkv[i * 3 * hd + h * hs..i * 3 * hd + (h + 1) * hs];
-                let mut sc = Vec::with_capacity(n);
-                let mut mx = f32::NEG_INFINITY;
-                for j in 0..n {
-                    let s = dot(q, &c.k[l][j * hd + h * hs..j * hd + (h + 1) * hs]) * scale;
-                    if s > mx {
-                        mx = s;
+                // s[j] = (Σ_d q[d]·k[j][d]) · escala, con la suma de cada clave en orden d = 0..hs
+                // (definición canónica, MATH_VERSION 2): se vectoriza a lo ancho de las claves
+                let mut sc = vec![0f32; n];
+                // bloques de 32 claves con los acumuladores en registros a lo largo de las dims;
+                // por clave el orden de sumas es el mismo (d = 0..hs)
+                let rows: Vec<&[f32]> = (0..hs).map(|d| &c.krow(l, h, d)[..n]).collect();
+                let mut jb = 0;
+                while jb + 32 <= n {
+                    let mut acc = [0f32; 32];
+                    for d in 0..hs {
+                        let qd = q[d];
+                        let kr: &[f32; 32] = rows[d][jb..jb + 32].try_into().unwrap();
+                        for lane in 0..32 {
+                            acc[lane] += qd * kr[lane];
+                        }
                     }
-                    sc.push(s);
+                    sc[jb..jb + 32].copy_from_slice(&acc);
+                    jb += 32;
                 }
-                let mut tot = 0f32;
+                if jb < n {
+                    let rem = n - jb;
+                    let mut acc = [0f32; 32];
+                    for d in 0..hs {
+                        let qd = q[d];
+                        let kr = &rows[d][jb..n];
+                        for lane in 0..rem {
+                            acc[lane] += qd * kr[lane];
+                        }
+                    }
+                    sc[jb..n].copy_from_slice(&acc[..rem]);
+                }
+                let mut mx = f32::NEG_INFINITY;
+                for s in sc.iter_mut() {
+                    *s *= scale;
+                    if *s > mx {
+                        mx = *s;
+                    }
+                }
+                // exp en un bucle aparte (vectorizable) y suma en el MISMO orden secuencial de siempre
                 for s in sc.iter_mut() {
                     *s = exp(*s - mx);
-                    tot += *s;
+                }
+                let mut tot = 0f32;
+                for &s in sc.iter() {
+                    tot += s;
                 }
                 let inv = 1.0 / tot;
-                for j in 0..n {
-                    let p = sc[j] * inv;
-                    let v = &c.v[l][j * hd + h * hs..j * hd + (h + 1) * hs];
-                    for d in 0..hs {
-                        o[d] += p * v[d];
+                if hs == 64 {
+                    // 64 acumuladores en registros a lo largo de las claves (mismo orden por dim)
+                    let mut acc = [0f32; 64];
+                    for j in 0..n {
+                        let p = sc[j] * inv;
+                        let v: &[f32; 64] = c.v[l][j * hd + h * hs..j * hd + (h + 1) * hs].try_into().unwrap();
+                        for d in 0..64 {
+                            acc[d] += p * v[d];
+                        }
+                    }
+                    for d in 0..64 {
+                        o[d] += acc[d];
+                    }
+                } else {
+                    for j in 0..n {
+                        let p = sc[j] * inv;
+                        let v = &c.v[l][j * hd + h * hs..j * hd + (h + 1) * hs];
+                        for d in 0..hs {
+                            o[d] += p * v[d];
+                        }
                     }
                 }
             };
@@ -342,7 +388,7 @@ impl LmModel {
             self.embed(tk, &mut x[i * hd..(i + 1) * hd]);
         }
         let pos: Vec<usize> = (0..t).collect();
-        let mut cache = KvCache::new(self.h.layers);
+        let mut cache = KvCache::new(self.h.layers, hd, hd / self.h.heads);
         let seq_of = vec![0usize; t];
         // causalidad: la fila i solo ve las claves 0..=i -> procesamos por capas con la cache
         // creciendo fila a fila dentro de `layer` (pos[i] == len antes de añadir).
@@ -356,15 +402,49 @@ impl LmModel {
     }
 }
 
-/// KV-cache de una secuencia: por capa, claves y valores (pos x hidden).
+/// Versión de la definición numérica del LM. Cambiarla invalida los segmentos ya comprimidos.
+/// 1: puntuaciones de atención con `dot` por clave · 2: claves transpuestas, suma por dim en orden.
+pub const MATH_VERSION: u32 = 2;
+
+/// KV-cache de una secuencia. Claves TRANSPUESTAS por capa: [cabeza·dim][posición] (con
+/// capacidad que crece al doble), para puntuar muchas claves a la vez; valores [pos][hidden].
 pub struct KvCache {
-    pub k: Vec<Vec<f32>>,
+    kt: Vec<Vec<f32>>,
+    cap: Vec<usize>,
+    pub len: Vec<usize>,
     pub v: Vec<Vec<f32>>,
+    hd: usize,
+    hs: usize,
 }
 
 impl KvCache {
-    pub fn new(layers: usize) -> Self {
-        Self { k: vec![Vec::new(); layers], v: vec![Vec::new(); layers] }
+    pub fn new(layers: usize, hd: usize, hs: usize) -> Self {
+        Self { kt: vec![Vec::new(); layers], cap: vec![0; layers], len: vec![0; layers], v: vec![Vec::new(); layers], hd, hs }
+    }
+
+    fn push(&mut self, l: usize, krow: &[f32], vrow: &[f32]) {
+        let (hd, len) = (self.hd, self.len[l]);
+        if len == self.cap[l] {
+            let nc = (self.cap[l] * 2).max(32);
+            let mut nk = vec![0f32; hd * nc];
+            for r in 0..hd {
+                nk[r * nc..r * nc + len].copy_from_slice(&self.kt[l][r * self.cap[l]..r * self.cap[l] + len]);
+            }
+            self.kt[l] = nk;
+            self.cap[l] = nc;
+        }
+        let c = self.cap[l];
+        for (r, &x) in krow.iter().enumerate() {
+            self.kt[l][r * c + len] = x;
+        }
+        self.v[l].extend_from_slice(vrow);
+        self.len[l] += 1;
+    }
+
+    #[inline]
+    fn krow(&self, l: usize, h: usize, d: usize) -> &[f32] {
+        let r = h * self.hs + d;
+        &self.kt[l][r * self.cap[l]..r * self.cap[l] + self.len[l]]
     }
 }
 
@@ -377,7 +457,8 @@ pub struct Batch<'m> {
 
 impl<'m> Batch<'m> {
     pub fn new(m: &'m LmModel, n: usize) -> Self {
-        Self { m, caches: (0..n).map(|_| KvCache::new(m.h.layers)).collect(), pos: vec![0; n] }
+        let (hd, hs) = (m.h.hidden, m.h.hidden / m.h.heads);
+        Self { m, caches: (0..n).map(|_| KvCache::new(m.h.layers, hd, hs)).collect(), pos: vec![0; n] }
     }
 
     /// Avanza las secuencias `active` con los tokens `toks` (uno por secuencia activa).

@@ -238,3 +238,46 @@ el árbol del vocabulario), cierre mínimo (recorte de ceros). Representación "
   softmax+decodificador 0,3 ms. El lote dura lo que su registro más largo (pasos = sus tokens).
 **Pendiente:** núcleos más eficientes (~27 GMAC/s/hilo, lejos del pico), modo "fragmento" (decodificar
 solo los primeros ~64 tokens para la lista de resultados) y caché por capas.
+
+### E18 — Primer segmento FRÍO real y BM25 más compacto (`hnz build --tier lm`, `hnz rebm25`)
+**2010-06 en nivel LM** (pythia-70m): 80.355 registros con LM + 8 con zstd de reserva, 79,6 tokens/reg,
+61,2 B/reg de texto; construcción 1.118 s (72 reg/s, con la CPU compartida con la iGPU).
+Desglose por doc: texto LM 62,5 B · BM25 56,9 B · metadatos 5,4 B → **124,9 B/doc** (sin vectores).
+Ahora **el BM25 pesa casi tanto como el texto** → variantes sobre 2024-01 (300 consultas):
+| Variante BM25 | B/doc | P@10 palabras | P@10 híbrida |
+|---|---|---|---|
+| base (tf, todos los términos) | 49,1 | 0,223 | 0,316 |
+| sin tf (booleano) | 39,9 | 0,192 | 0,306 |
+| df ≤ 5 % | 47,8 | 0,224 | 0,316 |
+| **df ≤ 2 % (elegida)** | **43,3** | 0,220 | **0,315** |
+| sin tf + df ≤ 5 % | 39,0 | 0,192 | 0,305 |
+**Decisión:** no indexar términos presentes en > 2 % de los documentos (−12 %, calidad igual);
+la frecuencia del término sí importa (−3 % en híbrida sin ella).
+Embeddings de 2010-06 / 2015-06 en la iGPU: 126-131 docs/s (con la CPU ocupada por el LM).
+
+### E19 — Bits de los vectores (MRL) en el mes completo (`hnz index --bits`, `hnz eval`)
+Con BM25 df ≤ 2 %, 300 consultas, 382.681 docs:
+| Bits | B/doc | P@10 vector | P@10 híbrida | MRR híbrida |
+|---|---|---|---|---|
+| 768 | 96 | 0,291 | 0,315 | 0,588 |
+| **512** | **64** | 0,278 | **0,307 (−2,5 %)** | 0,581 |
+| 384 | 48 | 0,258 | 0,298 (−5,4 %) | 0,572 |
+| 256 | 32 | 0,235 | 0,289 (−8,3 %) | 0,556 |
+**Decisión:** 768 bits en el nivel caliente, **512 en el frío**.
+
+### E20 — Optimización del motor LM (`hnz lmtest`)
+- Núcleo AVX-VNNI 2 filas × 4 tokens con reducción `hadd`: compresión +12 % (77→86 reg/s),
+  descompresión −4 %; bytes idénticos (determinismo entre núcleos confirmado).
+- Perfil de compresión (1 hilo, 30 registros): la **atención** era el 43 % del tiempo (cuadrática en
+  registros largos, ~0,8 GFLOPS). Cambio a **claves transpuestas** [cabeza·dim][posición] y bloques de
+  32 claves / 64 dims con acumuladores en registros → atención 1,0 s → 0,4 s.
+  Es un cambio de la definición numérica → `MATH_VERSION = 2` guardado en `lm.json`; un segmento con
+  otra versión se rechaza con un mensaje claro (hay que recomprimirlo).
+- Resultado (16 hilos): **compresión 122 reg/s (9.462 tokens/s)**, +42 %; descompresión de 10
+  registros en lote: **mediana 531 ms** (antes 656 ms), p90 1.055 ms.
+- **Problema detectado:** el pool "spin" acapara la CPU cuando hay OTROS procesos pesados (una
+  verificación tardaba horas a 5 reg/s compitiendo con la compresión). Arreglo: girar solo ~20 µs y
+  después `yield_now()` hasta 3 ms, luego dormir.
+
+### E21 — Segmento caliente definitivo (2024-01, zstd + BM25 df ≤ 2 % + 768 bits)
+Verificación 100 % idéntica. **261,7 B/doc**: texto 116,8 · vectores 96,1 · BM25 43,3 · meta 5,5.

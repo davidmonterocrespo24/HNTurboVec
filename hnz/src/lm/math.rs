@@ -59,19 +59,20 @@ pub fn sum(x: &[f32]) -> f32 {
 /// Producto escalar f32 determinista (8 carriles, orden fijo).
 #[inline]
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    // mismo orden de operaciones que la versión original (carril j suma los elementos j, j+8, ...),
+    // escrito con chunks_exact para que LLVM vectorice sin comprobaciones de límites
     let mut acc = [0f32; 8];
-    let n = a.len() / 8 * 8;
-    let mut i = 0;
-    while i < n {
+    let ca = a.chunks_exact(8);
+    let cb = b[..a.len()].chunks_exact(8);
+    let (ra, rb) = (ca.remainder(), cb.remainder());
+    for (x, y) in ca.zip(cb) {
         for j in 0..8 {
-            acc[j] += a[i + j] * b[i + j];
+            acc[j] += x[j] * y[j];
         }
-        i += 8;
     }
     let mut tail = 0f32;
-    while i < a.len() {
-        tail += a[i] * b[i];
-        i += 1;
+    for (x, y) in ra.iter().zip(rb) {
+        tail += x * y;
     }
     ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7])) + tail
 }
