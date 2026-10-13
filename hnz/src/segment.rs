@@ -1,11 +1,15 @@
-//! Segmento: un trozo inmutable y autocontenido del archivo (p.ej. un año), con metadatos,
-//! texto, índice BM25 y códigos vectoriales. Los docnums son locales y siguen el orden de id
-//! (= orden temporal), así un rango de fechas es un rango contiguo de documentos.
+//! Segmento: un trozo inmutable y autocontenido del archivo (p.ej. un mes o un año), con
+//! metadatos, texto (nivel zstd o nivel LM), índice BM25 y códigos vectoriales. Los docnums son
+//! locales y siguen el orden de id (= orden temporal): un rango de fechas es un rango contiguo.
 
+use crate::bm25;
 use crate::item::{read_parquet, Item};
+use crate::lm::store::{LmCodec, LmStore};
 use crate::meta::{self, MetaRow, MetaStore};
-use crate::textstore::{self, TextStore};
+use crate::textstore::{self, TextRec, TextStore};
+use crate::htmlx;
 use anyhow::{bail, Context, Result};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,8 +27,13 @@ pub struct Manifest {
     pub time_max: i64,
     /// "zstd" (caliente/templado) o "lm" (frío)
     pub text_tier: String,
+    #[serde(default)]
     pub text_block: usize,
+    #[serde(default)]
     pub text_level: i32,
+    /// fichero del modelo LM (nivel frío), relativo a la carpeta de modelos
+    #[serde(default)]
+    pub lm_model: Option<String>,
     pub transformed_pct: f64,
     #[serde(default)]
     pub has_bm25: bool,
@@ -55,8 +64,20 @@ pub fn load_items(parquets: &[PathBuf]) -> Result<(Vec<Item>, usize)> {
     Ok((items, deleted))
 }
 
-/// Construye meta + texto (nivel zstd) de un segmento.
-pub fn build_store(items: &[Item], deleted: usize, out: &Path, name: &str, block: usize, level: i32) -> Result<Manifest> {
+/// Nivel del texto de un segmento.
+pub enum Tier<'a> {
+    Zstd { block: usize, level: i32 },
+    Lm { codec: &'a LmCodec, model_file: String },
+}
+
+/// Texto que se indexa con BM25: título + dominio de la url + texto plano.
+pub fn index_text(title: &str, url: &str, html: &str) -> String {
+    let host = url.split("://").nth(1).unwrap_or("").split('/').next().unwrap_or("");
+    format!("{title} {host} {}", htmlx::to_plain(html))
+}
+
+/// Construye un segmento completo: metadatos, texto (según nivel) e índice BM25.
+pub fn build(items: &[Item], deleted: usize, out: &Path, name: &str, tier: Tier) -> Result<Manifest> {
     if items.is_empty() {
         bail!("segmento vacío");
     }
@@ -89,17 +110,42 @@ pub fn build_store(items: &[Item], deleted: usize, out: &Path, name: &str, block
     meta::write(out, &rows, &names)?;
     let t_meta = t0.elapsed();
     let recs: Vec<(&str, &str, &str)> = items.iter().map(|it| (it.title.as_str(), it.url.as_str(), it.text.as_str())).collect();
-    let st = textstore::write(out, &recs, block, level, 112 * 1024)?;
-    eprintln!(
-        "  meta {:.1}s, texto {:.1}s; HTML transformado: moderno {:.1}%, antiguo {:.1}%, crudo {:.1}%",
-        t_meta.as_secs_f64(),
-        (t0.elapsed() - t_meta).as_secs_f64(),
-        100.0 * st.modes[0] as f64 / items.len() as f64,
-        100.0 * st.modes[1] as f64 / items.len() as f64,
-        100.0 * st.modes[2] as f64 / items.len() as f64
-    );
+    let (tier_name, block, level, lm_model, transformed_pct) = match tier {
+        Tier::Zstd { block, level } => {
+            let st = textstore::write(out, &recs, block, level, 112 * 1024)?;
+            eprintln!(
+                "  texto zstd {:.1}s; HTML transformado: moderno {:.1}%, antiguo {:.1}%, crudo {:.1}%",
+                (t0.elapsed() - t_meta).as_secs_f64(),
+                100.0 * st.modes[0] as f64 / items.len() as f64,
+                100.0 * st.modes[1] as f64 / items.len() as f64,
+                100.0 * st.modes[2] as f64 / items.len() as f64
+            );
+            ("zstd", block, level, None, 100.0 * (st.modes[0] + st.modes[1]) as f64 / items.len() as f64)
+        }
+        Tier::Lm { codec, model_file } => {
+            let st = crate::lm::store::write(out, codec, &recs, true)?;
+            eprintln!(
+                "  texto LM {:.1}s: {} registros con LM, {} con zstd de reserva, {:.1} tokens/reg, {:.1} B/reg",
+                (t0.elapsed() - t_meta).as_secs_f64(),
+                st.lm_records,
+                st.zstd_records,
+                st.tokens as f64 / items.len() as f64,
+                st.payload_bytes as f64 / items.len() as f64
+            );
+            ("lm", 0, 0, Some(model_file), 100.0)
+        }
+    };
+    // BM25 directamente desde los ítems (no hace falta descomprimir)
+    let t1 = Instant::now();
+    let mut b = bm25::Builder::new();
+    for chunk in items.chunks(1 << 16) {
+        let texts: Vec<String> = chunk.par_iter().map(|it| index_text(&it.title, &it.url, &it.text)).collect();
+        b.add_batch(&texts);
+    }
+    let info = b.write(out)?;
+    eprintln!("  BM25: {} términos, {} postings ({:.1}s)", info.n_terms, info.n_postings, t1.elapsed().as_secs_f64());
     let m = Manifest {
-        version: 1,
+        version: 2,
         name: name.to_string(),
         n_docs: items.len(),
         deleted_skipped: deleted,
@@ -107,40 +153,76 @@ pub fn build_store(items: &[Item], deleted: usize, out: &Path, name: &str, block
         id_max: items[items.len() - 1].id,
         time_min: items.iter().map(|i| i.time).min().unwrap(),
         time_max: items.iter().map(|i| i.time).max().unwrap(),
-        text_tier: "zstd".into(),
+        text_tier: tier_name.into(),
         text_block: block,
         text_level: level,
-        transformed_pct: 100.0 * (st.modes[0] + st.modes[1]) as f64 / items.len() as f64,
-        has_bm25: false,
+        lm_model,
+        transformed_pct,
+        has_bm25: true,
         vec_bits: 0,
     };
     write_manifest(out, &m)?;
     Ok(m)
 }
 
+pub enum TextSource {
+    Zstd(TextStore),
+    Lm(LmStore),
+}
+
 pub struct Segment {
     pub dir: PathBuf,
     pub man: Manifest,
     pub meta: MetaStore,
-    pub text: TextStore,
+    pub text: TextSource,
+}
+
+/// Texto recuperado de un documento; `partial` = solo el principio (modo fragmento del nivel LM).
+#[derive(Clone, Debug, Default)]
+pub struct Got {
+    pub rec: TextRec,
+    pub partial: bool,
 }
 
 impl Segment {
     pub fn open(dir: &Path) -> Result<Self> {
         let man = read_manifest(dir)?;
         let meta = MetaStore::open(dir, man.n_docs)?;
-        let text = TextStore::open(dir, man.text_block, man.n_docs)?;
+        let text = if man.text_tier == "lm" {
+            TextSource::Lm(LmStore::open(dir)?)
+        } else {
+            TextSource::Zstd(TextStore::open(dir, man.text_block, man.n_docs)?)
+        };
         Ok(Self { dir: dir.to_path_buf(), man, meta, text })
     }
 
-    pub fn item(&self, doc: usize) -> Result<Item> {
+    pub fn is_lm(&self) -> bool {
+        matches!(self.text, TextSource::Lm(_))
+    }
+
+    /// Texto de un documento del nivel zstd (para el nivel LM usar `Engine`, que decodifica en lote).
+    pub fn zstd_text(&self, doc: usize) -> Result<TextRec> {
+        match &self.text {
+            TextSource::Zstd(t) => t.get(doc),
+            TextSource::Lm(_) => bail!("segmento LM: use la decodificación en lote"),
+        }
+    }
+
+    /// Ítem completo (decodifica con `codec` si el segmento es del nivel LM).
+    pub fn item(&self, doc: usize, codec: Option<&LmCodec>) -> Result<Item> {
         let m = self.meta.row(doc);
-        let t = self.text.get(doc)?;
+        let t = match &self.text {
+            TextSource::Zstd(t) => t.get(doc)?,
+            TextSource::Lm(l) => {
+                let c = codec.context("hace falta el modelo LM para este segmento")?;
+                c.decode_records(&[l.raw(doc)], true, None, false)?.remove(0).0
+            }
+        };
         Ok(join(&m, t, &self.meta.authors))
     }
 }
 
-pub fn join(m: &MetaRow, t: textstore::TextRec, authors: &[String]) -> Item {
+pub fn join(m: &MetaRow, t: TextRec, authors: &[String]) -> Item {
     Item {
         id: m.id,
         typ: m.typ,

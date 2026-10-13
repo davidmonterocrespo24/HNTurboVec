@@ -179,6 +179,60 @@ fn parse_lm_string(s: &str, flags: u64) -> Result<TextRec> {
     Ok(TextRec { title, url, text: if mode == Mode::Raw { compact } else { htmlx::restore(mode, &compact) } })
 }
 
+/// Convierte un prefijo del cuerpo (representación LM, compacta o HTML) en texto legible.
+fn plain_prefix(body: &str, flags: u64) -> String {
+    let mode = Mode::from_bits(flags & 3);
+    if mode == Mode::Raw {
+        return htmlx::to_plain(body);
+    }
+    let lmmap = (flags >> 2) & 1 == 1;
+    let mut out = String::with_capacity(body.len());
+    let mut i = 0;
+    while i < body.len() {
+        let rest = &body[i..];
+        if lmmap && rest.starts_with("\n\n") {
+            out.push('\n');
+            i += 2;
+        } else if let Some(t) = ["<i>", "</i>", "<pre><code>", "</code></pre>"].iter().find(|t| lmmap && rest.starts_with(**t)) {
+            i += t.len();
+        } else if lmmap && rest.starts_with('<') {
+            // enlace <url>, <url>k>, <url|texto>: mostrar la url
+            let b = &rest[1..];
+            let e = b.find(['>', '|']).unwrap_or(b.len());
+            out.push_str(&b[..e]);
+            let mut j = 1 + e;
+            if b.as_bytes().get(e) == Some(&b'|') {
+                j += b[e..].find('>').map_or(b.len() - e, |x| x + 1);
+            } else if e < b.len() {
+                j += 1;
+                let after = &b[e + 1..];
+                let nd = after.bytes().take_while(|c| c.is_ascii_digit()).count();
+                if nd > 0 && after.as_bytes().get(nd) == Some(&b'>') {
+                    j += nd + 1;
+                }
+            }
+            i += j.min(rest.len());
+        } else {
+            let ch = rest.chars().next().unwrap();
+            if (ch as u32) >= 0x20 || ch == '\n' {
+                out.push(ch);
+            } else if ch == '\u{05}' {
+                out.push('\n');
+            }
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+fn partial_rec(s: &str, flags: u64) -> TextRec {
+    let mut parts = s.splitn(3, '\n');
+    let title = parts.next().unwrap_or("").to_string();
+    let url = parts.next().unwrap_or("").to_string();
+    let body = parts.next().unwrap_or("");
+    TextRec { title, url, text: plain_prefix(body, flags) }
+}
+
 pub struct LmCodec {
     pub model: LmModel,
     tok: Tokenizer,
@@ -244,9 +298,12 @@ impl LmCodec {
     }
 
     /// Descomprime varios registros EN LOTE (los pesos se leen una vez por paso para todos).
-    pub fn decode_records(&self, recs: &[&[u8]], parallel: bool) -> Result<Vec<TextRec>> {
+    /// - `limit`: máximo de tokens por registro (modo fragmento); el resultado es parcial.
+    /// - `title_only`: parar en el primer salto de línea (solo el título).
+    /// Devuelve (texto, parcial).
+    pub fn decode_records(&self, recs: &[&[u8]], parallel: bool, limit: Option<usize>, title_only: bool) -> Result<Vec<(TextRec, bool)>> {
         let n = recs.len();
-        let mut out: Vec<Option<TextRec>> = vec![None; n];
+        let mut out: Vec<Option<(TextRec, bool)>> = vec![None; n];
         let mut lm_idx = Vec::new();
         let mut decs = Vec::new();
         let mut ntok = Vec::new();
@@ -259,11 +316,14 @@ impl LmCodec {
                 let mut q = 0;
                 let tl = get(&raw, &mut q) as usize;
                 let ul = get(&raw, &mut q) as usize;
-                out[i] = Some(TextRec {
-                    title: String::from_utf8(raw[q..q + tl].to_vec())?,
-                    url: String::from_utf8(raw[q + tl..q + tl + ul].to_vec())?,
-                    text: String::from_utf8(raw[q + tl + ul..].to_vec())?,
-                });
+                out[i] = Some((
+                    TextRec {
+                        title: String::from_utf8(raw[q..q + tl].to_vec())?,
+                        url: String::from_utf8(raw[q + tl..q + tl + ul].to_vec())?,
+                        text: String::from_utf8(raw[q + tl + ul..].to_vec())?,
+                    },
+                    false,
+                ));
             } else {
                 lm_idx.push(i);
                 decs.push(Decoder::new(&r[p..]));
@@ -272,22 +332,28 @@ impl LmCodec {
             }
         }
         let k = lm_idx.len();
-        let mut toks: Vec<Vec<u32>> = vec![Vec::new(); k];
+        let mut bytes: Vec<Vec<u8>> = vec![Vec::new(); k];
+        let mut produced = vec![0usize; k];
         if k > 0 {
             let v = self.model.h.vocab;
+            let target: Vec<usize> = ntok.iter().map(|&t| limit.map_or(t, |l| l.min(t))).collect();
+            let mut done = vec![false; k];
             let mut batch = Batch::new(&self.model, k);
             let mut last = vec![self.model.h.bos; k];
-            let maxn = *ntok.iter().max().unwrap();
             let prof = std::env::var("HNZ_PROF").is_ok();
             let (mut t_model, mut t_code) = (0f64, 0f64);
-            for step in 0..maxn {
-                let active: Vec<usize> = (0..k).filter(|&j| step < ntok[j]).collect();
+            let mut steps = 0;
+            loop {
+                let active: Vec<usize> = (0..k).filter(|&j| !done[j] && produced[j] < target[j]).collect();
+                if active.is_empty() {
+                    break;
+                }
+                steps += 1;
                 let inp: Vec<u32> = active.iter().map(|&j| last[j]).collect();
                 let t0 = std::time::Instant::now();
                 let logits = batch.step(&active, &inp, parallel);
                 let t1 = std::time::Instant::now();
-                // muestreo inverso (softmax -> frecuencias -> decodificador) en paralelo por registro,
-                // con el mismo pool que el modelo (sin mezclar con rayon)
+                // softmax -> frecuencias -> decodificador, en paralelo por registro (mismo pool)
                 let got: Vec<std::sync::Mutex<u32>> = (0..active.len()).map(|_| std::sync::Mutex::new(0)).collect();
                 {
                     let dec_ptr = super::kernels::SendPtr(decs.as_mut_ptr());
@@ -307,8 +373,13 @@ impl LmCodec {
                 }
                 for (r, &j) in active.iter().enumerate() {
                     let t = *got[r].lock().unwrap();
-                    toks[j].push(t);
+                    let tb = self.model.token_bytes(t);
+                    bytes[j].extend_from_slice(tb);
+                    produced[j] += 1;
                     last[j] = t;
+                    if title_only && tb.contains(&b'\n') {
+                        done[j] = true;
+                    }
                 }
                 if prof {
                     t_model += (t1 - t0).as_secs_f64();
@@ -319,14 +390,18 @@ impl LmCodec {
                 let p: Vec<f64> = super::model::PROF.iter().map(|x| x.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e6).collect();
                 eprintln!(
                     "  [perfil] {} pasos: modelo {:.1} ms (matmul capas {:.1}, atención {:.1}, cabeza {:.1}), softmax+decodificador {:.1} ms",
-                    maxn, t_model * 1e3, p[0], p[1], p[2], t_code * 1e3
+                    steps, t_model * 1e3, p[0], p[1], p[2], t_code * 1e3
                 );
             }
         }
         for (j, &i) in lm_idx.iter().enumerate() {
-            let bytes: Vec<u8> = toks[j].iter().flat_map(|&t| self.model.token_bytes(t).iter().copied()).collect();
-            let s = String::from_utf8(bytes).context("UTF-8 inválido al descomprimir (¿modelo distinto?)")?;
-            out[i] = Some(parse_lm_string(&s, flags[j])?);
+            if produced[j] == ntok[j] {
+                let s = String::from_utf8(std::mem::take(&mut bytes[j])).context("UTF-8 inválido al descomprimir (¿modelo distinto?)")?;
+                out[i] = Some((parse_lm_string(&s, flags[j])?, false));
+            } else {
+                let s = String::from_utf8_lossy(&bytes[j]).to_string();
+                out[i] = Some((partial_rec(&s, flags[j]), true));
+            }
         }
         Ok(out.into_iter().map(|x| x.unwrap()).collect())
     }

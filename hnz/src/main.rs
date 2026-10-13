@@ -3,8 +3,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use hnz::bm25;
 use hnz::embed::Embedder;
 use hnz::engine::{Engine, Mode, Query};
-use hnz::segment::{self, Segment};
-use hnz::{dates, htmlx, vecs};
+use hnz::lm::store::LmCodec;
+use hnz::segment::{self, Segment, TextSource, Tier};
+use hnz::{dates, vecs};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -23,9 +24,17 @@ enum ModeArg {
     Keyword,
 }
 
+#[derive(Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum TierArg {
+    /// caliente/templado: zstd en bloques (lectura en µs)
+    Zstd,
+    /// frío: LM + codificación aritmética (máxima compresión)
+    Lm,
+}
+
 #[derive(clap::Args, Clone)]
 struct ModelArgs {
-    /// carpeta con gemma2_text_b1_s64.{xml,bin} y gemma2_tokenizer.json
+    /// carpeta de modelos (EmbeddingGemma 2 IR + tokenizer, LM .hnzlm)
     #[arg(long, env = "HNZ_MODELS", default_value = "models")]
     models: PathBuf,
     /// carpeta con openvino_c.dll
@@ -57,32 +66,40 @@ struct SearchArgs {
     dead: bool,
     #[arg(long, default_value_t = 0.15)]
     w_bm25: f32,
-    #[arg(long, default_value_t = 10.0)]
+    #[arg(long, default_value_t = 20.0)]
     c_bm25: f32,
+    /// texto completo también para el nivel LM (por defecto: fragmento de 64 tokens)
+    #[arg(long)]
+    full: bool,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Construye un segmento (meta + texto) a partir de Parquet mensuales
+    /// Construye un segmento (meta + texto + BM25) a partir de Parquet mensuales
     Build {
         #[arg(long)]
         out: PathBuf,
+        #[arg(long, value_enum, default_value = "zstd")]
+        tier: TierArg,
         #[arg(long, default_value_t = 16)]
         block: usize,
         #[arg(long, default_value_t = 19)]
         level: i32,
+        /// modelo LM para --tier lm
+        #[arg(long, default_value = "models/lm-pythia-70m.hnzlm")]
+        lm: PathBuf,
         parquet: Vec<PathBuf>,
     },
-    /// Construye los índices de un segmento: BM25 y (si se dan embeddings) vectores binarios
+    /// Añade el índice vectorial (binario) a un segmento a partir de embeddings
     Index {
         #[arg(long)]
         seg: PathBuf,
         /// embeddings float16 (N x 768) de embed_month.py
         #[arg(long)]
-        emb: Option<PathBuf>,
+        emb: PathBuf,
         /// ids (uint32) correspondientes a los embeddings
         #[arg(long)]
-        ids: Option<PathBuf>,
+        ids: PathBuf,
         /// bits por vector (MRL: 768, 512, 256)
         #[arg(long, default_value_t = 768)]
         bits: usize,
@@ -100,7 +117,7 @@ enum Cmd {
         json: bool,
         query: Vec<String>,
     },
-    /// Servidor HTTP: GET /search?q=..&k=10&from=2015&to=2018&mode=hybrid  (y una página en /)
+    /// Servidor HTTP: GET /search?q=..&k=10&from=2015&to=2018&mode=hybrid, /item/<id>, página en /
     Serve {
         #[arg(long, default_value = "out")]
         root: PathBuf,
@@ -120,7 +137,7 @@ enum Cmd {
         #[command(flatten)]
         m: ModelArgs,
     },
-    /// Prueba del nivel frío: comprime y descomprime (en lote) una muestra con el LM y verifica
+    /// Prueba del nivel frío sobre un segmento zstd: comprime y descomprime (en lote) una muestra
     Lmtest {
         #[arg(long)]
         seg: PathBuf,
@@ -133,26 +150,34 @@ enum Cmd {
     },
     /// Muestra un ítem por id de HN
     Get {
-        #[arg(long)]
-        seg: PathBuf,
+        #[arg(long, default_value = "out")]
+        root: PathBuf,
+        #[command(flatten)]
+        m: ModelArgs,
         id: u32,
     },
     /// Comprueba que TODOS los registros se recuperan idénticos al Parquet original
     Verify {
         #[arg(long)]
         seg: PathBuf,
+        #[arg(long, env = "HNZ_MODELS", default_value = "models")]
+        models: PathBuf,
         parquet: Vec<PathBuf>,
     },
-    /// Tamaño por componente y bytes/ítem
+    /// Tamaño por componente y bytes/ítem (de un segmento o de toda la carpeta)
     Stats {
         #[arg(long)]
-        seg: PathBuf,
+        seg: Option<PathBuf>,
+        #[arg(long, default_value = "out")]
+        root: PathBuf,
     },
-    /// Mide la latencia de lectura aleatoria de registros
+    /// Latencia de lectura aleatoria (zstd: registros sueltos; LM: lotes de 10)
     Bench {
         #[arg(long)]
         seg: PathBuf,
-        #[arg(long, default_value_t = 2000)]
+        #[arg(long, env = "HNZ_MODELS", default_value = "models")]
+        models: PathBuf,
+        #[arg(long, default_value_t = 200)]
         n: usize,
     },
 }
@@ -195,22 +220,25 @@ fn make_query(text: &str, s: &SearchArgs) -> Result<Query> {
     })
 }
 
-fn cmd_lmtest(seg: &Path, lm: &Path, n: usize, batch: usize) -> Result<()> {
-    use hnz::lm::store::LmCodec;
-    let s = Segment::open(seg)?;
-    let t0 = Instant::now();
-    let codec = LmCodec::load(lm)?;
-    eprintln!("modelo {} cargado en {:.0} ms", codec.model.id, t0.elapsed().as_secs_f64() * 1e3);
-    let mut x: u64 = 0x2545F4914F6CDD1D;
-    let docs: Vec<usize> = (0..n)
+fn rand_docs(n: usize, max: usize, seed: u64) -> Vec<usize> {
+    let mut x = seed;
+    (0..n)
         .map(|_| {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
-            (x % s.man.n_docs as u64) as usize
+            (x % max as u64) as usize
         })
-        .collect();
-    let recs: Vec<hnz::textstore::TextRec> = docs.iter().map(|&d| s.text.get(d)).collect::<Result<_>>()?;
+        .collect()
+}
+
+fn cmd_lmtest(seg: &Path, lm: &Path, n: usize, batch: usize) -> Result<()> {
+    let s = Segment::open(seg)?;
+    let t0 = Instant::now();
+    let codec = LmCodec::load(lm)?;
+    eprintln!("modelo {} cargado en {:.0} ms", codec.model.id, t0.elapsed().as_secs_f64() * 1e3);
+    let docs = rand_docs(n, s.man.n_docs, 0x2545F4914F6CDD1D);
+    let recs: Vec<hnz::textstore::TextRec> = docs.iter().map(|&d| s.zstd_text(d)).collect::<Result<_>>()?;
     let raw: usize = recs.iter().map(|r| r.title.len() + r.url.len() + r.text.len() + 2).sum();
     let t1 = Instant::now();
     let enc: Vec<(Vec<u8>, u64)> = recs.par_iter().map(|r| codec.encode_record(&r.title, &r.url, &r.text)).collect();
@@ -230,16 +258,15 @@ fn cmd_lmtest(seg: &Path, lm: &Path, n: usize, batch: usize) -> Result<()> {
         toks as f64 / te,
         rayon::current_num_threads()
     );
-    // decodificar en lotes (como al responder una consulta) y verificar
     let t2 = Instant::now();
     let mut bad = 0;
     let mut times = Vec::new();
     for (bi, chunk) in enc.chunks(batch).enumerate() {
         let tb = Instant::now();
         let refs: Vec<&[u8]> = chunk.iter().map(|e| &e.0[..]).collect();
-        let out = codec.decode_records(&refs, true)?;
+        let out = codec.decode_records(&refs, true, None, false)?;
         times.push(tb.elapsed().as_secs_f64() * 1e3);
-        for (j, o) in out.iter().enumerate() {
+        for (j, (o, _)) in out.iter().enumerate() {
             if *o != recs[bi * batch + j] {
                 if bad < 3 {
                     eprintln!("DIFERENCIA doc {}:\n  orig {:?}\n  dec  {:?}", docs[bi * batch + j], recs[bi * batch + j], o);
@@ -264,7 +291,7 @@ fn cmd_lmtest(seg: &Path, lm: &Path, n: usize, batch: usize) -> Result<()> {
 }
 
 fn cmd_eval(root: &Path, file: &Path, k: usize, m: &ModelArgs) -> Result<()> {
-    let eng = Engine::open(root)?;
+    let eng = Engine::open(root, &m.models)?;
     let mut emb = Embedder::new(&m.models, &m.ov_libs)?;
     let qs: Vec<(String, u32)> = std::fs::read_to_string(file)?
         .lines()
@@ -324,47 +351,6 @@ fn cmd_eval(root: &Path, file: &Path, k: usize, m: &ModelArgs) -> Result<()> {
     Ok(())
 }
 
-/// Texto que se indexa con BM25: título + dominio de la url + texto plano.
-fn index_text(title: &str, url: &str, html: &str) -> String {
-    let host = url.split("://").nth(1).unwrap_or("").split('/').next().unwrap_or("");
-    format!("{title} {host} {}", htmlx::to_plain(html))
-}
-
-fn cmd_index(seg: &Path, emb: Option<PathBuf>, ids: Option<PathBuf>, bits: usize) -> Result<()> {
-    let t0 = Instant::now();
-    let s = Segment::open(seg)?;
-    let mut b = bm25::Builder::new();
-    let nb = s.text.n_blocks();
-    let chunk = 4096; // bloques por lote
-    for c0 in (0..nb).step_by(chunk) {
-        let texts: Vec<String> = (c0..(c0 + chunk).min(nb))
-            .into_par_iter()
-            .flat_map_iter(|bi| s.text.get_block(bi).expect("bloque").into_iter().map(|r| index_text(&r.title, &r.url, &r.text)))
-            .collect();
-        b.add_batch(&texts);
-    }
-    let info = b.write(seg)?;
-    eprintln!(
-        "BM25: {} docs, {} términos, {} postings, avgdl {:.1} ({:.1}s)",
-        info.n_docs,
-        info.n_terms,
-        info.n_postings,
-        info.avgdl,
-        t0.elapsed().as_secs_f64()
-    );
-    let mut man = s.man.clone();
-    man.has_bm25 = true;
-    if let (Some(e), Some(i)) = (emb, ids) {
-        let t1 = Instant::now();
-        let doc_ids: Vec<u32> = (0..s.meta.n_blocks()).flat_map(|bi| s.meta.block(bi).into_iter().map(|r| r.id)).collect();
-        let matched = vecs::build(seg, &doc_ids, &e, &i, bits)?;
-        man.vec_bits = bits;
-        eprintln!("vectores: {matched}/{} docs con embedding, {bits} bits ({:.1}s)", doc_ids.len(), t1.elapsed().as_secs_f64());
-    }
-    segment::write_manifest(seg, &man)?;
-    Ok(())
-}
-
 fn print_results(res: &[hnz::engine::ResultItem]) {
     for r in res {
         let head = if !r.title.is_empty() {
@@ -372,14 +358,17 @@ fn print_results(res: &[hnz::engine::ResultItem]) {
         } else {
             format!("re: {}", r.story_title.clone().unwrap_or_else(|| "(hilo)".into()))
         };
-        println!("\n#{} [{} | {} | {} | {} pts] score {:.3} (v {:.3}, bm25 {:.2})", r.rank, r.kind, r.date, r.by, r.points, r.score, r.vscore, r.bm25);
+        println!(
+            "\n#{} [{} | {} | {} | {} pts | {}] score {:.3} (v {:.3}, bm25 {:.2})",
+            r.rank, r.kind, r.date, r.by, r.points, r.tier, r.score, r.vscore, r.bm25
+        );
         println!("   {head}");
         if !r.url.is_empty() {
             println!("   {}", r.url);
         }
         let t: String = r.text.chars().take(300).collect::<String>().replace('\n', " ");
         if !t.is_empty() {
-            println!("   {t}{}", if r.text.chars().count() > 300 { "…" } else { "" });
+            println!("   {t}{}", if r.text.chars().count() > 300 || r.partial { "…" } else { "" });
         }
         println!("   {}", r.link);
     }
@@ -417,20 +406,37 @@ fn query_param(url: &str, key: &str) -> Option<String> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Build { out, block, level, parquet } => {
+        Cmd::Build { out, tier, block, level, lm, parquet } => {
             let t0 = Instant::now();
             let (items, deleted) = segment::load_items(&parquet)?;
             eprintln!("leídos {} ítems ({} borrados omitidos) en {:.1}s", items.len(), deleted, t0.elapsed().as_secs_f64());
             let name = out.file_name().unwrap().to_string_lossy().to_string();
-            let m = segment::build_store(&items, deleted, &out, &name, block, level)?;
-            eprintln!("segmento {} listo: {} docs en {:.1}s", m.name, m.n_docs, t0.elapsed().as_secs_f64());
+            let codec;
+            let t = match tier {
+                TierArg::Zstd => Tier::Zstd { block, level },
+                TierArg::Lm => {
+                    codec = LmCodec::load(&lm)?;
+                    Tier::Lm { codec: &codec, model_file: lm.file_name().unwrap().to_string_lossy().to_string() }
+                }
+            };
+            let m = segment::build(&items, deleted, &out, &name, t)?;
+            eprintln!("segmento {} ({}) listo: {} docs en {:.1}s", m.name, m.text_tier, m.n_docs, t0.elapsed().as_secs_f64());
         }
-        Cmd::Index { seg, emb, ids, bits } => cmd_index(&seg, emb, ids, bits)?,
+        Cmd::Index { seg, emb, ids, bits } => {
+            let t1 = Instant::now();
+            let s = Segment::open(&seg)?;
+            let doc_ids: Vec<u32> = (0..s.meta.n_blocks()).flat_map(|bi| s.meta.block(bi).into_iter().map(|r| r.id)).collect();
+            let matched = vecs::build(&seg, &doc_ids, &emb, &ids, bits)?;
+            let mut man = s.man.clone();
+            man.vec_bits = bits;
+            segment::write_manifest(&seg, &man)?;
+            eprintln!("vectores: {matched}/{} docs con embedding, {bits} bits ({:.1}s)", doc_ids.len(), t1.elapsed().as_secs_f64());
+        }
         Cmd::Search { root, s, m, json, query } => {
             let text = query.join(" ");
             let q = make_query(&text, &s)?;
             let t0 = Instant::now();
-            let eng = Engine::open(&root)?;
+            let eng = Engine::open(&root, &m.models)?;
             let t_open = t0.elapsed();
             let mut emb = if q.mode != Mode::Keyword { Some(Embedder::new(&m.models, &m.ov_libs)?) } else { None };
             let t_load = t0.elapsed();
@@ -444,29 +450,33 @@ fn main() -> Result<()> {
             let hits = eng.search(&q, qv.as_deref());
             let t_search = t2.elapsed();
             let t3 = Instant::now();
-            let res = eng.fetch(&hits)?;
+            let res = eng.fetch(&hits, s.full)?;
             let t_fetch = t3.elapsed();
             if json {
                 println!("{}", serde_json::to_string_pretty(&res)?);
             } else {
                 print_results(&res);
             }
+            let n_lm = res.iter().filter(|r| r.tier == "lm").count();
             eprintln!(
-                "\n[{} docs en {} segmentos | abrir {:.0} ms, cargar modelo {:.0} ms | embedding {:.1} ms, búsqueda {:.1} ms, recuperar+descomprimir {:.1} ms]",
+                "\n[{} docs en {} segmentos | abrir {:.0} ms, cargar modelos {:.0} ms | embedding {:.1} ms, búsqueda {:.1} ms, recuperar+descomprimir {:.1} ms ({} del nivel LM{})]",
                 eng.total_docs,
                 eng.segs.len(),
                 t_open.as_secs_f64() * 1e3,
                 (t_load - t_open).as_secs_f64() * 1e3,
                 t_emb.as_secs_f64() * 1e3,
                 t_search.as_secs_f64() * 1e3,
-                t_fetch.as_secs_f64() * 1e3
+                t_fetch.as_secs_f64() * 1e3,
+                n_lm,
+                if s.full { ", completos" } else { ", fragmentos" }
             );
         }
         Cmd::Serve { root, port, m } => {
-            let eng = Engine::open(&root)?;
+            let eng = Engine::open(&root, &m.models)?;
             let emb = std::sync::Mutex::new(Embedder::new(&m.models, &m.ov_libs)?);
             let server = tiny_http::Server::http(("127.0.0.1", port)).map_err(|e| anyhow::anyhow!("{e}"))?;
             eprintln!("hnz: {} docs en {} segmentos — http://127.0.0.1:{port}/", eng.total_docs, eng.segs.len());
+            let json_hdr = || "Content-Type: application/json; charset=utf-8".parse::<tiny_http::Header>().unwrap();
             for req in server.incoming_requests() {
                 let url = req.url().to_string();
                 let resp = if url == "/" || url.starts_with("/?") {
@@ -475,21 +485,22 @@ fn main() -> Result<()> {
                 } else if url.starts_with("/search") {
                     let body = (|| -> Result<String> {
                         let text = query_param(&url, "q").unwrap_or_default();
-                        let mut s = SearchArgs {
+                        let mode = match query_param(&url, "mode").as_deref() {
+                            Some("vector") => ModeArg::Vector,
+                            Some("keyword") => ModeArg::Keyword,
+                            _ => ModeArg::Hybrid,
+                        };
+                        let s = SearchArgs {
                             k: query_param(&url, "k").and_then(|x| x.parse().ok()).unwrap_or(10),
                             from: query_param(&url, "from").filter(|x| !x.is_empty()),
                             to: query_param(&url, "to").filter(|x| !x.is_empty()),
-                            mode: ModeArg::Hybrid,
+                            mode,
                             r#type: query_param(&url, "type").filter(|x| !x.is_empty()).map(|x| x.split(',').map(String::from).collect()).unwrap_or_default(),
                             by: query_param(&url, "by").filter(|x| !x.is_empty()),
                             dead: false,
                             w_bm25: 0.15,
-                            c_bm25: 10.0,
-                        };
-                        s.mode = match query_param(&url, "mode").as_deref() {
-                            Some("vector") => ModeArg::Vector,
-                            Some("keyword") => ModeArg::Keyword,
-                            _ => ModeArg::Hybrid,
+                            c_bm25: 20.0,
+                            full: query_param(&url, "full").is_some_and(|x| x == "1" || x == "true"),
                         };
                         let q = make_query(&text, &s)?;
                         let t0 = Instant::now();
@@ -497,7 +508,7 @@ fn main() -> Result<()> {
                         let t_emb = t0.elapsed();
                         let hits = eng.search(&q, qv.as_deref());
                         let t_s = t0.elapsed();
-                        let res = eng.fetch(&hits)?;
+                        let res = eng.fetch(&hits, s.full)?;
                         let t_all = t0.elapsed();
                         Ok(serde_json::to_string(&serde_json::json!({
                             "query": text, "k": q.k, "results": res,
@@ -506,15 +517,19 @@ fn main() -> Result<()> {
                         }))?)
                     })()
                     .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}).to_string());
-                    tiny_http::Response::from_string(body)
-                        .with_header("Content-Type: application/json; charset=utf-8".parse::<tiny_http::Header>().unwrap())
+                    tiny_http::Response::from_string(body).with_header(json_hdr())
                 } else if let Some(id) = url.strip_prefix("/item/").and_then(|x| x.parse::<u32>().ok()) {
+                    let t0 = Instant::now();
                     let body = match eng.get(id) {
-                        Ok(Some(it)) => serde_json::to_string(&it).unwrap(),
+                        Ok(Some(it)) => {
+                            let mut v = serde_json::to_value(&it).unwrap();
+                            v["text_plain"] = serde_json::Value::String(hnz::htmlx::to_plain(&it.text));
+                            v["ms"] = serde_json::json!(t0.elapsed().as_secs_f64() * 1e3);
+                            v.to_string()
+                        }
                         _ => serde_json::json!({"error": "no encontrado"}).to_string(),
                     };
-                    tiny_http::Response::from_string(body)
-                        .with_header("Content-Type: application/json; charset=utf-8".parse::<tiny_http::Header>().unwrap())
+                    tiny_http::Response::from_string(body).with_header(json_hdr())
                 } else {
                     tiny_http::Response::from_string("not found").with_status_code(404)
                 };
@@ -523,78 +538,148 @@ fn main() -> Result<()> {
         }
         Cmd::Eval { root, file, k, m } => cmd_eval(&root, &file, k, &m)?,
         Cmd::Lmtest { seg, lm, n, batch } => cmd_lmtest(&seg, &lm, n, batch)?,
-        Cmd::Get { seg, id } => {
-            let s = Segment::open(&seg)?;
-            match s.meta.doc_of_id(id) {
-                Some(d) => println!("{}", serde_json::to_string_pretty(&s.item(d)?)?),
-                None => bail!("id {id} no está en el segmento"),
+        Cmd::Get { root, m, id } => {
+            let eng = Engine::open(&root, &m.models)?;
+            match eng.get(id)? {
+                Some(it) => println!("{}", serde_json::to_string_pretty(&it)?),
+                None => bail!("id {id} no está en el archivo"),
             }
         }
-        Cmd::Verify { seg, parquet } => {
+        Cmd::Verify { seg, models, parquet } => {
             let t0 = Instant::now();
             let s = Segment::open(&seg)?;
             let (items, _) = segment::load_items(&parquet)?;
             if items.len() != s.man.n_docs {
                 bail!("nº de docs distinto: parquet {} vs segmento {}", items.len(), s.man.n_docs);
             }
-            let bad: usize = (0..s.text.n_blocks())
-                .into_par_iter()
-                .map(|b| {
-                    let texts = s.text.get_block(b).expect("bloque de texto");
-                    let mut bad = 0;
-                    for (k, t) in texts.into_iter().enumerate() {
-                        let doc = b * s.text.block + k;
-                        let m = s.meta.row(doc);
-                        let got = segment::join(&m, t, &s.meta.authors);
-                        if got != items[doc] {
-                            if bad < 3 {
-                                eprintln!("DIFERENCIA en id {}:\n  orig {:?}\n  leído {:?}", items[doc].id, items[doc], got);
+            let bad: usize = match &s.text {
+                TextSource::Zstd(ts) => (0..ts.n_blocks())
+                    .into_par_iter()
+                    .map(|b| {
+                        let texts = ts.get_block(b).expect("bloque de texto");
+                        let mut bad = 0;
+                        for (k, t) in texts.into_iter().enumerate() {
+                            let doc = b * ts.block + k;
+                            let got = segment::join(&s.meta.row(doc), t, &s.meta.authors);
+                            if got != items[doc] {
+                                if bad < 3 {
+                                    eprintln!("DIFERENCIA en id {}:\n  orig {:?}\n  leído {:?}", items[doc].id, items[doc], got);
+                                }
+                                bad += 1;
                             }
-                            bad += 1;
+                        }
+                        bad
+                    })
+                    .sum(),
+                TextSource::Lm(ls) => {
+                    let codec = LmCodec::load(&models.join(s.man.lm_model.as_ref().context("lm_model")?))?;
+                    ls.check_model(&codec)?;
+                    let mut bad = 0;
+                    let bs = 64;
+                    for c0 in (0..s.man.n_docs).step_by(bs) {
+                        let docs: Vec<usize> = (c0..(c0 + bs).min(s.man.n_docs)).collect();
+                        let raws: Vec<&[u8]> = docs.iter().map(|&d| ls.raw(d)).collect();
+                        let dec = codec.decode_records(&raws, true, None, false)?;
+                        for (&d, (t, _)) in docs.iter().zip(dec) {
+                            let got = segment::join(&s.meta.row(d), t, &s.meta.authors);
+                            if got != items[d] {
+                                if bad < 3 {
+                                    eprintln!("DIFERENCIA en id {}:\n  orig {:?}\n  leído {:?}", items[d].id, items[d], got);
+                                }
+                                bad += 1;
+                            }
+                        }
+                        if c0 % (bs * 100) == 0 && c0 > 0 {
+                            eprintln!("  verificados {c0}/{} ({:.0} reg/s)", s.man.n_docs, c0 as f64 / t0.elapsed().as_secs_f64());
                         }
                     }
                     bad
-                })
-                .sum();
+                }
+            };
             if bad > 0 {
                 bail!("{bad} registros difieren");
             }
             println!("OK: {} registros idénticos al original ({:.1}s)", items.len(), t0.elapsed().as_secs_f64());
         }
-        Cmd::Stats { seg } => {
-            let m = segment::read_manifest(&seg)?;
-            let sz = segment::sizes(&seg)?;
-            let total: u64 = sz.iter().map(|x| x.1).sum();
-            println!("segmento {}: {} docs, tier {} (bloque {}, zstd-{})", m.name, m.n_docs, m.text_tier, m.text_block, m.text_level);
-            for (f, b) in &sz {
-                println!("  {:<16} {:>12} B  {:>7.2} B/doc", f, b, *b as f64 / m.n_docs as f64);
+        Cmd::Stats { seg, root } => {
+            let dirs: Vec<PathBuf> = match seg {
+                Some(s) => vec![s],
+                None => {
+                    let mut v: Vec<PathBuf> = std::fs::read_dir(&root)?.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.join("manifest.json").exists()).collect();
+                    v.sort();
+                    v
+                }
+            };
+            let mut all_docs = 0usize;
+            let mut all_bytes = 0u64;
+            let mut by_kind: std::collections::BTreeMap<&str, u64> = Default::default();
+            for d in &dirs {
+                let m = segment::read_manifest(d)?;
+                let sz = segment::sizes(d)?;
+                let total: u64 = sz.iter().map(|x| x.1).sum();
+                println!("segmento {}: {} docs, nivel {}, {:.1} B/doc", m.name, m.n_docs, m.text_tier, total as f64 / m.n_docs as f64);
+                for (f, b) in &sz {
+                    if dirs.len() == 1 {
+                        println!("  {:<16} {:>12} B  {:>7.2} B/doc", f, b, *b as f64 / m.n_docs as f64);
+                    }
+                    let kind = if f.starts_with("text") || f.starts_with("lm.") {
+                        "texto"
+                    } else if f.starts_with("meta") || f.starts_with("authors") {
+                        "metadatos"
+                    } else if f.starts_with("bm25") {
+                        "BM25"
+                    } else if f.starts_with("vec") {
+                        "vectores"
+                    } else {
+                        "otros"
+                    };
+                    *by_kind.entry(kind).or_default() += b;
+                }
+                all_docs += m.n_docs;
+                all_bytes += total;
             }
-            println!(
-                "  TOTAL            {:>12} B  {:>7.2} B/doc  -> 49,3M: {:.2} GB",
-                total,
-                total as f64 / m.n_docs as f64,
-                total as f64 / m.n_docs as f64 * 49.3e6 / 1e9
-            );
+            println!("TOTAL: {} docs, {} B = {:.1} B/doc", all_docs, all_bytes, all_bytes as f64 / all_docs as f64);
+            for (k, b) in by_kind {
+                println!("  {:<10} {:>7.1} B/doc  -> 49,3M: {:.2} GB", k, b as f64 / all_docs as f64, b as f64 / all_docs as f64 * 49.3e6 / 1e9);
+            }
+            println!("  {:<10} {:>7.1} B/doc  -> 49,3M: {:.2} GB", "TOTAL", all_bytes as f64 / all_docs as f64, all_bytes as f64 / all_docs as f64 * 49.3e6 / 1e9);
         }
-        Cmd::Bench { seg, n } => {
+        Cmd::Bench { seg, models, n } => {
             let s = Segment::open(&seg)?;
-            let mut x: u64 = 0x9E3779B97F4A7C15;
-            let docs: Vec<usize> = (0..n)
-                .map(|_| {
-                    x ^= x << 13;
-                    x ^= x >> 7;
-                    x ^= x << 17;
-                    (x % s.man.n_docs as u64) as usize
-                })
-                .collect();
-            let t0 = Instant::now();
-            let mut bytes = 0;
-            for &d in &docs {
-                bytes += s.item(d)?.text.len();
+            let docs = rand_docs(n, s.man.n_docs, 0x9E3779B97F4A7C15);
+            match &s.text {
+                TextSource::Zstd(_) => {
+                    let t0 = Instant::now();
+                    let mut bytes = 0;
+                    for &d in &docs {
+                        bytes += s.item(d, None)?.text.len();
+                    }
+                    let dt = t0.elapsed().as_secs_f64();
+                    println!("{} lecturas aleatorias (1 hilo, sin caché): {:.1} µs/registro ({} B de texto)", n, dt / n as f64 * 1e6, bytes);
+                }
+                TextSource::Lm(ls) => {
+                    let codec = LmCodec::load(&models.join(s.man.lm_model.as_ref().context("lm_model")?))?;
+                    for (label, limit) in [("fragmento (64 tokens)", Some(64usize)), ("completo", None)] {
+                        let mut times = Vec::new();
+                        for c in docs.chunks(10) {
+                            let raws: Vec<&[u8]> = c.iter().map(|&d| ls.raw(d)).collect();
+                            let t = Instant::now();
+                            codec.decode_records(&raws, true, limit, false)?;
+                            times.push(t.elapsed().as_secs_f64() * 1e3);
+                        }
+                        times.sort_by(|a, b| a.total_cmp(b));
+                        println!(
+                            "nivel LM, lotes de 10 aleatorios, {label}: mediana {:.0} ms, p90 {:.0} ms",
+                            times[times.len() / 2],
+                            times[times.len() * 9 / 10]
+                        );
+                    }
+                }
             }
-            let dt = t0.elapsed().as_secs_f64();
-            println!("{} lecturas aleatorias (1 hilo, sin caché): {:.1} µs/registro ({} B de texto)", n, dt / n as f64 * 1e6, bytes);
         }
     }
     Ok(())
 }
+
+#[allow(dead_code)]
+fn unused(_: bm25::Bm25Info) {}

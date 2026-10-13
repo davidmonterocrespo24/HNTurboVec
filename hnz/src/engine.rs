@@ -1,16 +1,25 @@
 //! Motor de consulta: reparte la búsqueda entre segmentos (en paralelo), aplica filtros de fecha
 //! como rangos de docIDs, fusiona vectores + BM25 y arma los resultados con el contexto del hilo.
+//! Los resultados de segmentos del nivel LM se descomprimen TODOS en un mismo lote.
 
 use crate::bm25::{Bm25, TermPost};
 use crate::item::Item;
+use crate::lm::store::LmCodec;
 use crate::meta::MetaRow;
-use crate::segment::Segment;
+use crate::segment::{Segment, TextSource};
+use crate::textstore::TextRec;
 use crate::vecs::{QueryLut, VecIndex};
 use crate::{dates, htmlx, tokenize};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rayon::prelude::*;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// Tokens que se decodifican por resultado del nivel LM en modo fragmento.
+pub const SNIPPET_TOKENS: usize = 64;
+const CACHE_MAX: usize = 20_000;
 
 pub struct Seg {
     pub s: Segment,
@@ -21,6 +30,9 @@ pub struct Seg {
 pub struct Engine {
     pub segs: Vec<Seg>,
     pub total_docs: usize,
+    pub lm: Option<LmCodec>,
+    /// caché L1 (RAM) de registros del nivel LM ya descomprimidos completos
+    cache: Mutex<HashMap<(usize, u32), TextRec>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,7 +74,7 @@ impl Default for Query {
             by: None,
             include_dead: false,
             w_bm25: 0.15,
-            c_bm25: 10.0,
+            c_bm25: 20.0,
             vec_cand: None,
         }
     }
@@ -90,8 +102,12 @@ pub struct ResultItem {
     pub url: String,
     /// texto plano (para leer / RAG)
     pub text: String,
-    /// HTML original de HN (literal)
+    /// HTML original de HN (literal); vacío si `partial`
     pub html: String,
+    /// true = solo el principio del texto (nivel LM en modo fragmento); el completo en /item/<id>
+    pub partial: bool,
+    /// "zstd" o "lm"
+    pub tier: &'static str,
     pub parent_id: Option<u32>,
     pub story_id: Option<u32>,
     pub story_title: Option<String>,
@@ -113,26 +129,39 @@ pub fn kind_name(t: u8) -> &'static str {
 }
 
 impl Engine {
-    pub fn open(root: &Path) -> Result<Self> {
+    /// Abre todos los segmentos de `root`. Si alguno es del nivel LM carga el modelo de `models`.
+    pub fn open(root: &Path, models: &Path) -> Result<Self> {
         let dirs: Vec<PathBuf> = std::fs::read_dir(root)?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| p.join("manifest.json").exists())
             .collect();
         let mut segs = Vec::new();
+        let mut lm_file: Option<String> = None;
         for d in dirs {
             let s = Segment::open(&d)?;
+            if let Some(f) = &s.man.lm_model {
+                lm_file.get_or_insert_with(|| f.clone());
+            }
             let bm25 = if d.join("bm25.fst").exists() { Some(Bm25::open(&d)?) } else { None };
-            let vec = if s.man.vec_bits > 0 && d.join("vec.bin").exists() {
-                Some(VecIndex::open(&d, s.man.vec_bits)?)
-            } else {
-                None
-            };
+            let vec = if s.man.vec_bits > 0 && d.join("vec.bin").exists() { Some(VecIndex::open(&d, s.man.vec_bits)?) } else { None };
             segs.push(Seg { s, bm25, vec });
         }
         segs.sort_by_key(|x| x.s.man.id_min);
+        let lm = match lm_file {
+            Some(f) => {
+                let c = LmCodec::load(&models.join(&f)).with_context(|| format!("modelo LM {f}"))?;
+                for sg in &segs {
+                    if let TextSource::Lm(l) = &sg.s.text {
+                        l.check_model(&c)?;
+                    }
+                }
+                Some(c)
+            }
+            None => None,
+        };
         let total_docs = segs.iter().map(|x| x.s.man.n_docs).sum();
-        Ok(Self { segs, total_docs })
+        Ok(Self { segs, total_docs, lm, cache: Mutex::new(HashMap::new()) })
     }
 
     pub fn search(&self, q: &Query, qvec: Option<&[f32]>) -> Vec<Hit> {
@@ -239,9 +268,53 @@ impl Engine {
         Some((si, doc, sg.s.meta.row(doc)))
     }
 
+    /// Textos de varios documentos: zstd directo, LM en un único lote (con caché L1).
+    /// `limit`: tokens máximos para el nivel LM (fragmento); `title_only`: solo títulos.
+    pub fn texts(&self, docs: &[(usize, usize)], limit: Option<usize>, title_only: bool) -> Result<Vec<(TextRec, bool)>> {
+        let mut out: Vec<Option<(TextRec, bool)>> = vec![None; docs.len()];
+        let mut pending: Vec<usize> = Vec::new();
+        {
+            let cache = self.cache.lock().unwrap();
+            for (i, &(si, doc)) in docs.iter().enumerate() {
+                match &self.segs[si].s.text {
+                    TextSource::Zstd(t) => out[i] = Some((t.get(doc)?, false)),
+                    TextSource::Lm(_) => match cache.get(&(si, doc as u32)) {
+                        Some(r) => out[i] = Some((r.clone(), false)),
+                        None => pending.push(i),
+                    },
+                }
+            }
+        }
+        if !pending.is_empty() {
+            let codec = self.lm.as_ref().context("falta el modelo LM")?;
+            let raws: Vec<&[u8]> = pending
+                .iter()
+                .map(|&i| match &self.segs[docs[i].0].s.text {
+                    TextSource::Lm(l) => l.raw(docs[i].1),
+                    _ => unreachable!(),
+                })
+                .collect();
+            let dec = codec.decode_records(&raws, true, limit, title_only)?;
+            let mut cache = self.cache.lock().unwrap();
+            for (&i, (rec, partial)) in pending.iter().zip(dec) {
+                if !partial {
+                    if cache.len() >= CACHE_MAX {
+                        cache.clear();
+                    }
+                    cache.insert((docs[i].0, docs[i].1 as u32), rec.clone());
+                }
+                out[i] = Some((rec, partial));
+            }
+        }
+        Ok(out.into_iter().map(|x| x.unwrap()).collect())
+    }
+
     pub fn get(&self, id: u32) -> Result<Option<Item>> {
         match self.find_meta(id) {
-            Some((si, doc, _)) => Ok(Some(self.segs[si].s.item(doc)?)),
+            Some((si, doc, m)) => {
+                let (t, _) = self.texts(&[(si, doc)], None, false)?.remove(0);
+                Ok(Some(crate::segment::join(&m, t, &self.segs[si].s.meta.authors)))
+            }
             None => Ok(None),
         }
     }
@@ -265,54 +338,56 @@ impl Engine {
         id
     }
 
-    /// Story raíz de un comentario (recorriendo `parent`).
-    pub fn thread_root(&self, it: &Item) -> (Option<u32>, Option<String>) {
-        if it.parent == 0 {
-            return (None, None);
-        }
-        let mut cur = it.parent;
-        for _ in 0..256 {
-            match self.find_meta(cur) {
-                Some((si, doc, row)) => {
-                    if row.parent == 0 {
-                        let title = self.segs[si].s.text.get(doc).map(|t| t.title).unwrap_or_default();
-                        return (Some(cur), Some(title));
-                    }
-                    cur = row.parent;
-                }
-                None => return (Some(cur), None),
+    /// Resultados completos. `full=false`: en el nivel LM solo se decodifica un fragmento.
+    pub fn fetch(&self, hits: &[Hit], full: bool) -> Result<Vec<ResultItem>> {
+        let rows: Vec<MetaRow> = hits.iter().map(|h| self.segs[h.seg].s.meta.row(h.doc as usize)).collect();
+        let docs: Vec<(usize, usize)> = hits.iter().map(|h| (h.seg, h.doc as usize)).collect();
+        let texts = self.texts(&docs, if full { None } else { Some(SNIPPET_TOKENS) }, false)?;
+        // contexto del hilo: story raíz de cada comentario (títulos en un solo lote)
+        let roots: Vec<Option<u32>> = hits
+            .iter()
+            .zip(&rows)
+            .map(|(h, r)| if r.parent == 0 { None } else { Some(self.root_id(h.seg, h.doc)) })
+            .collect();
+        let mut root_docs: Vec<(usize, usize)> = Vec::new();
+        let mut root_pos: HashMap<u32, usize> = HashMap::new();
+        for r in roots.iter().flatten() {
+            if root_pos.contains_key(r) {
+                continue;
+            }
+            if let Some((si, doc, _)) = self.find_meta(*r) {
+                root_pos.insert(*r, root_docs.len());
+                root_docs.push((si, doc));
             }
         }
-        (Some(cur), None)
-    }
-
-    pub fn fetch(&self, hits: &[Hit]) -> Result<Vec<ResultItem>> {
-        hits.par_iter()
-            .enumerate()
-            .map(|(i, h)| {
-                let it = self.segs[h.seg].s.item(h.doc as usize)?;
-                let (sid, stitle) = self.thread_root(&it);
-                Ok(ResultItem {
-                    rank: i + 1,
-                    id: it.id,
-                    kind: kind_name(it.typ),
-                    date: dates::fmt(it.time),
-                    time: it.time,
-                    points: it.score,
-                    text: htmlx::to_plain(&it.text),
-                    link: format!("https://news.ycombinator.com/item?id={}", it.id),
-                    parent_id: if it.parent == 0 { None } else { Some(it.parent) },
-                    story_id: sid,
-                    story_title: stitle,
-                    score: h.score,
-                    vscore: h.v,
-                    bm25: h.b,
-                    by: it.by,
-                    title: it.title,
-                    url: it.url,
-                    html: it.text,
-                })
-            })
-            .collect()
+        let root_titles = self.texts(&root_docs, None, true)?;
+        let mut out = Vec::with_capacity(hits.len());
+        for (i, ((h, m), (t, partial))) in hits.iter().zip(&rows).zip(texts).enumerate() {
+            let story_id = roots[i];
+            let story_title = story_id.and_then(|r| root_pos.get(&r)).map(|&p| root_titles[p].0.title.clone());
+            out.push(ResultItem {
+                rank: i + 1,
+                id: m.id,
+                kind: kind_name(m.typ),
+                by: self.segs[h.seg].s.meta.authors[m.author as usize].clone(),
+                date: dates::fmt(m.time),
+                time: m.time,
+                points: m.score,
+                text: if partial { t.text.clone() } else { htmlx::to_plain(&t.text) },
+                html: if partial { String::new() } else { t.text.clone() },
+                partial,
+                tier: if self.segs[h.seg].s.is_lm() { "lm" } else { "zstd" },
+                parent_id: if m.parent == 0 { None } else { Some(m.parent) },
+                story_id,
+                story_title,
+                score: h.score,
+                vscore: h.v,
+                bm25: h.b,
+                link: format!("https://news.ycombinator.com/item?id={}", m.id),
+                title: t.title,
+                url: t.url,
+            });
+        }
+        Ok(out)
     }
 }

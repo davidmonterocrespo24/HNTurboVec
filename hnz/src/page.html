@@ -22,6 +22,7 @@
   .r a { color: inherit; }
   .txt { white-space: pre-wrap; margin-top:6px; }
   #stats { color:var(--mut); font-size:13px; min-height: 1.2em; }
+  button.more { margin-top:6px; padding:4px 10px; font-size:13px; }
 </style>
 </head>
 <body>
@@ -53,10 +54,17 @@ f.onsubmit = async e => {
   res.innerHTML = r.results.map(x => `
     <div class="r">
       <h3>${x.title ? `<a href="${esc(x.url || x.link)}" target="_blank">${esc(x.title)}</a>` : 're: ' + esc(x.story_title || '(hilo)')}</h3>
-      <div class="meta">${x.kind} · ${esc(x.by)} · ${x.date} · ${x.points} pts · <a href="${x.link}" target="_blank">HN #${x.id}</a> · score ${x.score.toFixed(3)}</div>
-      ${x.text ? `<div class="txt">${esc(x.text.length > 700 ? x.text.slice(0, 700) + '…' : x.text)}</div>` : ''}
+      <div class="meta">${x.kind} · ${esc(x.by)} · ${x.date} · ${x.points} pts · <a href="${x.link}" target="_blank">HN #${x.id}</a> · score ${x.score.toFixed(3)} · <span title="nivel de almacenamiento">${x.tier === 'lm' ? '❄ frío (LM)' : '🔥 zstd'}</span></div>
+      ${x.text ? `<div class="txt" id="t${x.id}">${esc(x.text.length > 700 ? x.text.slice(0, 700) + '…' : x.text)}${x.partial ? '…' : ''}</div>` : ''}
+      ${x.partial ? `<button class="more" onclick="full(${x.id}, this)">ver completo</button>` : ''}
     </div>`).join('');
 };
+async function full(id, btn) {
+  btn.disabled = true; btn.textContent = 'descomprimiendo…';
+  const r = await fetch('/item/' + id).then(x => x.json());
+  document.getElementById('t' + id).textContent = r.text_plain;
+  btn.textContent = `descomprimido en ${r.ms.toFixed(0)} ms`;
+}
 </script>
 </body>
 </html>

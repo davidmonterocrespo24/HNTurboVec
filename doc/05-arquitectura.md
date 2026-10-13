@@ -1,65 +1,62 @@
 # Arquitectura del sistema `hnz` (Rust)
 
-Estado: **diseño en curso**; se actualiza con cada decisión. Evidencias en [BITACORA.md](BITACORA.md).
+Estado: **implementado y funcionando sobre 3 meses de muestra** (2010-06, 2015-06, 2024-01).
+Evidencias numéricas en [BITACORA.md](BITACORA.md). Uso en [../hnz/README.md](../hnz/README.md).
 
 ## Principios
-1. **Lo que más pesa es el texto** → niveles por antigüedad: zstd (rápido) para lo reciente,
-   LM + codificación aritmética (máxima compresión) para lo antiguo. Tipo LSM: los segmentos
-   envejecen y se "compactan" a niveles más fríos.
-2. **Búsqueda híbrida** (vectores binarios EmbeddingGemma 2 + BM25 compacto), porque cada una
-   falla donde la otra acierta (DeepMind 2508.21038).
-3. **Todo lo que no es texto se guarda en el mínimo de bits** y en orden temporal: un rango de
-   fechas = un rango contiguo de documentos (sin índices extra).
-4. Preparación lenta aceptable; **consulta diaria rápida**: mmap, SIMD, caché por capas.
+1. **Lo que más pesa es el texto** → niveles por antigüedad (como un LSM): zstd para lo reciente
+   (lectura en µs), **LM + codificación aritmética** para lo antiguo (la mitad de tamaño).
+2. **Búsqueda híbrida**: vectores binarios de EmbeddingGemma 2 + BM25 compacto (cada uno falla
+   donde el otro acierta; DeepMind 2508.21038). Fusión calibrada (E14).
+3. **Todo en orden temporal**: un rango de fechas = un rango contiguo de documentos.
+4. **Sin pérdida y verificable**: `hnz verify` compara cada registro con el Parquet original.
+5. **Determinismo** del nivel LM: matmul entera exacta + matemática propia → mismos bits en
+   cualquier CPU x86-64 (con o sin AVX-VNNI).
 
-## Segmentos
-Un segmento = un año (el año en curso, por meses). Inmutable. Cada segmento es autocontenido:
-
-| Fichero | Contenido | Coste aprox. |
+## Segmentos (directorio autocontenido, inmutable)
+| Fichero | Contenido | B/ítem (2024-01) |
 |---|---|---|
-| `manifest.json` | rango de ids/fechas, nivel, parámetros | — |
-| `meta.*` | columnas id/time/parent/tipo/flags/score/descendants/autor en bloques de 1024, varint+zstd | ~6 B/ítem |
-| `text.*` | **nivel caliente/templado:** bloques de 16/256 registros, columnar (título, url, texto con transformación HTML reversible), zstd-19 + diccionario del segmento | ~118-124 B/ítem |
-| `lm.*` | **nivel frío:** cada registro codificado con LM + codificador aritmético; longitudes en varint por grupo | ~55-62 B/ítem (estim.) |
-| `bm25.*` | diccionario de términos (FST) + postings en bloques de 128 bit-packed (docID delta + tf) + máximos por bloque + normas de longitud (1 B) | ~38-45 B/ítem |
-| `vec.bin` | códigos binarios de EmbeddingGemma 2 (signo por dimensión), 768 bits = 96 B (o 512 bits = 64 B en niveles fríos) | 64-96 B/ítem |
+| `manifest.json` | rango de ids/fechas, nivel, modelo LM | — |
+| `meta.bin/.idx`, `authors.zst` | id/time/parent/tipo/dead/score/descendants/autor/poll/parts, bloques de 1024, varint delta + zstd | ~5,5 |
+| `text.bin/.idx/.dict` (**nivel zstd**) | bloques de 16 registros, columnar, HTML→forma compacta reversible (2 dialectos, enlaces truncados), zstd-19 + diccionario | ~116 |
+| `lm.bin/.idx/.json` (**nivel LM**) | cada registro: cabecera varint (nº tokens, modo) + flujo aritmético; grupos de 32 | ~61 (+meta) |
+| `bm25.fst/.post/.norms/.json` | FST de términos (df=1 inline), postings en bloques de 128 con BitPacker4x, normas 1 B, MaxScore | ~49 |
+| `vec.bin/.has` | signo de los 768 dims de EmbeddingGemma 2 (MRL permite 512/256) | 96 |
 
 ## Consulta
 ```
-consulta ("rust async runtime", k=10, desde=2015, hasta=2018, filtros opcionales by:/site:/type:)
-  │
-  ├─ 1. Segmentos que solapan el rango de fechas → rango de docIDs por segmento (búsqueda binaria)
-  ├─ 2. Embedding de la consulta (EmbeddingGemma 2, OpenVINO CPU, ~10 ms) y términos BM25
-  ├─ 3. En paralelo por segmento (rayon):
-  │      vectores: Hamming sobre los primeros 256 bits → top-C → puntuación asimétrica 768 bits (LUT)
-  │      BM25: MaxScore/WAND sobre postings, saltando bloques fuera del rango
-  ├─ 4. Fusión ponderada (calibrada) → top-k global
-  ├─ 5. (opcional) reranker cross-encoder sobre el top-N (equivalente open source a Jev "Score")
-  └─ 6. Recuperar resultados: metadatos + texto (zstd: µs | LM: decodificación en lote)
-         + contexto del hilo (título de la story, recorriendo parent) + fragmento resaltado
+consulta (texto, k, desde/hasta, tipo, autor)
+  ├─ embedding de la consulta: EmbeddingGemma 2 (IR OpenVINO, CPU) desde Rust ........ ~45 ms
+  ├─ por segmento que solapa las fechas (rayon):
+  │    vectores: Hamming 256 bits → 2000+ candidatos → puntuación asimétrica 768 bits
+  │    BM25: MaxScore con IDF global, saltando bloques fuera del rango de docIDs
+  ├─ fusión: score = coseno + 0,15·bm25/(bm25+20) → top-k con filtros exactos ........ ~6 ms
+  └─ recuperar: zstd (µs) | nivel LM: TODOS los resultados en un lote (KV-cache, pool spin);
+     modo fragmento (64 tokens) por defecto, texto completo bajo demanda; contexto del hilo
+     (título de la story raíz, decodificando solo hasta el primer salto de línea)
 ```
 
 ## Caché por capas
-- **L1 RAM:** LRU de registros/bloques ya descomprimidos.
-- **L2 disco:** registros del nivel LM ya decodificados, guardados en zstd rápido (tamaño acotado).
-- **L3:** el almacén real (zstd o LM).
+- **L1 RAM**: registros del nivel LM ya descomprimidos completos (20.000 entradas).
+- **L2 disco**: pendiente (guardar en zstd los registros fríos consultados a menudo).
+- **L3**: el almacén (zstd o LM).
 
-## Construcción (offline, puede tardar días)
-1. Descargar Parquet mensuales (`open-index/hacker-news`).
-2. Embeddings EmbeddingGemma 2 en la **iGPU Arc** (OpenVINO, buckets de longitud): ~3 días para todo.
-   En paralelo, la **CPU** comprime el nivel frío con el LM.
-3. `hnz build`: por segmento → meta, texto (nivel según antigüedad), BM25, códigos binarios.
-4. Reconstrucción incremental: el mes en curso se añade como segmento nuevo; al envejecer se
-   recompacta a un nivel más frío.
+## Construcción
+1. `embed_month.py` (iGPU Arc, OpenVINO, buckets de longitud): ~204 docs/s → 49,3 M en ~2,8 días.
+2. `hnz build --tier zstd|lm` → meta + texto + BM25. Nivel LM: ~97 reg/s (16 hilos, AVX-VNNI)
+   → la CPU comprime mientras la iGPU embebe.
+3. `hnz index --emb … --ids …` → vectores binarios.
+4. `hnz verify` → comparación registro a registro con el original.
 
 ## Modelos (cuentan en el tamaño total del sistema)
 | Modelo | Uso | Tamaño |
 |---|---|---|
-| EmbeddingGemma 2 (texto, 270M) | embeddings de consulta | ~0,5 GB fp16 (int8: ~0,27 GB) |
-| LM compresor (por elegir, E11) | descomprimir nivel frío | ~15-140 MB int8 |
-| Reranker cross-encoder (opcional) | precisión del top-N | ~20-100 MB |
+| EmbeddingGemma 2 (texto) IR fp16 + tokenizer | embedding de consultas | 542 MB + 32 MB (int8: ~0,27 GB, pendiente) |
+| pythia-70m `.hnzlm` int8 + tokenizer | (des)compresión del nivel frío | 72 MB + 3,5 MB |
 
-## Decisiones abiertas
-- [ ] LM compresor: modelo y velocidad de decodificación (E11).
-- [ ] 768 vs 512 bits en niveles fríos; Hamming vs asimétrico en la 1ª etapa (E12, mes completo).
-- [ ] Pesos de fusión BM25+vector; ¿reranker? (E12).
+## Decisiones abiertas / mejoras
+- [ ] Núcleos int8 más eficientes (hoy ~27 GMAC/s/hilo) → compresión y descompresión LM más rápidas.
+- [ ] Caché L2 en disco para el nivel LM.
+- [ ] Bits por nivel (768 en caliente, 512 en frío) y BM25 más compacto (sin tf / Elias-Fano).
+- [ ] Capa de etiquetas/grafo por temas (exploración, enrutado) — opcional (E08).
+- [ ] Pipeline completo para los 628 meses (descarga → embeddings → segmentos por año).
