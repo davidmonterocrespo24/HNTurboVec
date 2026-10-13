@@ -131,3 +131,34 @@ pero potion agrupa también "por tono" ("nice, lovely, glad") → usar mejor mod
 | NPU (AI Boost) | falla al compilar | — |
 **Conclusión:** embeber todo HN es viable en la iGPU (~3 días, mejorable con buckets de longitud y
 pesos int8). La CPU queda libre en paralelo para la compresión LM.
+
+### E11 — Qué LM usar como compresor (`bench_lm2.py` → `results_lm2.txt`)
+300 registros por mes; bits/byte del texto (título+cuerpo), B/reg incluye 2 B de cierre del
+codificador; velocidades con PyTorch CPU float32 (dominadas por overhead del framework en modelos
+pequeños; un motor propio int8 será bastante más rápido). Round-trip del tokenizador: 100 % en todos.
+| Modelo | 2024-01 bpb / B | 2015-06 bpb / B | Decodif. lote 10 (ms/paso) | Codificar 49,3 M (PyTorch) |
+|---|---|---|---|---|
+| pythia-14m | 1,637 / 70,4 | 1,619 / 65,5 | 6,0 | 4,9 días |
+| pythia-31m | 1,488 / 64,2 | 1,462 / 59,3 | 6,6 | 6,7 días |
+| pythia-70m | 1,401 / 60,6 | 1,374 / 55,9 | 30,0 | 13,7 días |
+| pythia-160m | 1,273 / 55,2 | 1,242 / 50,7 | 27,4 | 34,5 días |
+| gpt2 (124M) | 1,444 / 62,4 | 1,421 / 57,7 | 51,2 | 42,3 días |
+| SmolLM2-135M | 1,217 / 52,9 | 1,187 / 48,6 | 36,7 | 46,4 días |
+| SmolLM2-360M | 1,129 / 49,2 | 1,094 / 44,9 | 105,9 | 107,8 días |
+**Conclusiones:**
+- A más parámetros, mejor compresión pero coste casi lineal al codificar y al decodificar.
+- Pythia (entrenado en el Pile, que incluye HN hasta ~2020) no muestra memorización notable en 2015.
+- Cálculo de MACs/token (la cabeza de vocabulario domina en modelos pequeños): pythia-31m ~18 M,
+  pythia-70m ~45 M, pythia-160m ~124 M, SmolLM2-135M ~134 M.
+- **Elección inicial: arquitectura GPT-NeoX (familia Pythia), motor propio en Rust con matmul int8
+  exacta (determinista), modelo configurable.** Por defecto pythia-70m (equilibrio: ~61 B/reg de texto,
+  decodificación estimada ~50-90 ms para un top-10 con motor propio). Mejora futura: entrenar un LM
+  pequeño específico de HN (en GPU) que supere a SmolLM2-135M con menos parámetros.
+
+### Notas de datos (2026-10-13)
+- Tipos: 1 story, 2 comment, 3 poll, 4 pollopt, 5 job.
+- 2010-06 y 2015-06 tienen filas `deleted` (sin contenido), `kids` no vacíos y saltos de línea crudos
+  en `text`; 2024-01 no tiene ninguno de los tres → el formato debe soportar ambos casos.
+- **Decisión:** se guardan sin pérdida texto, título, url, autor, fecha, score, descendants, parent,
+  poll/parts y `dead`. No se guardan las filas `deleted` (vacías) ni el orden de `kids` (la estructura
+  del hilo se reconstruye con `parent`; se pierde solo el orden en que HN mostraba las respuestas).
