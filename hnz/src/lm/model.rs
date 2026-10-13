@@ -400,6 +400,32 @@ impl LmModel {
         self.head(&x, t, &mut logits, parallel);
         logits
     }
+
+    /// Como `prefill` pero entrega los logits por TROZOS de `chunk` posiciones a `f(pos0, logits)`,
+    /// para no reservar T x vocab floats a la vez (2.000 tokens = 400 MB). Mismos bits: la cabeza
+    /// se calcula fila a fila de forma idéntica.
+    pub fn prefill_chunked(&self, toks: &[u32], chunk: usize, mut f: impl FnMut(usize, &[f32])) {
+        let t = toks.len();
+        let hd = self.h.hidden;
+        let mut x = vec![0f32; t * hd];
+        for (i, &tk) in toks.iter().enumerate() {
+            self.embed(tk, &mut x[i * hd..(i + 1) * hd]);
+        }
+        let pos: Vec<usize> = (0..t).collect();
+        let mut cache = KvCache::new(self.h.layers, hd, hd / self.h.heads);
+        let seq_of = vec![0usize; t];
+        for l in 0..self.h.layers {
+            let mut refs = [&mut cache];
+            self.layer(l, &mut x, &pos, &mut refs, &seq_of, false);
+        }
+        drop(cache);
+        let mut logits = vec![0f32; chunk.min(t) * self.h.vocab];
+        for p0 in (0..t).step_by(chunk) {
+            let n = chunk.min(t - p0);
+            self.head(&x[p0 * hd..(p0 + n) * hd], n, &mut logits[..n * self.h.vocab], false);
+            f(p0, &logits[..n * self.h.vocab]);
+        }
+    }
 }
 
 /// Versión de la definición numérica del LM. Cambiarla invalida los segmentos ya comprimidos.

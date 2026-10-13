@@ -286,13 +286,15 @@ impl LmCodec {
         seq.extend_from_slice(&ids[..ids.len().saturating_sub(1)]);
         let mut enc = Encoder::new();
         if !ids.is_empty() {
-            let logits = self.model.prefill(&seq, false);
             let v = self.model.h.vocab;
             let mut cum = Vec::new();
-            for (i, &t) in ids.iter().enumerate() {
-                logits_to_cum(&logits[i * v..(i + 1) * v], &mut cum);
-                encode_token(&mut enc, &cum, t);
-            }
+            // cabeza de vocabulario por trozos de 64 posiciones (~13 MB en vez de T x 200 KB)
+            self.model.prefill_chunked(&seq, 64, |p0, logits| {
+                for r in 0..logits.len() / v {
+                    logits_to_cum(&logits[r * v..(r + 1) * v], &mut cum);
+                    encode_token(&mut enc, &cum, ids[p0 + r]);
+                }
+            });
         }
         let mut out = Vec::new();
         put(&mut out, (ids.len() as u64) << 4 | flags);
