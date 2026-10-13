@@ -334,6 +334,15 @@ fn cmd_lmtest(seg: &Path, lm: &Path, n: usize, batch: usize) -> Result<()> {
     Ok(())
 }
 
+/// Bits de los vectores: múltiplo de 64 (la etapa 1 compara palabras de 64 bits; MRL de
+/// EmbeddingGemma 2: 768/512/256/128).
+fn check_bits(bits: usize) -> Result<()> {
+    if bits == 0 || bits % 64 != 0 {
+        bail!("--bits debe ser múltiplo de 64 (p.ej. 768, 512, 256), no {bits}");
+    }
+    Ok(())
+}
+
 fn cmd_eval(root: &Path, file: &Path, k: usize, m: &ModelArgs) -> Result<()> {
     let eng = Engine::open(root, &m.models)?;
     let mut emb = Embedder::new(&m.models, &m.ov_libs)?;
@@ -474,6 +483,9 @@ fn main() -> Result<()> {
             eprintln!("segmento {} ({}) listo: {} docs en {:.1}s", m.name, m.text_tier, m.n_docs, t0.elapsed().as_secs_f64());
         }
         Cmd::Retier { seg, tier, block, level, lm, verify_all, delete_old, bits } => {
+            if let Some(b) = bits {
+                check_bits(b)?;
+            }
             let t0 = Instant::now();
             // ruta canónica con nombre de carpeta (p.ej. "--seg ." no sirve: no tiene nombre)
             let seg = std::fs::canonicalize(&seg).with_context(|| format!("{}", seg.display()))?;
@@ -649,6 +661,7 @@ fn main() -> Result<()> {
             );
         }
         Cmd::Index { seg, emb, ids, bits } => {
+            check_bits(bits)?;
             let t1 = Instant::now();
             let s = Segment::open(&seg)?;
             let doc_ids: Vec<u32> = (0..s.meta.n_blocks()).flat_map(|bi| s.meta.block(bi).into_iter().map(|r| r.id)).collect();

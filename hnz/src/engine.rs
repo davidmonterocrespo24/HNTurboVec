@@ -256,7 +256,12 @@ impl Engine {
                 ((n - df as f32 + 0.5) / (df as f32 + 0.5) + 1.0).ln()
             })
             .collect();
-        let listing = !use_bm25 && !use_vec;
+        // sin texto: listado de lo más reciente; con texto pero sin señal utilizable (solo palabras
+        // vacías en modo palabras, o sin vector de consulta): ningún resultado
+        let listing = !has_text;
+        if has_text && !use_bm25 && !use_vec {
+            return Vec::new();
+        }
         let only_rare_types = !q.types.is_empty() && q.types.iter().all(|t| matches!(t, 3..=5));
         let scan = q.by.is_some() || only_rare_types;
         let fuse = |v: f32, b: f32| match q.mode {
@@ -326,7 +331,7 @@ impl Engine {
                             Mode::Hybrid => vs[i].is_finite() || bs[i] > 0.0,
                         })
                         .map(|(i, &d)| {
-                            let v = if vs[i].is_finite() { vs[i] } else { -1.0 };
+                            let v = if vs[i].is_finite() { vs[i] } else { 0.0 };
                             Hit { seg: si, doc: d, v, b: bs[i], score: fuse(v, bs[i]) }
                         })
                         .collect()
@@ -374,12 +379,12 @@ impl Engine {
                     if let (Some(v), Some(l)) = (&sg.vec, &lut) {
                         let c1 = q.vec_cand.unwrap_or((kc * 10).max(2000)).min((hi - lo) as usize);
                         let r = v.search(l, lo as usize, hi as usize, c1, kc);
-                        saturated |= r.len() >= kc;
+                        saturated |= r.len() >= kc && kc < (hi - lo) as usize;
                         raw.extend(r.into_iter().map(|x| x.0));
                     }
                     if let (Some(b), false) = (&sg.bm25, tps.is_empty()) {
                         let r = b.top_k(&tps, lo, hi, kc);
-                        saturated |= r.len() >= kc;
+                        saturated |= r.len() >= kc && kc < (hi - lo) as usize;
                         raw.extend(r.into_iter().map(|x| x.0));
                     }
                     raw.sort_unstable();

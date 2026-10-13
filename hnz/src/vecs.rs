@@ -135,6 +135,9 @@ impl VecIndex {
         let hb = std::fs::read(dir.join("vec.has"))?;
         let has = hb.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
         let nbytes = bits / 8;
+        if bits == 0 || bits % 64 != 0 || codes.len() % nbytes != 0 {
+            bail!("vec.bin ({} bytes) no cuadra con vec_bits = {bits} del manifiesto", codes.len());
+        }
         Ok(Self { n: codes.len() / nbytes, codes, has, nbytes })
     }
 
