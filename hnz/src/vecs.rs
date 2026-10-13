@@ -10,9 +10,11 @@ use std::collections::BinaryHeap;
 use std::fs::File;
 use std::path::Path;
 
-/// Lee un .npy (v1/v2) de float16 o uint32 2D/1D. Devuelve (shape, bytes de datos).
-pub fn read_npy(path: &Path) -> Result<(Vec<usize>, String, Vec<u8>)> {
-    let b = std::fs::read(path).with_context(|| format!("{}", path.display()))?;
+/// Abre un .npy (v1/v2) por mmap (los de un año entero ocupan GB). Devuelve
+/// (shape, descr, mmap, inicio de los datos).
+pub fn read_npy(path: &Path) -> Result<(Vec<usize>, String, Mmap, usize)> {
+    let f = File::open(path).with_context(|| format!("{}", path.display()))?;
+    let b = unsafe { Mmap::map(&f)? };
     if &b[..6] != b"\x93NUMPY" {
         bail!("no es .npy: {}", path.display());
     }
@@ -26,16 +28,19 @@ pub fn read_npy(path: &Path) -> Result<(Vec<usize>, String, Vec<u8>)> {
     let shape_s = header.split("'shape':").nth(1).context("shape")?;
     let shape_s = &shape_s[shape_s.find('(').unwrap() + 1..shape_s.find(')').unwrap()];
     let shape: Vec<usize> = shape_s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
-    Ok((shape, descr, b[hstart + hlen..].to_vec()))
+    let start = hstart + hlen;
+    Ok((shape, descr, b, start))
 }
 
 /// Construye vec.bin (n_docs x bits/8) y vec.has (bitmap) alineando por id de HN.
 pub fn build(dir: &Path, doc_ids: &[u32], emb_npy: &Path, ids_npy: &Path, bits: usize) -> Result<usize> {
-    let (shape, descr, data) = read_npy(emb_npy)?;
+    let (shape, descr, emap, eoff) = read_npy(emb_npy)?;
+    let data = &emap[eoff..];
     if descr != "<f2" || shape.len() != 2 || shape[1] < bits {
         bail!("embeddings deben ser float16 Nx>={bits} (es {descr} {shape:?})");
     }
-    let (ishape, idescr, idata) = read_npy(ids_npy)?;
+    let (ishape, idescr, imap, ioff) = read_npy(ids_npy)?;
+    let idata = &imap[ioff..];
     if idescr != "<u4" || ishape[0] != shape[0] {
         bail!("ids deben ser uint32 de longitud {}", shape[0]);
     }

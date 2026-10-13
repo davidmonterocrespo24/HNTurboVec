@@ -60,7 +60,15 @@ impl L2 {
     pub fn open(path: &Path, cap_bytes: u64) -> Result<Self> {
         // OJO (Windows): un fichero abierto en modo append no admite set_len (acceso denegado);
         // se abre en lectura/escritura y cada escritura hace seek al final.
-        let mut file = OpenOptions::new().read(true).write(true).create(true).open(path)?;
+        let mut oo = OpenOptions::new();
+        oo.read(true).write(true).create(true);
+        // acceso exclusivo: dos procesos escribiendo el mismo fichero lo corromperían
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            oo.share_mode(0);
+        }
+        let mut file = oo.open(path)?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
         let mut index = HashMap::new();
@@ -84,10 +92,17 @@ impl L2 {
     pub fn get(&self, seg: u64, doc: u32) -> Option<TextRec> {
         let mut g = self.inner.lock().ok()?;
         let &(off, len) = g.index.get(&(seg, doc))?;
-        let mut b = vec![0u8; len as usize];
-        g.file.seek(SeekFrom::Start(off)).ok()?;
+        // leer también la cabecera y comprobar que es el registro pedido
+        let mut b = vec![0u8; 16 + len as usize];
+        g.file.seek(SeekFrom::Start(off.checked_sub(16)?)).ok()?;
         g.file.read_exact(&mut b).ok()?;
-        decode(&b)
+        let hs = u64::from_le_bytes(b[0..8].try_into().unwrap());
+        let hd = u32::from_le_bytes(b[8..12].try_into().unwrap());
+        let hl = u32::from_le_bytes(b[12..16].try_into().unwrap());
+        if hs != seg || hd != doc || hl != len {
+            return None;
+        }
+        decode(&b[16..])
     }
 
     pub fn put(&self, seg: u64, doc: u32, r: &TextRec) {
@@ -117,5 +132,30 @@ impl L2 {
 
     pub fn entries(&self) -> usize {
         self.inner.lock().map(|g| g.index.len()).unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn put_get_and_reopen() {
+        let p = std::env::temp_dir().join(format!("hnz_l2_test_{}.bin", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let r1 = TextRec { title: "t".into(), url: "u".into(), text: "hola <p>mundo".into() };
+        {
+            let c = L2::open(&p, 1 << 20).unwrap();
+            c.put(1, 5, &r1);
+            assert_eq!(c.get(1, 5), Some(r1.clone()));
+            assert_eq!(c.get(1, 6), None);
+            assert_eq!(c.get(2, 5), None);
+        }
+        // persistencia tras reabrir
+        let c = L2::open(&p, 1 << 20).unwrap();
+        assert_eq!(c.entries(), 1);
+        assert_eq!(c.get(1, 5), Some(r1));
+        drop(c);
+        let _ = std::fs::remove_file(&p);
     }
 }

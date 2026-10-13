@@ -77,7 +77,6 @@ struct LayerW {
 pub struct LmModel {
     pub h: Header,
     data: Vec<u8>,
-    base: usize,
     embed_in: QMat,
     layers: Vec<LayerW>,
     lnf_w: Vec<f32>,
@@ -88,6 +87,8 @@ pub struct LmModel {
     vocab_off: Vec<u32>,
     vocab_bytes: Vec<u8>,
     pub id: String,
+    /// id de versiones anteriores (muestreo 1/97 bytes): se acepta al abrir segmentos viejos
+    pub id_legacy: String,
 }
 
 fn f32s(b: &[u8]) -> Vec<f32> {
@@ -148,7 +149,8 @@ impl LmModel {
             .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
             .collect();
         let vocab_bytes = data[base + h.vocab_bytes..base + h.vocab_bytes + h.vocab_bytes_len].to_vec();
-        let id = format!("{}#{:016x}", h.source, fnv(&data));
+        let id = format!("{}#full:{:016x}", h.source, fnv_full(&data));
+        let id_legacy = format!("{}#{:016x}", h.source, fnv(&data));
         Ok(Self {
             embed_in: q8("embed_in")?,
             lnf_w: vecf("lnf.w")?,
@@ -160,9 +162,9 @@ impl LmModel {
             vocab_off,
             vocab_bytes,
             id,
+            id_legacy,
             h,
             data,
-            base,
         })
     }
 
@@ -487,6 +489,13 @@ impl<'m> Batch<'m> {
         Self { m, caches: (0..n).map(|_| KvCache::new(m.h.layers, hd, hs)).collect(), pos: vec![0; n] }
     }
 
+    /// Vacía el hueco `slot` (KV-cache y posición) para empezar otra secuencia en él.
+    pub fn reset(&mut self, slot: usize) {
+        let (hd, hs) = (self.m.h.hidden, self.m.h.hidden / self.m.h.heads);
+        self.caches[slot] = KvCache::new(self.m.h.layers, hd, hs);
+        self.pos[slot] = 0;
+    }
+
     /// Avanza las secuencias `active` con los tokens `toks` (uno por secuencia activa).
     /// Devuelve los logits (active.len() x vocab).
     pub fn step(&mut self, active: &[usize], toks: &[u32], parallel: bool) -> Vec<f32> {
@@ -516,6 +525,15 @@ impl<'m> Batch<'m> {
         }
         logits
     }
+}
+
+fn fnv_full(b: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &x in b {
+        h ^= x as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h ^ b.len() as u64
 }
 
 fn fnv(b: &[u8]) -> u64 {

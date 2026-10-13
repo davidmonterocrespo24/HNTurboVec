@@ -97,6 +97,12 @@ enum Cmd {
         seg: PathBuf,
         #[arg(long, value_enum)]
         tier: TierArg,
+        /// verificar TODOS los documentos del segmento nuevo (por defecto, una muestra de 2.000)
+        #[arg(long)]
+        verify_all: bool,
+        /// borrar el original al terminar (solo con --verify-all; si no, queda como <seg>.old)
+        #[arg(long)]
+        delete_old: bool,
         #[arg(long, default_value_t = 16)]
         block: usize,
         #[arg(long, default_value_t = 19)]
@@ -280,7 +286,7 @@ fn cmd_lmtest(seg: &Path, lm: &Path, n: usize, batch: usize) -> Result<()> {
     }
     let bytes: usize = enc.iter().map(|e| e.0.len()).sum();
     let toks: u64 = enc.iter().map(|e| e.1).sum();
-    let nfb = enc.iter().filter(|e| e.1 == 0).count();
+    let nfb = enc.iter().filter(|e| (e.0[0] >> 3) & 1 == 1).count();
     println!(
         "codificar: {} registros, {:.1} B/reg crudo -> {:.1} B/reg ({:.3} bits/byte), {:.1} tokens/reg, {} con zstd de reserva | {:.0} reg/s ({:.0} tok/s) con {} hilos",
         n,
@@ -299,7 +305,7 @@ fn cmd_lmtest(seg: &Path, lm: &Path, n: usize, batch: usize) -> Result<()> {
     for (bi, chunk) in enc.chunks(batch).enumerate() {
         let tb = Instant::now();
         let refs: Vec<&[u8]> = chunk.iter().map(|e| &e.0[..]).collect();
-        let out = codec.decode_records(&refs, true, None, false)?;
+        let out = codec.decode_records(&refs, true, None, false, true)?;
         times.push(tb.elapsed().as_secs_f64() * 1e3);
         for (j, (o, _)) in out.iter().enumerate() {
             if *o != recs[bi * batch + j] {
@@ -328,7 +334,14 @@ fn cmd_lmtest(seg: &Path, lm: &Path, n: usize, batch: usize) -> Result<()> {
 fn cmd_eval(root: &Path, file: &Path, k: usize, m: &ModelArgs) -> Result<()> {
     let eng = Engine::open(root, &m.models)?;
     let mut emb = Embedder::new(&m.models, &m.ov_libs)?;
-    let qs: Vec<(String, u32)> = std::fs::read_to_string(file)?
+    let raw = std::fs::read(file)?;
+    // tolerar BOM UTF-8 (PowerShell) y rechazar UTF-16 con un mensaje claro
+    if raw.starts_with(&[0xFF, 0xFE]) || raw.starts_with(&[0xFE, 0xFF]) {
+        bail!("{} está en UTF-16: genérelo con make_eval.py --out (UTF-8)", file.display());
+    }
+    let text = String::from_utf8(raw)?;
+    let qs: Vec<(String, u32)> = text
+        .trim_start_matches('\u{feff}')
         .lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| {
@@ -368,7 +381,7 @@ fn cmd_eval(root: &Path, file: &Path, k: usize, m: &ModelArgs) -> Result<()> {
                 if n > k {
                     break;
                 }
-                if eng.root_id(h.seg, h.doc) == *story {
+                if eng.root_id(h.seg, h.doc) == Some(*story) {
                     rel += 1;
                     if first == 0 {
                         first = n;
@@ -457,8 +470,16 @@ fn main() -> Result<()> {
             let m = segment::build(&items, deleted, &out, &name, t)?;
             eprintln!("segmento {} ({}) listo: {} docs en {:.1}s", m.name, m.text_tier, m.n_docs, t0.elapsed().as_secs_f64());
         }
-        Cmd::Retier { seg, tier, block, level, lm } => {
+        Cmd::Retier { seg, tier, block, level, lm, verify_all, delete_old } => {
             let t0 = Instant::now();
+            // ruta canónica con nombre de carpeta (p.ej. "--seg ." no sirve: no tiene nombre)
+            let seg = std::fs::canonicalize(&seg).with_context(|| format!("{}", seg.display()))?;
+            let name = seg.file_name().context("--seg debe ser la carpeta de un segmento")?.to_string_lossy().to_string();
+            let tmp = seg.with_file_name(format!("{name}.retier"));
+            let old = seg.with_file_name(format!("{name}.old"));
+            if old.exists() {
+                bail!("ya existe {} de un retier anterior: revíselo y bórrelo antes de continuar", old.display());
+            }
             let s = Segment::open(&seg)?;
             let models = lm.parent().unwrap_or(Path::new(".")).to_path_buf();
             let codec_old = match &s.text {
@@ -477,18 +498,22 @@ fn main() -> Result<()> {
                 }
                 TextSource::Lm(ls) => {
                     let c = codec_old.as_ref().unwrap();
-                    for c0 in (0..s.man.n_docs).step_by(64) {
-                        let docs: Vec<usize> = (c0..(c0 + 64).min(s.man.n_docs)).collect();
-                        let raws: Vec<&[u8]> = docs.iter().map(|&d| ls.raw(d)).collect();
-                        for (&d, (t, _)) in docs.iter().zip(c.decode_records(&raws, true, None, false)?) {
-                            items.push(segment::join(&s.meta.row(d), t, &s.meta.authors));
-                        }
+                    ls.check_model(c)?;
+                    let raws: Vec<&[u8]> = (0..s.man.n_docs).map(|d| ls.raw(d)).collect();
+                    let mut texts: Vec<Option<hnz::textstore::TextRec>> = vec![None; s.man.n_docs];
+                    c.decode_stream(&raws, ls.rec_check(), 64, |d, t| {
+                        texts[d] = Some(t);
+                        Ok(())
+                    })?;
+                    for (d, t) in texts.into_iter().enumerate() {
+                        items.push(segment::join(&s.meta.row(d), t.context("registro sin decodificar")?, &s.meta.authors));
                     }
                 }
             }
+            if items.len() != s.man.n_docs {
+                bail!("se leyeron {} ítems de {} esperados: se conserva el segmento", items.len(), s.man.n_docs);
+            }
             eprintln!("leídos {} ítems del segmento ({:.1}s)", items.len(), t0.elapsed().as_secs_f64());
-            let tmp = seg.with_extension("retier");
-            let _ = std::fs::remove_dir_all(&tmp);
             let codec;
             let t = match tier {
                 TierArg::Zstd => Tier::Zstd { block, level },
@@ -497,31 +522,70 @@ fn main() -> Result<()> {
                     Tier::Lm { codec: &codec, model_file: lm.file_name().unwrap().to_string_lossy().to_string() }
                 }
             };
-            let mut m = segment::build(&items, s.man.deleted_skipped, &tmp, &s.man.name, t)?;
-            // conservar vectores
-            if s.man.vec_bits > 0 {
-                std::fs::copy(seg.join("vec.bin"), tmp.join("vec.bin"))?;
-                std::fs::copy(seg.join("vec.has"), tmp.join("vec.has"))?;
-                m.vec_bits = s.man.vec_bits;
-                segment::write_manifest(&tmp, &m)?;
-            }
-            // verificación por muestreo antes de sustituir
-            let ns = Segment::open(&tmp)?;
-            let codec_new = if ns.is_lm() { Some(LmCodec::load(&models.join(ns.man.lm_model.as_ref().unwrap()))?) } else { None };
-            let sample = rand_docs(200.min(items.len()), items.len(), 77);
-            for &d in &sample {
-                if ns.item(d, codec_new.as_ref())? != items[d] {
-                    bail!("verificación fallida en doc {d}; se conserva el segmento original");
+            // construir en <seg>.retier y verificar; si algo falla, se borra y el original queda intacto
+            let result = (|| -> Result<segment::Manifest> {
+                let mut m = segment::build(&items, s.man.deleted_skipped, &tmp, &s.man.name, t)?;
+                if s.man.vec_bits > 0 {
+                    std::fs::copy(seg.join("vec.bin"), tmp.join("vec.bin"))?;
+                    std::fs::copy(seg.join("vec.has"), tmp.join("vec.has"))?;
+                    m.vec_bits = s.man.vec_bits;
+                    segment::write_manifest(&tmp, &m)?;
                 }
-            }
+                let ns = Segment::open(&tmp)?;
+                let docs: Vec<usize> = if verify_all { (0..items.len()).collect() } else { rand_docs(2000.min(items.len()), items.len(), 77) };
+                match &ns.text {
+                    TextSource::Zstd(_) => {
+                        for &d in &docs {
+                            if ns.item(d, None)? != items[d] {
+                                bail!("verificación fallida en el doc {d}");
+                            }
+                        }
+                    }
+                    TextSource::Lm(ls) => {
+                        let c = LmCodec::load(&models.join(ns.man.lm_model.as_ref().unwrap()))?;
+                        let raws: Vec<&[u8]> = docs.iter().map(|&d| ls.raw(d)).collect();
+                        let mut bad = None;
+                        c.decode_stream(&raws, ls.rec_check(), 64, |j, t| {
+                            let d = docs[j];
+                            if segment::join(&ns.meta.row(d), t, &ns.meta.authors) != items[d] {
+                                bad.get_or_insert(d);
+                            }
+                            Ok(())
+                        })?;
+                        if let Some(d) = bad {
+                            bail!("verificación fallida en el doc {d}");
+                        }
+                    }
+                }
+                eprintln!("verificados {} de {} documentos ({})", docs.len(), items.len(), if verify_all { "todos" } else { "muestra" });
+                Ok(m)
+            })();
+            let m = match result {
+                Ok(m) => m,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&tmp);
+                    return Err(e.context("retier abortado; el segmento original no se ha modificado"));
+                }
+            };
             drop(s);
-            drop(ns);
-            let old = seg.with_extension("old");
-            let _ = std::fs::remove_dir_all(&old);
             std::fs::rename(&seg, &old)?;
-            std::fs::rename(&tmp, &seg)?;
-            std::fs::remove_dir_all(&old)?;
-            eprintln!("segmento {} ahora en nivel {} ({:.1}s)", m.name, m.text_tier, t0.elapsed().as_secs_f64());
+            if let Err(e) = std::fs::rename(&tmp, &seg) {
+                let _ = std::fs::rename(&old, &seg);
+                return Err(anyhow::anyhow!(e).context("no se pudo sustituir el segmento; se ha restaurado el original"));
+            }
+            if delete_old && verify_all {
+                std::fs::remove_dir_all(&old)?;
+                eprintln!("segmento {} ahora en nivel {} ({:.1}s); original borrado", m.name, m.text_tier, t0.elapsed().as_secs_f64());
+            } else {
+                eprintln!(
+                    "segmento {} ahora en nivel {} ({:.1}s); el original queda en {} (el motor lo ignora; bórrelo cuando quiera{})",
+                    m.name,
+                    m.text_tier,
+                    t0.elapsed().as_secs_f64(),
+                    old.display(),
+                    if delete_old { ": --delete-old solo actúa con --verify-all" } else { "" }
+                );
+            }
         }
         Cmd::Rebm25 { seg, no_tf, max_df, models } => {
             let t0 = Instant::now();
@@ -537,12 +601,14 @@ fn main() -> Result<()> {
                 }
                 TextSource::Lm(ls) => {
                     let c = LmCodec::load(&models.join(s.man.lm_model.as_ref().context("lm_model")?))?;
-                    for c0 in (0..s.man.n_docs).step_by(64) {
-                        let raws: Vec<&[u8]> = (c0..(c0 + 64).min(s.man.n_docs)).map(|d| ls.raw(d)).collect();
-                        for (r, _) in c.decode_records(&raws, true, None, false)? {
-                            texts.push(segment::index_text(&r.title, &r.url, &r.text));
-                        }
-                    }
+                    ls.check_model(&c)?;
+                    let raws: Vec<&[u8]> = (0..s.man.n_docs).map(|d| ls.raw(d)).collect();
+                    let mut got: Vec<String> = vec![String::new(); s.man.n_docs];
+                    c.decode_stream(&raws, ls.rec_check(), 64, |d, r| {
+                        got[d] = segment::index_text(&r.title, &r.url, &r.text);
+                        Ok(())
+                    })?;
+                    texts = got;
                 }
             }
             let mut b = bm25::Builder::new();
@@ -630,7 +696,7 @@ fn main() -> Result<()> {
                             _ => ModeArg::Hybrid,
                         };
                         let s = SearchArgs {
-                            k: query_param(&url, "k").and_then(|x| x.parse().ok()).unwrap_or(10),
+                            k: query_param(&url, "k").and_then(|x| x.parse::<usize>().ok()).unwrap_or(10).clamp(1, 100),
                             from: query_param(&url, "from").filter(|x| !x.is_empty()),
                             to: query_param(&url, "to").filter(|x| !x.is_empty()),
                             mode,
@@ -692,7 +758,12 @@ fn main() -> Result<()> {
                 bail!("nº de docs distinto: parquet {} vs segmento {}", items.len(), s.man.n_docs);
             }
             let bad: usize = match &s.text {
-                TextSource::Zstd(ts) => (0..ts.n_blocks())
+                TextSource::Zstd(ts) => {
+                    let total: usize = (0..ts.n_blocks()).map(|b| (s.man.n_docs - b * ts.block).min(ts.block)).sum();
+                    if ts.n_blocks() * ts.block < s.man.n_docs || total != s.man.n_docs {
+                        bail!("text.idx tiene {} bloques: no cubren los {} documentos", ts.n_blocks(), s.man.n_docs);
+                    }
+                    (0..ts.n_blocks())
                     .into_par_iter()
                     .map(|b| {
                         let texts = ts.get_block(b).expect("bloque de texto");
@@ -709,28 +780,31 @@ fn main() -> Result<()> {
                         }
                         bad
                     })
-                    .sum(),
+                    .sum()
+                }
                 TextSource::Lm(ls) => {
                     let codec = LmCodec::load(&models.join(s.man.lm_model.as_ref().context("lm_model")?))?;
                     ls.check_model(&codec)?;
                     let mut bad = 0;
-                    let bs = 64;
-                    for c0 in (0..s.man.n_docs).step_by(bs) {
-                        let docs: Vec<usize> = (c0..(c0 + bs).min(s.man.n_docs)).collect();
-                        let raws: Vec<&[u8]> = docs.iter().map(|&d| ls.raw(d)).collect();
-                        let dec = codec.decode_records(&raws, true, None, false)?;
-                        for (&d, (t, _)) in docs.iter().zip(dec) {
-                            let got = segment::join(&s.meta.row(d), t, &s.meta.authors);
-                            if got != items[d] {
-                                if bad < 3 {
-                                    eprintln!("DIFERENCIA en id {}:\n  orig {:?}\n  leído {:?}", items[d].id, items[d], got);
-                                }
-                                bad += 1;
+                    let mut seen = 0usize;
+                    let raws: Vec<&[u8]> = (0..s.man.n_docs).map(|d| ls.raw(d)).collect();
+                    // lote continuo de 64 huecos: no se espera al registro más largo de cada lote
+                    codec.decode_stream(&raws, ls.rec_check(), 64, |d, t| {
+                        let got = segment::join(&s.meta.row(d), t, &s.meta.authors);
+                        if got != items[d] {
+                            if bad < 3 {
+                                eprintln!("DIFERENCIA en id {}:\n  orig {:?}\n  leído {:?}", items[d].id, items[d], got);
                             }
+                            bad += 1;
                         }
-                        if c0 % (bs * 100) == 0 && c0 > 0 {
-                            eprintln!("  verificados {c0}/{} ({:.0} reg/s)", s.man.n_docs, c0 as f64 / t0.elapsed().as_secs_f64());
+                        seen += 1;
+                        if seen % 20000 == 0 {
+                            eprintln!("  verificados {seen}/{} ({:.0} reg/s)", s.man.n_docs, seen as f64 / t0.elapsed().as_secs_f64());
                         }
+                        Ok(())
+                    })?;
+                    if seen != s.man.n_docs {
+                        bail!("solo se decodificaron {seen} de {} registros", s.man.n_docs);
                     }
                     bad
                 }
@@ -744,7 +818,11 @@ fn main() -> Result<()> {
             let dirs: Vec<PathBuf> = match seg {
                 Some(s) => vec![s],
                 None => {
-                    let mut v: Vec<PathBuf> = std::fs::read_dir(&root)?.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.join("manifest.json").exists()).collect();
+                    let mut v: Vec<PathBuf> = std::fs::read_dir(&root)?
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.path())
+                        .filter(|p| p.join("manifest.json").exists() && !segment::is_transient_dir(p))
+                        .collect();
                     v.sort();
                     v
                 }
@@ -803,7 +881,7 @@ fn main() -> Result<()> {
                         for c in docs.chunks(10) {
                             let raws: Vec<&[u8]> = c.iter().map(|&d| ls.raw(d)).collect();
                             let t = Instant::now();
-                            codec.decode_records(&raws, true, limit, false)?;
+                            codec.decode_records(&raws, true, limit, false, ls.rec_check())?;
                             times.push(t.elapsed().as_secs_f64() * 1e3);
                         }
                         times.sort_by(|a, b| a.total_cmp(b));

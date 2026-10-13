@@ -14,7 +14,7 @@ pub const STOPWORDS: &[&str] = &[
     "when", "where", "which", "while", "who", "whom", "why", "will", "with", "would", "you", "your", "yours",
     "yourself", "yourselves", "s", "t", "im", "ive", "youre", "thats", "isnt", "doesnt", "didnt", "cant", "wont",
     "also", "get", "got", "like", "one", "would", "really", "thing", "things", "lot", "even", "much", "make", "http",
-    "https", "www", "com", "org", "net", "html", "htm", "php", "amp", "quot", "nofollow", "href",
+    "https", "www", "com", "amp", "quot", "nofollow", "href",
 ];
 
 fn is_stop(t: &str) -> bool {
@@ -68,7 +68,8 @@ fn emit(tok: &str, f: &mut impl FnMut(&str)) {
     if all_digits && n > 4 {
         return;
     }
-    if n == 1 && !all_digits && !tok.ends_with('#') {
+    // letras sueltas: solo nombres de lenguajes (C, R); el resto es ruido
+    if n == 1 && !all_digits && !matches!(tok, "c" | "r") {
         return;
     }
     if is_stop(tok) {
@@ -90,5 +91,6 @@ mod tests {
     fn basic() {
         assert_eq!(terms("I don't like C++ and C# in 2024, see Rust's async!"), vec!["c++", "c#", "2024", "see", "rusts", "async"]);
         assert_eq!(terms("Ünïcode Straße 1234567"), vec!["ünïcode", "straße"]);
+        assert_eq!(terms("PHP vs HTML vs .NET in C and R, not x"), vec!["php", "vs", "html", "vs", "net", "c", "r"]);
     }
 }

@@ -1,0 +1,21 @@
+# Entorno Python de los experimentos y de la preparación de modelos (uv venv .venv --python 3.12)
+# torch/torchvision: índice CPU -> uv pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+brotli==1.2.0
+duckdb==1.5.6
+faiss-cpu==1.15.1
+fastembed==0.9.0
+huggingface-hub==1.33.0
+nncf==3.4.0
+numpy==2.4.6
+onnxruntime==1.31.0
+openvino==2026.4.1
+pyarrow==26.0.0
+sentence-transformers==6.1.0
+tantivy==0.26.2
+tokenizers==0.23.3
+torch==2.14.1+cpu
+torchvision==0.29.1+cpu
+transformers==5.19.0
+turbovec==1.1.2
+tzdata==2026.5
+zstandard==0.25.0

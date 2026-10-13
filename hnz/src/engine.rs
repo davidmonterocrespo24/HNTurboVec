@@ -5,12 +5,12 @@
 use crate::bm25::{Bm25, TermPost};
 use crate::item::Item;
 use crate::lm::store::LmCodec;
-use crate::meta::MetaRow;
+use crate::meta::{MetaRow, META_BLOCK};
 use crate::segment::{Segment, TextSource};
 use crate::textstore::TextRec;
 use crate::vecs::{QueryLut, VecIndex};
 use crate::{dates, htmlx, tokenize};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -19,6 +19,8 @@ use std::sync::Mutex;
 
 /// Tokens que se decodifican por resultado del nivel LM en modo fragmento.
 pub const SNIPPET_TOKENS: usize = 64;
+/// máximo de resultados por consulta (protege la memoria del servidor)
+pub const MAX_K: usize = 500;
 const CACHE_MAX: usize = 20_000;
 
 pub struct Seg {
@@ -30,7 +32,8 @@ pub struct Seg {
 pub struct Engine {
     pub segs: Vec<Seg>,
     pub total_docs: usize,
-    pub lm: Option<LmCodec>,
+    /// modelos LM de los segmentos fríos (por nombre de fichero)
+    pub lms: HashMap<String, LmCodec>,
     /// caché L1 (RAM) de registros del nivel LM ya descomprimidos completos
     cache: Mutex<HashMap<(usize, u32), TextRec>>,
     /// caché L2 (disco) de registros del nivel LM ya descomprimidos
@@ -134,39 +137,50 @@ pub fn kind_name(t: u8) -> &'static str {
 }
 
 impl Engine {
-    /// Abre todos los segmentos de `root`. Si alguno es del nivel LM carga el modelo de `models`.
+    /// Abre todos los segmentos de `root` (ignora construcciones a medias y restos de `retier`).
+    /// Carga cada modelo LM distinto que usen los segmentos del nivel frío.
     pub fn open(root: &Path, models: &Path) -> Result<Self> {
         let dirs: Vec<PathBuf> = std::fs::read_dir(root)?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| p.join("manifest.json").exists())
+            .filter(|p| p.join("manifest.json").exists() && !crate::segment::is_transient_dir(p))
             .collect();
         let mut segs = Vec::new();
-        let mut lm_file: Option<String> = None;
         for d in dirs {
             let s = Segment::open(&d)?;
-            if let Some(f) = &s.man.lm_model {
-                lm_file.get_or_insert_with(|| f.clone());
-            }
             let bm25 = if d.join("bm25.fst").exists() { Some(Bm25::open(&d)?) } else { None };
             let vec = if s.man.vec_bits > 0 && d.join("vec.bin").exists() { Some(VecIndex::open(&d, s.man.vec_bits)?) } else { None };
             segs.push(Seg { s, bm25, vec });
         }
         segs.sort_by_key(|x| x.s.man.id_min);
-        let lm = match lm_file {
-            Some(f) => {
-                let c = LmCodec::load(&models.join(&f)).with_context(|| format!("modelo LM {f}"))?;
-                for sg in &segs {
-                    if let TextSource::Lm(l) = &sg.s.text {
-                        l.check_model(&c)?;
-                    }
-                }
-                Some(c)
+        // los segmentos no pueden solaparse (p.ej. seg-2015 junto a seg-2015-06): duplicarían
+        // resultados y romperían la búsqueda por id
+        for w in segs.windows(2) {
+            if w[1].s.man.id_min <= w[0].s.man.id_max {
+                bail!(
+                    "los segmentos {} (ids {}..{}) y {} (ids {}..{}) se solapan: deje solo uno de los dos en {}",
+                    w[0].s.man.name,
+                    w[0].s.man.id_min,
+                    w[0].s.man.id_max,
+                    w[1].s.man.name,
+                    w[1].s.man.id_min,
+                    w[1].s.man.id_max,
+                    root.display()
+                );
             }
-            None => None,
-        };
+        }
+        let mut lms: HashMap<String, LmCodec> = HashMap::new();
+        for sg in &segs {
+            if let (Some(f), TextSource::Lm(l)) = (&sg.s.man.lm_model, &sg.s.text) {
+                if !lms.contains_key(f) {
+                    let c = LmCodec::load(&models.join(f)).with_context(|| format!("modelo LM {f}"))?;
+                    lms.insert(f.clone(), c);
+                }
+                l.check_model(&lms[f]).with_context(|| format!("segmento {}", sg.s.man.name))?;
+            }
+        }
         let total_docs = segs.iter().map(|x| x.s.man.n_docs).sum();
-        let l2 = if lm.is_some() {
+        let l2 = if !lms.is_empty() {
             match crate::cache::L2::open(&root.join("_cache_l2.bin"), 512 << 20) {
                 Ok(c) => Some(c),
                 Err(e) => {
@@ -177,11 +191,52 @@ impl Engine {
         } else {
             None
         };
-        let seg_keys = segs.iter().map(|s| crate::cache::seg_key(&s.s.man.name)).collect();
-        Ok(Self { segs, total_docs, lm, cache: Mutex::new(HashMap::new()), l2, titles: Mutex::new(HashMap::new()), seg_keys })
+        // clave de la L2: nombre + identificador de construcción + nº de docs (si el segmento se
+        // reconstruye, sus entradas antiguas dejan de coincidir)
+        let seg_keys = segs
+            .iter()
+            .map(|s| crate::cache::seg_key(&s.s.man.name) ^ s.s.man.build_id.rotate_left(13) ^ (s.s.man.n_docs as u64).rotate_left(41))
+            .collect();
+        Ok(Self { segs, total_docs, lms, cache: Mutex::new(HashMap::new()), l2, titles: Mutex::new(HashMap::new()), seg_keys })
     }
 
+    /// Modelo LM de un segmento del nivel frío.
+    pub fn codec_for(&self, si: usize) -> Option<&LmCodec> {
+        self.lms.get(self.segs[si].s.man.lm_model.as_ref()?)
+    }
+
+    /// ¿Cumple el documento los filtros de la consulta? (las filas deleted nunca se devuelven)
+    fn passes(&self, q: &Query, si: usize, row: &MetaRow, author: Option<u32>) -> bool {
+        !row.deleted
+            && (q.include_dead || !row.dead)
+            && (q.types.is_empty() || q.types.contains(&row.typ))
+            && !q.from.is_some_and(|f| row.time < f)
+            && !q.to.is_some_and(|t| row.time >= t)
+            && match (&q.by, author) {
+                (None, _) => true,
+                (Some(_), Some(a)) => row.author == a,
+                (Some(by), None) => &self.segs[si].s.meta.authors[row.author as usize] == by,
+            }
+    }
+
+    /// Búsqueda top-k. Los filtros (autor, tipo, dead, fechas) se aplican AL GENERAR candidatos:
+    /// - autor o tipos raros (job/poll/pollopt): se recorren los metadatos del rango y se puntúan
+    ///   todos los que cumplen (exacto);
+    /// - resto: candidatos de vectores + BM25 filtrados por segmento y, si no llegan a k y la lista
+    ///   estaba recortada, se repite con 4x más candidatos (hasta 16x).
     pub fn search(&self, q: &Query, qvec: Option<&[f32]>) -> Vec<Hit> {
+        let k = q.k.clamp(1, MAX_K);
+        let mut mult = 1;
+        loop {
+            let (hits, saturated) = self.search_once(q, qvec, k, mult);
+            if hits.len() >= k || !saturated || mult >= 16 {
+                return hits;
+            }
+            mult *= 4;
+        }
+    }
+
+    fn search_once(&self, q: &Query, qvec: Option<&[f32]>, k: usize, mult: usize) -> (Vec<Hit>, bool) {
         let mut terms = tokenize::terms(&q.text);
         terms.sort();
         terms.dedup();
@@ -196,7 +251,13 @@ impl Engine {
                 ((n - df as f32 + 0.5) / (df as f32 + 0.5) + 1.0).ln()
             })
             .collect();
-        let kc = (q.k * 20).max(200);
+        let only_rare_types = !q.types.is_empty() && q.types.iter().all(|t| matches!(t, 3..=5));
+        let scan = q.by.is_some() || only_rare_types;
+        let mut kc = (k * 20).max(200) * mult;
+        if !q.types.is_empty() {
+            kc *= 5; // stories ~14 % de los ítems
+        }
+        let saturated = std::sync::atomic::AtomicBool::new(false);
         let per_seg: Vec<Vec<Hit>> = self
             .segs
             .par_iter()
@@ -211,6 +272,10 @@ impl Engine {
                 if lo >= hi {
                     return None;
                 }
+                let author = match &q.by {
+                    Some(by) => Some(sg.s.meta.authors.iter().position(|a| a == by)? as u32),
+                    None => None,
+                };
                 let tps: Vec<(TermPost, f32)> = match (&sg.bm25, use_bm25) {
                     (Some(b), true) => terms.iter().zip(&idf).filter_map(|(t, &w)| b.lookup(t).map(|x| (x.0, w))).collect(),
                     _ => Vec::new(),
@@ -220,15 +285,49 @@ impl Engine {
                     _ => None,
                 };
                 let mut cand: Vec<u32> = Vec::new();
-                if let (Some(v), Some(l)) = (&sg.vec, &lut) {
-                    let c1 = q.vec_cand.unwrap_or((kc * 10).max(2000));
-                    cand.extend(v.search(l, lo as usize, hi as usize, c1, kc).into_iter().map(|x| x.0));
+                if scan {
+                    // recorrido exacto de los metadatos del rango
+                    let (b0, b1) = (lo as usize / META_BLOCK, (hi as usize - 1) / META_BLOCK);
+                    for b in b0..=b1 {
+                        for (kk, row) in sg.s.meta.block(b).iter().enumerate() {
+                            let d = b * META_BLOCK + kk;
+                            if d >= lo as usize && d < hi as usize && self.passes(q, si, row, author) {
+                                cand.push(d as u32);
+                            }
+                        }
+                    }
+                } else {
+                    let mut raw: Vec<u32> = Vec::new();
+                    if let (Some(v), Some(l)) = (&sg.vec, &lut) {
+                        let c1 = q.vec_cand.unwrap_or((kc * 10).max(2000));
+                        let r = v.search(l, lo as usize, hi as usize, c1, kc);
+                        if r.len() >= kc {
+                            saturated.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        raw.extend(r.into_iter().map(|x| x.0));
+                    }
+                    if let (Some(b), false) = (&sg.bm25, tps.is_empty()) {
+                        let r = b.top_k(&tps, lo, hi, kc);
+                        if r.len() >= kc {
+                            saturated.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        raw.extend(r.into_iter().map(|x| x.0));
+                    }
+                    raw.sort_unstable();
+                    raw.dedup();
+                    // filtrar con los metadatos (cada bloque se descomprime una vez)
+                    let mut blk: Option<(usize, Vec<MetaRow>)> = None;
+                    for d in raw {
+                        let b = d as usize / META_BLOCK;
+                        if blk.as_ref().map_or(true, |x| x.0 != b) {
+                            blk = Some((b, sg.s.meta.block(b)));
+                        }
+                        let row = &blk.as_ref().unwrap().1[d as usize % META_BLOCK];
+                        if self.passes(q, si, row, author) {
+                            cand.push(d);
+                        }
+                    }
                 }
-                if let (Some(b), false) = (&sg.bm25, tps.is_empty()) {
-                    cand.extend(b.top_k(&tps, lo, hi, kc).into_iter().map(|x| x.0));
-                }
-                cand.sort_unstable();
-                cand.dedup();
                 let vs = match (&sg.vec, &lut) {
                     (Some(v), Some(l)) => v.score_docs(l, &cand),
                     _ => vec![0.0; cand.len()],
@@ -253,25 +352,10 @@ impl Engine {
                 Mode::Hybrid => h.v + q.w_bm25 * h.b / (h.b + q.c_bm25),
             };
         }
-        hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-        let mut out = Vec::with_capacity(q.k);
-        for h in hits {
-            if out.len() >= q.k {
-                break;
-            }
-            let sg = &self.segs[h.seg];
-            let row = sg.s.meta.row(h.doc as usize);
-            if (!q.include_dead && row.dead)
-                || (!q.types.is_empty() && !q.types.contains(&row.typ))
-                || q.from.is_some_and(|f| row.time < f)
-                || q.to.is_some_and(|t| row.time >= t)
-                || q.by.as_ref().is_some_and(|by| &sg.s.meta.authors[row.author as usize] != by)
-            {
-                continue;
-            }
-            out.push(h);
-        }
-        out
+        // a igual puntuación (p.ej. filtro sin texto de consulta), lo más reciente primero
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(b.seg.cmp(&a.seg)).then(b.doc.cmp(&a.doc)));
+        hits.truncate(k);
+        (hits, saturated.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Busca un id de HN en todo el archivo: (segmento, doc, metadatos).
@@ -318,8 +402,17 @@ impl Engine {
                 }
             }
         }
-        if !pending.is_empty() {
-            let codec = self.lm.as_ref().context("falta el modelo LM")?;
+        // agrupar lo pendiente por modelo LM (normalmente uno solo)
+        let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+        for &i in &pending {
+            let f = self.segs[wants[i].0].s.man.lm_model.clone().unwrap_or_default();
+            match groups.iter_mut().find(|g| g.0 == f) {
+                Some(g) => g.1.push(i),
+                None => groups.push((f, vec![i])),
+            }
+        }
+        for (f, pending) in groups {
+            let codec = self.lms.get(&f).with_context(|| format!("falta el modelo LM {f}"))?;
             let raws: Vec<&[u8]> = pending
                 .iter()
                 .map(|&i| match &self.segs[wants[i].0].s.text {
@@ -329,7 +422,14 @@ impl Engine {
                 .collect();
             let limits: Vec<Option<usize>> = pending.iter().map(|&i| wants[i].2).collect();
             let tonly: Vec<bool> = pending.iter().map(|&i| wants[i].3).collect();
-            let dec = codec.decode_records_each(&raws, true, &limits, &tonly)?;
+            let checks: Vec<bool> = pending
+                .iter()
+                .map(|&i| match &self.segs[wants[i].0].s.text {
+                    TextSource::Lm(l) => l.rec_check(),
+                    _ => false,
+                })
+                .collect();
+            let dec = codec.decode_records_each(&raws, true, &limits, &tonly, &checks)?;
             let mut cache = self.cache.lock().unwrap();
             let mut titles = self.titles.lock().unwrap();
             for (&i, (rec, partial)) in pending.iter().zip(dec) {
@@ -363,23 +463,20 @@ impl Engine {
         }
     }
 
-    /// id de la raíz del hilo de un documento (él mismo si no tiene padre).
-    pub fn root_id(&self, seg: usize, doc: u32) -> u32 {
+    /// id de la story raíz del hilo de un documento (él mismo si no tiene padre).
+    /// `None` si la cadena de padres sale del archivo (padre en un mes no cargado).
+    pub fn root_id(&self, seg: usize, doc: u32) -> Option<u32> {
         let row = self.segs[seg].s.meta.row(doc as usize);
         let (mut id, mut parent) = (row.id, row.parent);
-        for _ in 0..256 {
+        for _ in 0..1024 {
             if parent == 0 {
-                return id;
+                return Some(id);
             }
-            match self.find_meta(parent) {
-                Some((_, _, r)) => {
-                    id = r.id;
-                    parent = r.parent;
-                }
-                None => return parent,
-            }
+            let (_, _, r) = self.find_meta(parent)?;
+            id = r.id;
+            parent = r.parent;
         }
-        id
+        None
     }
 
     /// Resultados completos. `full=false`: en el nivel LM solo se decodifica un fragmento.
@@ -389,7 +486,7 @@ impl Engine {
         let roots: Vec<Option<u32>> = hits
             .iter()
             .zip(&rows)
-            .map(|(h, r)| if r.parent == 0 { None } else { Some(self.root_id(h.seg, h.doc)) })
+            .map(|(h, r)| if r.parent == 0 { None } else { self.root_id(h.seg, h.doc) })
             .collect();
         let mut root_docs: Vec<(usize, usize)> = Vec::new();
         let mut root_pos: HashMap<u32, usize> = HashMap::new();

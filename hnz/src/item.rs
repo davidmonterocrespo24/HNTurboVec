@@ -9,13 +9,15 @@ use std::fs::File;
 use std::path::Path;
 
 /// Un ítem de HN tal como se guarda (sin pérdida) en el sistema.
-/// No se guardan: filas `deleted` (vacías) ni el orden de `kids` (se reconstruye con `parent`).
+/// Las filas `deleted` se conservan (solo metadatos: tipo, fecha, padre, dead) para no romper la
+/// cadena de los hilos. No se guarda el orden de `kids` (la estructura se reconstruye con `parent`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Item {
     pub id: u32,
     /// 1 story, 2 comment, 3 poll, 4 pollopt, 5 job
     pub typ: u8,
     pub dead: bool,
+    pub deleted: bool,
     pub by: String,
     /// segundos desde epoch (UTC)
     pub time: i64,
@@ -67,7 +69,7 @@ fn lists(a: &ArrayRef) -> Result<Vec<Vec<u32>>> {
     Ok(out)
 }
 
-/// Lee un Parquet mensual. Devuelve los ítems no borrados, ordenados por id.
+/// Lee un Parquet mensual. Devuelve todos los ítems (incluidos los `deleted`), ordenados por id.
 pub fn read_parquet(path: &Path) -> Result<Loaded> {
     let f = File::open(path).with_context(|| format!("abriendo {}", path.display()))?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(f)?.with_batch_size(65536).build()?;
@@ -98,7 +100,6 @@ pub fn read_parquet(path: &Path) -> Result<Loaded> {
         for i in 0..b.num_rows() {
             if del[i] != 0 {
                 deleted += 1;
-                continue;
             }
             if time_ms[i] % 1000 != 0 {
                 bail!("id {}: time con milisegundos ({}), el formato asume segundos", id[i], time_ms[i]);
@@ -107,6 +108,7 @@ pub fn read_parquet(path: &Path) -> Result<Loaded> {
                 id: id[i] as u32,
                 typ: typ[i] as u8,
                 dead: dead[i] != 0,
+                deleted: del[i] != 0,
                 by: by[i].clone(),
                 time: time_ms[i] / 1000,
                 text: text[i].clone(),

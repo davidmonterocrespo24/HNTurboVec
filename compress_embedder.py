@@ -15,7 +15,12 @@ ov.save_model(mc, dst, compress_to_fp16=False)
 print(f'comprimido en {time.time()-t0:.0f}s -> {dst}')
 
 tok = Tokenizer.from_file('models/gemma2_tokenizer.json')
-qs = [json.loads(l)['q'] for l in open('eval/2024-01.jsonl', encoding='utf-8')][:100]
+import os
+if os.path.exists('eval/2024-01.jsonl'):
+    qs = [json.loads(l)['q'] for l in open('eval/2024-01.jsonl', encoding='utf-8')][:100]
+else:
+    qs = ['how do I deal with burnout', 'rust async runtime', 'best text editor for programmers',
+          'is the iPad going to kill netbooks', 'startup funding advice', 'postgres vs mysql'] * 5
 def run(path):
     cm = core.compile_model(path, 'CPU', {'PERFORMANCE_HINT': 'LATENCY'})
     req = cm.create_infer_request()

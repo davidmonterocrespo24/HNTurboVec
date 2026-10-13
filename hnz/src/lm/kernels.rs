@@ -296,7 +296,7 @@ pub fn matmul(w: &Q8, xq: &[i8], sx: &[f32], bias: Option<&[f32]>, out: &mut [f3
     let mut acc = vec![0i32; n * t];
     if parallel && n * t * w.cols > 1 << 18 {
         let p = super::pool::pool();
-        let chunk = (n / (p.threads * 3)).max(16);
+        let chunk = (n / (p.threads.max(1) * 3)).max(16);
         let nchunks = n.div_ceil(chunk);
         let base = SendPtr(acc.as_mut_ptr());
         p.run(nchunks, &|ci| {

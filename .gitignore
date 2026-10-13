@@ -22,10 +22,14 @@ out/
 out_*/
 _dl/
 store/
-*.hnz
+*.building/
+*.retier/
+*.old/
+_cache_l2.bin
 
 # Modelos descargados / convertidos
 models/
+*.hnzlm
 *.onnx
 *.onnx_data
 *.gguf

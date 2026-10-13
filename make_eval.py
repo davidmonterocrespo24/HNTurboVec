@@ -1,9 +1,16 @@
-"""Genera consultas de evaluación (JSONL) para `hnz eval`: título de una story -> relevantes =
-comentarios de su hilo. Uso: python make_eval.py data/2024/2024-01.parquet 300 > eval/2024-01.jsonl"""
-import sys, json, collections, numpy as np, pyarrow.parquet as pq
+"""Genera consultas de evaluación (JSONL, UTF-8) para `hnz eval`: título de una story -> relevantes =
+comentarios de su hilo.
+Uso: python make_eval.py data/2024/2024-01.parquet 300 --out eval/2024-01.jsonl
+(escribe el fichero directamente en UTF-8: redirigir la salida con '>' en PowerShell 5.1 la convierte a UTF-16)"""
+import argparse, json, collections, sys
+import numpy as np, pyarrow.parquet as pq
 
-path, n = sys.argv[1], int(sys.argv[2])
-t = pq.read_table(path, columns=['id', 'type', 'parent', 'title', 'text', 'dead'])
+ap = argparse.ArgumentParser()
+ap.add_argument('parquet')
+ap.add_argument('n', type=int)
+ap.add_argument('--out', help='fichero de salida (UTF-8); si se omite, salida estándar')
+a = ap.parse_args()
+t = pq.read_table(a.parquet, columns=['id', 'type', 'parent', 'title', 'text', 'dead'])
 ids, typ, par, title, text, dead = (t[c].to_pylist() for c in ['id', 'type', 'parent', 'title', 'text', 'dead'])
 idx = {i: k for k, i in enumerate(ids)}
 root = []
@@ -16,5 +23,10 @@ cnt = collections.Counter(root[k] for k in range(len(ids)) if typ[k] == 2 and no
 stories = [r for r, c in cnt.items() if 15 <= c <= 60 and title[idx[r]]]
 rng = np.random.default_rng(1)
 rng.shuffle(stories)
-for r in stories[:n]:
-    print(json.dumps({'q': title[idx[r]], 'story': r, 'n_rel': cnt[r]}))
+lines = [json.dumps({'q': title[idx[r]], 'story': r, 'n_rel': cnt[r]}) for r in stories[:a.n]]
+if a.out:
+    with open(a.out, 'w', encoding='utf-8', newline='\n') as f:
+        f.write('\n'.join(lines) + '\n')
+else:
+    sys.stdout.reconfigure(encoding='utf-8')
+    print('\n'.join(lines))

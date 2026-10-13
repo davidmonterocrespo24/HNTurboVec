@@ -20,7 +20,11 @@ pub struct Manifest {
     pub version: u32,
     pub name: String,
     pub n_docs: usize,
+    /// nº de filas `deleted` (desde la versión 3 se CONSERVAN como metadatos; antes se omitían)
     pub deleted_skipped: usize,
+    /// identificador único de esta construcción (invalida cachés de versiones anteriores)
+    #[serde(default)]
+    pub build_id: u64,
     pub id_min: u32,
     pub id_max: u32,
     pub time_min: i64,
@@ -76,12 +80,24 @@ pub fn index_text(title: &str, url: &str, html: &str) -> String {
     format!("{title} {host} {}", htmlx::to_plain(html))
 }
 
+/// Carpetas que el motor ignora: construcciones a medias o restos de `retier`.
+pub fn is_transient_dir(p: &Path) -> bool {
+    let n = p.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
+    n.ends_with(".building") || n.ends_with(".retier") || n.ends_with(".old")
+}
+
 /// Construye un segmento completo: metadatos, texto (según nivel) e índice BM25.
-pub fn build(items: &[Item], deleted: usize, out: &Path, name: &str, tier: Tier) -> Result<Manifest> {
+/// Se construye en `<out>.building` y solo al final se sustituye `<out>` (un corte a mitad no deja
+/// un segmento mezclado que el motor pudiera servir).
+pub fn build(items: &[Item], deleted: usize, final_dir: &Path, name: &str, tier: Tier) -> Result<Manifest> {
     if items.is_empty() {
         bail!("segmento vacío");
     }
-    std::fs::create_dir_all(out)?;
+    let base = final_dir.file_name().context("la ruta del segmento debe terminar en un nombre de carpeta")?.to_string_lossy().to_string();
+    let tmp = final_dir.with_file_name(format!("{base}.building"));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp)?;
+    let out: &Path = &tmp;
     let t0 = Instant::now();
     // autores ordenados por frecuencia (los frecuentes reciben índices pequeños = varints de 1 byte)
     let mut freq: HashMap<&str, u32> = HashMap::new();
@@ -98,6 +114,7 @@ pub fn build(items: &[Item], deleted: usize, out: &Path, name: &str, tier: Tier)
             time: it.time,
             typ: it.typ,
             dead: it.dead,
+            deleted: it.deleted,
             parent: it.parent,
             author: aidx[it.by.as_str()],
             score: it.score,
@@ -142,14 +159,20 @@ pub fn build(items: &[Item], deleted: usize, out: &Path, name: &str, tier: Tier)
         let texts: Vec<String> = chunk.par_iter().map(|it| index_text(&it.title, &it.url, &it.text)).collect();
         b.add_batch(&texts);
     }
-    // términos en >2 % de los docs no se indexan: -12 % de tamaño sin pérdida de calidad (E18)
-    let info = b.write_opts(out, true, 0.02)?;
+    // sin poda por df: podar por segmento (E18) hacía desaparecer términos frecuentes de un periodo
+    // (p.ej. "covid" en 2020) y la búsqueda por palabras no los encontraba (revisión adversarial)
+    let info = b.write_opts(out, true, 1.0)?;
     eprintln!("  BM25: {} términos, {} postings ({:.1}s)", info.n_terms, info.n_postings, t1.elapsed().as_secs_f64());
+    let build_id = {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+        nanos ^ crate::cache::seg_key(name) ^ (items.len() as u64).rotate_left(17)
+    };
     let m = Manifest {
-        version: 2,
+        version: 3,
         name: name.to_string(),
         n_docs: items.len(),
         deleted_skipped: deleted,
+        build_id,
         id_min: items[0].id,
         id_max: items[items.len() - 1].id,
         time_min: items.iter().map(|i| i.time).min().unwrap(),
@@ -163,6 +186,11 @@ pub fn build(items: &[Item], deleted: usize, out: &Path, name: &str, tier: Tier)
         vec_bits: 0,
     };
     write_manifest(out, &m)?;
+    // sustituir el segmento final de forma (casi) atómica
+    if final_dir.exists() {
+        std::fs::remove_dir_all(final_dir).with_context(|| format!("borrando {}", final_dir.display()))?;
+    }
+    std::fs::rename(&tmp, final_dir).with_context(|| format!("renombrando {} -> {}", tmp.display(), final_dir.display()))?;
     Ok(m)
 }
 
@@ -216,7 +244,7 @@ impl Segment {
             TextSource::Zstd(t) => t.get(doc)?,
             TextSource::Lm(l) => {
                 let c = codec.context("hace falta el modelo LM para este segmento")?;
-                c.decode_records(&[l.raw(doc)], true, None, false)?.remove(0).0
+                c.decode_records(&[l.raw(doc)], true, None, false, l.rec_check())?.remove(0).0
             }
         };
         Ok(join(&m, t, &self.meta.authors))
@@ -228,6 +256,7 @@ pub fn join(m: &MetaRow, t: TextRec, authors: &[String]) -> Item {
         id: m.id,
         typ: m.typ,
         dead: m.dead,
+        deleted: m.deleted,
         by: authors[m.author as usize].clone(),
         time: m.time,
         text: t.text,

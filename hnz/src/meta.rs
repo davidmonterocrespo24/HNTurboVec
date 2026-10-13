@@ -16,6 +16,7 @@ pub struct MetaRow {
     pub time: i64,
     pub typ: u8,
     pub dead: bool,
+    pub deleted: bool,
     pub parent: u32,
     pub author: u32,
     pub score: i32,
@@ -37,7 +38,7 @@ fn encode_block(rows: &[MetaRow]) -> Vec<u8> {
         pt = r.time;
     }
     for r in rows {
-        out.push(r.typ | ((r.dead as u8) << 3));
+        out.push(r.typ | ((r.dead as u8) << 3) | ((r.deleted as u8) << 4));
     }
     for r in rows {
         put(&mut out, if r.parent == 0 { 0 } else { zz(r.id as i64 - r.parent as i64) });
@@ -83,6 +84,7 @@ fn decode_block(buf: &[u8], n: usize) -> Vec<MetaRow> {
         p += 1;
         r.typ = b & 7;
         r.dead = (b >> 3) & 1 == 1;
+        r.deleted = (b >> 4) & 1 == 1;
     }
     for r in rows.iter_mut() {
         let v = get(buf, &mut p);
@@ -211,6 +213,7 @@ mod tests {
                 time: 1_700_000_000 + (i as i64) * 7 - if i == 5 { 100 } else { 0 },
                 typ: (i % 5 + 1) as u8,
                 dead: i % 7 == 0,
+                deleted: i % 11 == 0,
                 parent: if i % 2 == 0 { 0 } else { 900 + i },
                 author: i * 11,
                 score: if i % 3 == 0 { -3 } else { i as i32 },
