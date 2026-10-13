@@ -114,3 +114,20 @@ pero potion agrupa también "por tono" ("nice, lovely, glad") → usar mejor mod
 | tema | 124,5 | 119,6 | 116,0 |
 | hilo agrupado por tema | 123,5 | 117,5 | **113,5** |
 **Conclusión:** agrupar por tema aporta < 1 %. El diccionario de zstd ya captura el vocabulario.
+
+### E10 — Velocidad de EmbeddingGemma 2 por dispositivo (`export_gemma2_ov.py`, `bench_embed_ir.py`, `bench_embed_speed.py`)
+- El ONNX de `onnx-community/embeddinggemma-2-ONNX` (multimodal) **falla en GPU/NPU** (entradas de
+  imagen/vídeo/audio de tamaño 0). Solución: exportar **solo la parte de texto** desde PyTorch a
+  OpenVINO IR (formas estáticas batch 32 × 128 tokens, pesos fp16). Coseno vs PyTorch: 0,99998.
+- **Hallazgo:** sentence-transformers carga el modelo en **bfloat16**, que esta CPU emula → lento.
+  Hay que forzar `.float()`.
+- Textos reales de HN (media 60 tokens, 15,3 % truncados a 128):
+| Dispositivo | docs/s | 49,3 M |
+|---|---|---|
+| **OpenVINO GPU (Arc 140T iGPU, fp16)** | **168,8** | **81 h (3,4 días)** |
+| OpenVINO CPU | 19,9 | 28,6 días |
+| PyTorch CPU float32 | 10,7 | 53 días |
+| onnxruntime CPU (ONNX fp16) | 4,5 | — |
+| NPU (AI Boost) | falla al compilar | — |
+**Conclusión:** embeber todo HN es viable en la iGPU (~3 días, mejorable con buckets de longitud y
+pesos int8). La CPU queda libre en paralelo para la compresión LM.
