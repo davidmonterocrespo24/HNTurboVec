@@ -162,3 +162,16 @@ pequeños; un motor propio int8 será bastante más rápido). Round-trip del tok
 - **Decisión:** se guardan sin pérdida texto, título, url, autor, fecha, score, descendants, parent,
   poll/parts y `dead`. No se guardan las filas `deleted` (vacías) ni el orden de `kids` (la estructura
   del hilo se reconstruye con `parent`; se pierde solo el orden en que HN mostraba las respuestas).
+
+### E12 — Núcleo en Rust: meta + texto zstd (`hnz build/verify/stats/bench`)
+Segmentos de 1 mes, bloques de 16, zstd-19 + diccionario 112 KB, metadatos en bloques de 1024.
+| Mes | Docs | B/ítem | 49,3 M | Transformación HTML | Verificación |
+|---|---|---|---|---|---|
+| 2010-06 | 80.363 (+2.366 borrados omitidos) | 128,0 | 6,31 GB | 35,7 % moderno + 64,3 % antiguo | **idénticos 100 %** |
+| 2015-06 | 166.390 (+5.246 borrados) | 133,1 | 6,56 GB | 100 % moderno | **idénticos 100 %** |
+| 2024-01 | 382.681 | 122,2 | 6,03 GB | 98,2 % moderno, 1,8 % crudo | **idénticos 100 %** |
+- Desglose 2024-01: texto 116,0 B, meta 4,84 B, autores 0,60 B, índice de bloques 0,52 B, diccionario 0,30 B.
+- Construir un mes: ~4,5 s (Python: minutos). Lectura aleatoria sin caché: ~67 µs/registro (1 hilo).
+- **Dos dialectos de HTML en HN:** antiguo (~2007-2012: `&#38; &#60; &#62;`, comillas/apóstrofos/barras
+  sin escapar) y moderno (`&amp; &#x27; &#x2F; …`). **Enlaces truncados** ("…", 60-95 caracteres) son
+  el 30-40 % de los enlaces → se guardan como (url, longitud).
