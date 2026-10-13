@@ -24,7 +24,7 @@ enum ModeArg {
     Keyword,
 }
 
-#[derive(Clone, Copy, ValueEnum, PartialEq, Eq)]
+#[derive(Clone, Copy, ValueEnum, PartialEq, Eq, Debug)]
 enum TierArg {
     /// caliente/templado: zstd en bloques (lectura en µs)
     Zstd,
@@ -103,6 +103,9 @@ enum Cmd {
         /// borrar el original al terminar (solo con --verify-all; si no, queda como <seg>.old)
         #[arg(long)]
         delete_old: bool,
+        /// bits de los vectores del segmento nuevo (por defecto 512 al enfriar a lm, si no los mismos)
+        #[arg(long)]
+        bits: Option<usize>,
         #[arg(long, default_value_t = 16)]
         block: usize,
         #[arg(long, default_value_t = 19)]
@@ -470,11 +473,16 @@ fn main() -> Result<()> {
             let m = segment::build(&items, deleted, &out, &name, t)?;
             eprintln!("segmento {} ({}) listo: {} docs en {:.1}s", m.name, m.text_tier, m.n_docs, t0.elapsed().as_secs_f64());
         }
-        Cmd::Retier { seg, tier, block, level, lm, verify_all, delete_old } => {
+        Cmd::Retier { seg, tier, block, level, lm, verify_all, delete_old, bits } => {
             let t0 = Instant::now();
             // ruta canónica con nombre de carpeta (p.ej. "--seg ." no sirve: no tiene nombre)
             let seg = std::fs::canonicalize(&seg).with_context(|| format!("{}", seg.display()))?;
             let name = seg.file_name().context("--seg debe ser la carpeta de un segmento")?.to_string_lossy().to_string();
+            if let Ok(cwd) = std::env::current_dir().and_then(std::fs::canonicalize) {
+                if cwd.starts_with(&seg) {
+                    bail!("el directorio actual está dentro del segmento ({}): ejecute retier desde otra carpeta (Windows no puede renombrarlo)", cwd.display());
+                }
+            }
             let tmp = seg.with_file_name(format!("{name}.retier"));
             let old = seg.with_file_name(format!("{name}.old"));
             if old.exists() {
@@ -526,10 +534,22 @@ fn main() -> Result<()> {
             let result = (|| -> Result<segment::Manifest> {
                 let mut m = segment::build(&items, s.man.deleted_skipped, &tmp, &s.man.name, t)?;
                 if s.man.vec_bits > 0 {
-                    std::fs::copy(seg.join("vec.bin"), tmp.join("vec.bin"))?;
+                    // MRL: los primeros `bits` signos son el vector truncado -> se recortan los códigos
+                    let new_bits = bits.unwrap_or(if tier == TierArg::Lm { 512 } else { s.man.vec_bits }).min(s.man.vec_bits);
+                    let (ob, nb) = (s.man.vec_bits / 8, new_bits / 8);
+                    let codes = std::fs::read(seg.join("vec.bin"))?;
+                    let cut: Vec<u8> = if nb == ob { codes } else { codes.chunks_exact(ob).flat_map(|c| c[..nb].iter().copied()).collect() };
+                    std::fs::write(tmp.join("vec.bin"), cut)?;
                     std::fs::copy(seg.join("vec.has"), tmp.join("vec.has"))?;
-                    m.vec_bits = s.man.vec_bits;
+                    m.vec_bits = new_bits;
                     segment::write_manifest(&tmp, &m)?;
+                }
+                // conservar el registro de meses de pipeline.py, con el nivel nuevo
+                if let Ok(txt) = std::fs::read_to_string(seg.join("sources.json")) {
+                    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&txt) {
+                        v["tier"] = serde_json::Value::String(m.text_tier.clone());
+                        std::fs::write(tmp.join("sources.json"), v.to_string())?;
+                    }
                 }
                 let ns = Segment::open(&tmp)?;
                 let docs: Vec<usize> = if verify_all { (0..items.len()).collect() } else { rand_docs(2000.min(items.len()), items.len(), 77) };
@@ -564,6 +584,7 @@ fn main() -> Result<()> {
                 Ok(m) => m,
                 Err(e) => {
                     let _ = std::fs::remove_dir_all(&tmp);
+                    let _ = std::fs::remove_dir_all(seg.with_file_name(format!("{name}.retier.building")));
                     return Err(e.context("retier abortado; el segmento original no se ha modificado"));
                 }
             };
@@ -643,7 +664,7 @@ fn main() -> Result<()> {
             let t0 = Instant::now();
             let eng = Engine::open(&root, &m.models)?;
             let t_open = t0.elapsed();
-            let mut emb = if q.mode != Mode::Keyword { Some(Embedder::new(&m.models, &m.ov_libs)?) } else { None };
+            let mut emb = if q.mode != Mode::Keyword && !text.trim().is_empty() { Some(Embedder::new(&m.models, &m.ov_libs)?) } else { None };
             let t_load = t0.elapsed();
             let t1 = Instant::now();
             let qv = match emb.as_mut() {
@@ -709,7 +730,7 @@ fn main() -> Result<()> {
                         };
                         let q = make_query(&text, &s)?;
                         let t0 = Instant::now();
-                        let qv = if q.mode != Mode::Keyword { Some(emb.lock().unwrap().embed_query(&text)?) } else { None };
+                        let qv = if q.mode != Mode::Keyword && !text.trim().is_empty() { Some(emb.lock().unwrap().embed_query(&text)?) } else { None };
                         let t_emb = t0.elapsed();
                         let hits = eng.search(&q, qv.as_deref());
                         let t_s = t0.elapsed();

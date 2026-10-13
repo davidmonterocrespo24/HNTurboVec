@@ -131,7 +131,30 @@ pub fn write(dir: &Path, rows: &[MetaRow], authors: &[String]) -> Result<()> {
     std::fs::write(dir.join("meta.idx"), idx)?;
     let joined = authors.join("\n");
     std::fs::write(dir.join("authors.zst"), zstd::bulk::compress(joined.as_bytes(), 19)?)?;
+    // columna de banderas (1 B/doc: tipo | dead<<3 | deleted<<4) para filtrar sin descomprimir
+    // bloques; muy repetitiva -> ~0,1 B/doc con zstd
+    let flags: Vec<u8> = rows.iter().map(flag_byte).collect();
+    std::fs::write(dir.join("meta.flags.zst"), zstd::bulk::compress(&flags, 19)?)?;
     Ok(())
+}
+
+pub fn flag_byte(r: &MetaRow) -> u8 {
+    r.typ | ((r.dead as u8) << 3) | ((r.deleted as u8) << 4)
+}
+
+/// Columna de banderas de un segmento: del fichero si existe; si no (segmentos antiguos), se
+/// calcula descomprimiendo todos los bloques de metadatos.
+pub fn load_flags(dir: &Path, meta: &MetaStore) -> Result<Vec<u8>> {
+    let p = dir.join("meta.flags.zst");
+    if p.exists() {
+        let f = zstd::stream::decode_all(&std::fs::read(&p)?[..])?;
+        if f.len() == meta.n_docs {
+            return Ok(f);
+        }
+    }
+    use rayon::prelude::*;
+    let parts: Vec<Vec<u8>> = (0..meta.n_blocks()).into_par_iter().map(|b| meta.block(b).iter().map(flag_byte).collect()).collect();
+    Ok(parts.concat())
 }
 
 pub struct MetaStore {

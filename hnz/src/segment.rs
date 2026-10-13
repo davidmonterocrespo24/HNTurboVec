@@ -83,7 +83,7 @@ pub fn index_text(title: &str, url: &str, html: &str) -> String {
 /// Carpetas que el motor ignora: construcciones a medias o restos de `retier`.
 pub fn is_transient_dir(p: &Path) -> bool {
     let n = p.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
-    n.ends_with(".building") || n.ends_with(".retier") || n.ends_with(".old")
+    n.ends_with(".building") || n.ends_with(".retier") || n.ends_with(".old") || n.contains(".old.")
 }
 
 /// Construye un segmento completo: metadatos, texto (según nivel) e índice BM25.
@@ -94,6 +94,10 @@ pub fn build(items: &[Item], deleted: usize, final_dir: &Path, name: &str, tier:
         bail!("segmento vacío");
     }
     let base = final_dir.file_name().context("la ruta del segmento debe terminar en un nombre de carpeta")?.to_string_lossy().to_string();
+    // nunca borrar una carpeta que no sea un segmento (p.ej. --out out o --out data)
+    if final_dir.exists() && !final_dir.join("manifest.json").exists() && std::fs::read_dir(final_dir)?.next().is_some() {
+        bail!("{} existe y no es un segmento de hnz (no tiene manifest.json): elija otra carpeta --out", final_dir.display());
+    }
     let tmp = final_dir.with_file_name(format!("{base}.building"));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
@@ -186,11 +190,21 @@ pub fn build(items: &[Item], deleted: usize, final_dir: &Path, name: &str, tier:
         vec_bits: 0,
     };
     write_manifest(out, &m)?;
-    // sustituir el segmento final de forma (casi) atómica
+    // sustituir el segmento final: primero se aparta el viejo con un rename (atómico) y solo
+    // después se borra; si algo falla, ni el viejo ni el nuevo quedan a medias
     if final_dir.exists() {
-        std::fs::remove_dir_all(final_dir).with_context(|| format!("borrando {}", final_dir.display()))?;
+        let old = final_dir.with_file_name(format!("{base}.old.{build_id:016x}"));
+        std::fs::rename(final_dir, &old).with_context(|| format!("apartando {}", final_dir.display()))?;
+        if let Err(e) = std::fs::rename(&tmp, final_dir) {
+            let _ = std::fs::rename(&old, final_dir);
+            return Err(anyhow::anyhow!(e).context(format!("renombrando {} -> {}", tmp.display(), final_dir.display())));
+        }
+        if let Err(e) = std::fs::remove_dir_all(&old) {
+            eprintln!("aviso: no se pudo borrar {} ({e}); el motor lo ignora, bórrelo a mano", old.display());
+        }
+    } else {
+        std::fs::rename(&tmp, final_dir).with_context(|| format!("renombrando {} -> {}", tmp.display(), final_dir.display()))?;
     }
-    std::fs::rename(&tmp, final_dir).with_context(|| format!("renombrando {} -> {}", tmp.display(), final_dir.display()))?;
     Ok(m)
 }
 

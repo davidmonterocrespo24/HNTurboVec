@@ -164,7 +164,7 @@ impl VecIndex {
                 .par_iter()
                 .map(|&st| {
                     let en = (st + CH).min(hi);
-                    let mut h: BinaryHeap<(u32, u32)> = BinaryHeap::with_capacity(cand + 1);
+                    let mut h: BinaryHeap<(u32, u32)> = BinaryHeap::with_capacity(cand.min(en - st) + 1);
                     for d in st..en {
                         if !self.has(d) {
                             continue;

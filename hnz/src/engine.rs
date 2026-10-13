@@ -41,6 +41,8 @@ pub struct Engine {
     /// títulos de stories del nivel LM ya decodificados (contexto del hilo)
     titles: Mutex<HashMap<(usize, u32), String>>,
     seg_keys: Vec<u64>,
+    /// por segmento, 1 byte por doc: tipo | dead<<3 | deleted<<4 (filtros sin descomprimir nada)
+    flags: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -197,7 +199,9 @@ impl Engine {
             .iter()
             .map(|s| crate::cache::seg_key(&s.s.man.name) ^ s.s.man.build_id.rotate_left(13) ^ (s.s.man.n_docs as u64).rotate_left(41))
             .collect();
-        Ok(Self { segs, total_docs, lms, cache: Mutex::new(HashMap::new()), l2, titles: Mutex::new(HashMap::new()), seg_keys })
+        // columna de banderas en RAM (1 B/doc), construida en paralelo una vez al abrir
+        let flags: Vec<Vec<u8>> = segs.iter().map(|sg| crate::meta::load_flags(&sg.s.dir, &sg.s.meta)).collect::<Result<_>>()?;
+        Ok(Self { segs, total_docs, lms, cache: Mutex::new(HashMap::new()), l2, titles: Mutex::new(HashMap::new()), seg_keys, flags })
     }
 
     /// Modelo LM de un segmento del nivel frío.
@@ -219,29 +223,30 @@ impl Engine {
             }
     }
 
-    /// Búsqueda top-k. Los filtros (autor, tipo, dead, fechas) se aplican AL GENERAR candidatos:
-    /// - autor o tipos raros (job/poll/pollopt): se recorren los metadatos del rango y se puntúan
-    ///   todos los que cumplen (exacto);
-    /// - resto: candidatos de vectores + BM25 filtrados por segmento y, si no llegan a k y la lista
-    ///   estaba recortada, se repite con 4x más candidatos (hasta 16x).
-    pub fn search(&self, q: &Query, qvec: Option<&[f32]>) -> Vec<Hit> {
-        let k = q.k.clamp(1, MAX_K);
-        let mut mult = 1;
-        loop {
-            let (hits, saturated) = self.search_once(q, qvec, k, mult);
-            if hits.len() >= k || !saturated || mult >= 16 {
-                return hits;
-            }
-            mult *= 4;
-        }
+    /// Filtros de tipo/dead/deleted con la columna de banderas en RAM (sin descomprimir nada).
+    #[inline]
+    fn passes_flags(&self, q: &Query, si: usize, d: u32) -> bool {
+        let f = self.flags[si][d as usize];
+        let (typ, dead, deleted) = (f & 7, (f >> 3) & 1 == 1, (f >> 4) & 1 == 1);
+        !deleted && (q.include_dead || !dead) && (q.types.is_empty() || q.types.contains(&typ))
     }
 
-    fn search_once(&self, q: &Query, qvec: Option<&[f32]>, k: usize, mult: usize) -> (Vec<Hit>, bool) {
+    /// Búsqueda top-k. Los filtros se aplican antes del recorte final:
+    /// - sin texto: listado de lo más reciente a lo más antiguo que cumple los filtros (parada en k);
+    /// - autor o tipos raros (job/poll/pollopt): recorrido exacto de los metadatos del rango;
+    /// - resto: candidatos de vectores + BM25 por segmento, puntuados y filtrados en orden de
+    ///   puntuación con la columna de banderas; si un segmento no llega a k válidos y su lista
+    ///   estaba recortada, se amplía SOLO ese segmento (4x, hasta 16x).
+    /// Las fechas se comprueban exactamente en los bloques extremos del rango; en el interior se
+    /// usa el orden temporal de los ids.
+    pub fn search(&self, q: &Query, qvec: Option<&[f32]>) -> Vec<Hit> {
+        let k = q.k.clamp(1, MAX_K);
         let mut terms = tokenize::terms(&q.text);
         terms.sort();
         terms.dedup();
+        let has_text = !q.text.trim().is_empty();
         let use_bm25 = q.mode != Mode::Vector && !terms.is_empty();
-        let use_vec = q.mode != Mode::Keyword && qvec.is_some();
+        let use_vec = q.mode != Mode::Keyword && qvec.is_some() && has_text;
         // IDF global (df sumado en todos los segmentos)
         let n = self.total_docs as f32;
         let idf: Vec<f32> = terms
@@ -251,20 +256,21 @@ impl Engine {
                 ((n - df as f32 + 0.5) / (df as f32 + 0.5) + 1.0).ln()
             })
             .collect();
+        let listing = !use_bm25 && !use_vec;
         let only_rare_types = !q.types.is_empty() && q.types.iter().all(|t| matches!(t, 3..=5));
         let scan = q.by.is_some() || only_rare_types;
-        let mut kc = (k * 20).max(200) * mult;
-        if !q.types.is_empty() {
-            kc *= 5; // stories ~14 % de los ítems
-        }
-        let saturated = std::sync::atomic::AtomicBool::new(false);
+        let fuse = |v: f32, b: f32| match q.mode {
+            Mode::Vector => v,
+            Mode::Keyword => b,
+            Mode::Hybrid => v + q.w_bm25 * b / (b + q.c_bm25),
+        };
         let per_seg: Vec<Vec<Hit>> = self
             .segs
             .par_iter()
             .enumerate()
             .filter_map(|(si, sg)| {
                 let m = &sg.s.man;
-                if q.from.is_some_and(|f| m.time_max < f) || q.to.is_some_and(|t| m.time_min >= t) {
+                if m.n_docs == 0 || q.from.is_some_and(|f| m.time_max < f) || q.to.is_some_and(|t| m.time_min >= t) {
                     return None;
                 }
                 let lo = q.from.map(|t| sg.s.meta.doc_at_time(t)).unwrap_or(0) as u32;
@@ -276,6 +282,24 @@ impl Engine {
                     Some(by) => Some(sg.s.meta.authors.iter().position(|a| a == by)? as u32),
                     None => None,
                 };
+                let (b0, b1) = (lo as usize / META_BLOCK, (hi as usize - 1) / META_BLOCK);
+                if listing {
+                    // sin señal de texto: lo más reciente primero, con parada temprana
+                    let mut out = Vec::with_capacity(k);
+                    'blocks: for b in (b0..=b1).rev() {
+                        let rows = sg.s.meta.block(b);
+                        for kk in (0..rows.len()).rev() {
+                            let d = b * META_BLOCK + kk;
+                            if d >= lo as usize && d < hi as usize && self.passes(q, si, &rows[kk], author) {
+                                out.push(Hit { seg: si, doc: d as u32, v: 0.0, b: 0.0, score: 0.0 });
+                                if out.len() >= k {
+                                    break 'blocks;
+                                }
+                            }
+                        }
+                    }
+                    return Some(out);
+                }
                 let tps: Vec<(TermPost, f32)> = match (&sg.bm25, use_bm25) {
                     (Some(b), true) => terms.iter().zip(&idf).filter_map(|(t, &w)| b.lookup(t).map(|x| (x.0, w))).collect(),
                     _ => Vec::new(),
@@ -284,10 +308,32 @@ impl Engine {
                     (Some(v), true) => Some(QueryLut::new(qvec.unwrap(), v.nbytes)),
                     _ => None,
                 };
-                let mut cand: Vec<u32> = Vec::new();
+                let score = |cand: &[u32]| -> Vec<Hit> {
+                    let vs = match (&sg.vec, &lut) {
+                        (Some(v), Some(l)) => v.score_docs(l, cand),
+                        _ => vec![f32::NEG_INFINITY; cand.len()],
+                    };
+                    let bs = match (&sg.bm25, tps.is_empty()) {
+                        (Some(b), false) => b.score_docs(&tps, cand),
+                        _ => vec![0.0; cand.len()],
+                    };
+                    cand.iter()
+                        .enumerate()
+                        // solo documentos con alguna señal de la consulta: término (palabras) o vector
+                        .filter(|&(i, _)| match q.mode {
+                            Mode::Keyword => bs[i] > 0.0,
+                            Mode::Vector => vs[i].is_finite(),
+                            Mode::Hybrid => vs[i].is_finite() || bs[i] > 0.0,
+                        })
+                        .map(|(i, &d)| {
+                            let v = if vs[i].is_finite() { vs[i] } else { -1.0 };
+                            Hit { seg: si, doc: d, v, b: bs[i], score: fuse(v, bs[i]) }
+                        })
+                        .collect()
+                };
                 if scan {
-                    // recorrido exacto de los metadatos del rango
-                    let (b0, b1) = (lo as usize / META_BLOCK, (hi as usize - 1) / META_BLOCK);
+                    // recorrido exacto de los metadatos del rango (autor / tipos raros)
+                    let mut cand: Vec<u32> = Vec::new();
                     for b in b0..=b1 {
                         for (kk, row) in sg.s.meta.block(b).iter().enumerate() {
                             let d = b * META_BLOCK + kk;
@@ -296,66 +342,72 @@ impl Engine {
                             }
                         }
                     }
+                    let mut hs = score(&cand);
+                    hs.sort_by(|a, b| b.score.total_cmp(&a.score).then(b.doc.cmp(&a.doc)));
+                    hs.truncate(k);
+                    return Some(hs);
+                }
+                // filas de los bloques extremos (para la comprobación exacta de fechas)
+                let edge: HashMap<usize, Vec<MetaRow>> = if q.from.is_some() || q.to.is_some() {
+                    [b0, b1].iter().map(|&b| (b, sg.s.meta.block(b))).collect()
                 } else {
-                    let mut raw: Vec<u32> = Vec::new();
-                    if let (Some(v), Some(l)) = (&sg.vec, &lut) {
-                        let c1 = q.vec_cand.unwrap_or((kc * 10).max(2000));
-                        let r = v.search(l, lo as usize, hi as usize, c1, kc);
-                        if r.len() >= kc {
-                            saturated.store(true, std::sync::atomic::Ordering::Relaxed);
+                    HashMap::new()
+                };
+                let time_ok = |d: u32| -> bool {
+                    match edge.get(&(d as usize / META_BLOCK)) {
+                        Some(rows) => {
+                            let t = rows[d as usize % META_BLOCK].time;
+                            !q.from.is_some_and(|f| t < f) && !q.to.is_some_and(|x| t >= x)
                         }
+                        None => true,
+                    }
+                };
+                let mut mult = 1;
+                loop {
+                    let mut kc = (k * 20).max(200) * mult;
+                    if !q.types.is_empty() {
+                        kc *= 5; // stories ~14 % de los ítems
+                    }
+                    let kc = kc.min((hi - lo) as usize);
+                    let mut raw: Vec<u32> = Vec::new();
+                    let mut saturated = false;
+                    if let (Some(v), Some(l)) = (&sg.vec, &lut) {
+                        let c1 = q.vec_cand.unwrap_or((kc * 10).max(2000)).min((hi - lo) as usize);
+                        let r = v.search(l, lo as usize, hi as usize, c1, kc);
+                        saturated |= r.len() >= kc;
                         raw.extend(r.into_iter().map(|x| x.0));
                     }
                     if let (Some(b), false) = (&sg.bm25, tps.is_empty()) {
                         let r = b.top_k(&tps, lo, hi, kc);
-                        if r.len() >= kc {
-                            saturated.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
+                        saturated |= r.len() >= kc;
                         raw.extend(r.into_iter().map(|x| x.0));
                     }
                     raw.sort_unstable();
                     raw.dedup();
-                    // filtrar con los metadatos (cada bloque se descomprime una vez)
-                    let mut blk: Option<(usize, Vec<MetaRow>)> = None;
-                    for d in raw {
-                        let b = d as usize / META_BLOCK;
-                        if blk.as_ref().map_or(true, |x| x.0 != b) {
-                            blk = Some((b, sg.s.meta.block(b)));
-                        }
-                        let row = &blk.as_ref().unwrap().1[d as usize % META_BLOCK];
-                        if self.passes(q, si, row, author) {
-                            cand.push(d);
+                    let mut hs = score(&raw);
+                    hs.sort_by(|a, b| b.score.total_cmp(&a.score).then(b.doc.cmp(&a.doc)));
+                    // filtrar en orden de puntuación hasta tener k válidos
+                    let mut out = Vec::with_capacity(k);
+                    for h in hs {
+                        if self.passes_flags(q, si, h.doc) && time_ok(h.doc) {
+                            out.push(h);
+                            if out.len() >= k {
+                                break;
+                            }
                         }
                     }
+                    if out.len() >= k || !saturated || mult >= 16 {
+                        return Some(out);
+                    }
+                    mult *= 4;
                 }
-                let vs = match (&sg.vec, &lut) {
-                    (Some(v), Some(l)) => v.score_docs(l, &cand),
-                    _ => vec![0.0; cand.len()],
-                };
-                let bs = match (&sg.bm25, tps.is_empty()) {
-                    (Some(b), false) => b.score_docs(&tps, &cand),
-                    _ => vec![0.0; cand.len()],
-                };
-                Some(
-                    cand.iter()
-                        .enumerate()
-                        .map(|(i, &d)| Hit { seg: si, doc: d, v: if vs[i].is_finite() { vs[i] } else { -1.0 }, b: bs[i], score: 0.0 })
-                        .collect(),
-                )
             })
             .collect();
         let mut hits: Vec<Hit> = per_seg.into_iter().flatten().collect();
-        for h in hits.iter_mut() {
-            h.score = match q.mode {
-                Mode::Vector => h.v,
-                Mode::Keyword => h.b,
-                Mode::Hybrid => h.v + q.w_bm25 * h.b / (h.b + q.c_bm25),
-            };
-        }
-        // a igual puntuación (p.ej. filtro sin texto de consulta), lo más reciente primero
+        // a igual puntuación (p.ej. listado sin texto), lo más reciente primero
         hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(b.seg.cmp(&a.seg)).then(b.doc.cmp(&a.doc)));
         hits.truncate(k);
-        (hits, saturated.load(std::sync::atomic::Ordering::Relaxed))
+        hits
     }
 
     /// Busca un id de HN en todo el archivo: (segmento, doc, metadatos).
