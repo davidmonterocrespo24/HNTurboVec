@@ -141,6 +141,47 @@ mod x86 {
         }
         hsum(acc)
     }
+
+    /// Suma horizontal de 8 vectores a la vez -> [Σa0, …, Σa7].
+    #[inline(always)]
+    unsafe fn hsum8(a: &[__m256i; 8]) -> [i32; 8] {
+        let t0 = _mm256_hadd_epi32(a[0], a[1]);
+        let t1 = _mm256_hadd_epi32(a[2], a[3]);
+        let t2 = _mm256_hadd_epi32(a[4], a[5]);
+        let t3 = _mm256_hadd_epi32(a[6], a[7]);
+        let u0 = _mm256_hadd_epi32(t0, t1);
+        let u1 = _mm256_hadd_epi32(t2, t3);
+        let r = _mm256_add_epi32(_mm256_permute2x128_si256(u0, u1, 0x20), _mm256_permute2x128_si256(u0, u1, 0x31));
+        let mut o = [0i32; 8];
+        _mm256_storeu_si256(o.as_mut_ptr() as *mut __m256i, r);
+        o
+    }
+
+    /// 2 filas x 4 tokens (8 acumuladores): out[0..4] = w0·x[0..4], out[4..8] = w1·x[0..4].
+    #[target_feature(enable = "avx2,avxvnni")]
+    pub unsafe fn dot2x4_vnni(w0: &[i8], w1: &[i8], x: [&[u8]; 4], out: &mut [i32; 8]) {
+        let k = w0.len();
+        let mut a = [_mm256_setzero_si256(); 8];
+        let mut i = 0;
+        while i < k {
+            let x0 = _mm256_loadu_si256(x[0].as_ptr().add(i) as *const __m256i);
+            let x1 = _mm256_loadu_si256(x[1].as_ptr().add(i) as *const __m256i);
+            let x2 = _mm256_loadu_si256(x[2].as_ptr().add(i) as *const __m256i);
+            let x3 = _mm256_loadu_si256(x[3].as_ptr().add(i) as *const __m256i);
+            let v0 = _mm256_loadu_si256(w0.as_ptr().add(i) as *const __m256i);
+            let v1 = _mm256_loadu_si256(w1.as_ptr().add(i) as *const __m256i);
+            a[0] = _mm256_dpbusd_avx_epi32(a[0], x0, v0);
+            a[1] = _mm256_dpbusd_avx_epi32(a[1], x1, v0);
+            a[2] = _mm256_dpbusd_avx_epi32(a[2], x2, v0);
+            a[3] = _mm256_dpbusd_avx_epi32(a[3], x3, v0);
+            a[4] = _mm256_dpbusd_avx_epi32(a[4], x0, v1);
+            a[5] = _mm256_dpbusd_avx_epi32(a[5], x1, v1);
+            a[6] = _mm256_dpbusd_avx_epi32(a[6], x2, v1);
+            a[7] = _mm256_dpbusd_avx_epi32(a[7], x3, v1);
+            i += 32;
+        }
+        *out = hsum8(&a);
+    }
 }
 
 /// Calcula los acumuladores enteros de las filas n0..n1 de W contra los t tokens.
@@ -148,9 +189,47 @@ mod x86 {
 fn rows_acc(w: &Q8, xq: &[i8], xu: &[u8], t: usize, n0: usize, n1: usize, dst: &mut [i32]) {
     let k = w.cols;
     let kern = if k % 32 == 0 { kernel() } else { Kernel::Scalar };
+    // AVX-VNNI con bloques de 2 filas x 4 tokens
+    #[cfg(target_arch = "x86_64")]
+    if kern == Kernel::Vnni && std::env::var_os("HNZ_KERNEL_1ROW").is_none() {
+        let xs = |ti: usize| &xu[ti * k..(ti + 1) * k];
+        let mut r = n0;
+        while r + 1 < n1 {
+            let (w0, w1) = (w.row(r), w.row(r + 1));
+            let (c0, c1) = (128 * w.rowsum[r], 128 * w.rowsum[r + 1]);
+            let (b0, b1) = ((r - n0) * t, (r + 1 - n0) * t);
+            let mut ti = 0;
+            let mut o = [0i32; 8];
+            while ti + 4 <= t {
+                unsafe { x86::dot2x4_vnni(w0, w1, [xs(ti), xs(ti + 1), xs(ti + 2), xs(ti + 3)], &mut o) };
+                for j in 0..4 {
+                    dst[b0 + ti + j] = o[j] - c0;
+                    dst[b1 + ti + j] = o[4 + j] - c1;
+                }
+                ti += 4;
+            }
+            while ti < t {
+                dst[b0 + ti] = unsafe { x86::dot1_vnni(w0, xs(ti)) } - c0;
+                dst[b1 + ti] = unsafe { x86::dot1_vnni(w1, xs(ti)) } - c1;
+                ti += 1;
+            }
+            r += 2;
+        }
+        if r < n1 {
+            rows_acc_1(w, xq, xu, t, r, r + 1, n0, kern, dst);
+        }
+        return;
+    }
+    rows_acc_1(w, xq, xu, t, n0, n1, n0, kern, dst);
+}
+
+/// Versión fila a fila (escalar, AVX2, o VNNI 1x4). `base` = primera fila de `dst`.
+#[allow(clippy::too_many_arguments)]
+fn rows_acc_1(w: &Q8, xq: &[i8], xu: &[u8], t: usize, n0: usize, n1: usize, base: usize, kern: Kernel, dst: &mut [i32]) {
+    let k = w.cols;
     for r in n0..n1 {
         let wr = w.row(r);
-        let d = &mut dst[(r - n0) * t..(r - n0 + 1) * t];
+        let d = &mut dst[(r - base) * t..(r - base + 1) * t];
         match kern {
             #[cfg(target_arch = "x86_64")]
             Kernel::Vnni => {

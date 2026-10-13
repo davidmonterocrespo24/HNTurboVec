@@ -37,6 +37,19 @@ pub struct Bm25Info {
     pub avgdl: f32,
     pub n_terms: usize,
     pub n_postings: u64,
+    /// false = postings booleanos (tf=1), más pequeños
+    #[serde(default = "yes")]
+    pub with_tf: bool,
+    /// términos con df/n_docs > este valor no se indexan (stopwords automáticas)
+    #[serde(default = "one")]
+    pub max_df_ratio: f32,
+}
+
+fn yes() -> bool {
+    true
+}
+fn one() -> f32 {
+    1.0
 }
 
 pub struct Builder {
@@ -96,7 +109,12 @@ impl Builder {
     }
 
     pub fn write(self, dir: &Path) -> Result<Bm25Info> {
-        let mut terms: Vec<(String, u32)> = self.dict.into_iter().collect();
+        self.write_opts(dir, true, 1.0)
+    }
+
+    pub fn write_opts(self, dir: &Path, with_tf: bool, max_df_ratio: f32) -> Result<Bm25Info> {
+        let max_df = (max_df_ratio as f64 * self.norms.len() as f64).ceil() as usize;
+        let mut terms: Vec<(String, u32)> = self.dict.into_iter().filter(|(_, id)| self.post[*id as usize].len() <= max_df.max(1)).collect();
         terms.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         let mut post_bytes: Vec<u8> = Vec::new();
         let mut fb = MapBuilder::new(BufWriter::new(File::create(dir.join("bm25.fst"))?))?;
@@ -105,10 +123,11 @@ impl Builder {
             let p = &self.post[*id as usize];
             n_postings += p.len() as u64;
             let val = if p.len() == 1 {
-                1u64 | ((p[0].1.min(255) as u64) << 1) | ((p[0].0 as u64) << 9)
+                let tf = if with_tf { p[0].1.min(255) } else { 1 };
+                1u64 | ((tf as u64) << 1) | ((p[0].0 as u64) << 9)
             } else {
                 let off = post_bytes.len() as u64;
-                encode_postings(p, &mut post_bytes);
+                encode_postings(p, &mut post_bytes, with_tf);
                 off << 1
             };
             fb.insert(w.as_bytes(), val)?;
@@ -121,13 +140,15 @@ impl Builder {
             avgdl: self.total_len as f32 / self.norms.len().max(1) as f32,
             n_terms: terms.len(),
             n_postings,
+            with_tf,
+            max_df_ratio,
         };
         std::fs::write(dir.join("bm25.json"), serde_json::to_string_pretty(&info)?)?;
         Ok(info)
     }
 }
 
-fn encode_postings(p: &[(u32, u32)], out: &mut Vec<u8>) {
+fn encode_postings(p: &[(u32, u32)], out: &mut Vec<u8>, with_tf: bool) {
     put(out, p.len() as u64);
     let nfull = p.len() / BLK;
     let bp = BitPacker4x::new();
@@ -143,14 +164,16 @@ fn encode_postings(p: &[(u32, u32)], out: &mut Vec<u8>) {
             tfs[i] = x.1 - 1;
         }
         let db = bp.num_bits_sorted(prev_last, &docs);
-        let tb = bp.num_bits(&tfs);
+        let tb = if with_tf { bp.num_bits(&tfs) } else { 0 };
         let start = payloads.len();
         payloads.push(db);
         payloads.push(tb);
         let n = bp.compress_sorted(prev_last, &docs, &mut buf, db);
         payloads.extend_from_slice(&buf[..n]);
-        let n = bp.compress(&tfs, &mut buf, tb);
-        payloads.extend_from_slice(&buf[..n]);
+        if with_tf {
+            let n = bp.compress(&tfs, &mut buf, tb);
+            payloads.extend_from_slice(&buf[..n]);
+        }
         put(&mut headers, (docs[BLK - 1] - prev_last) as u64);
         put(&mut headers, (payloads.len() - start) as u64);
         prev_last = docs[BLK - 1];
@@ -160,7 +183,9 @@ fn encode_postings(p: &[(u32, u32)], out: &mut Vec<u8>) {
     let mut prev = prev_last;
     for x in &p[nfull * BLK..] {
         put(out, (x.0 - prev) as u64);
-        put(out, x.1 as u64);
+        if with_tf {
+            put(out, x.1 as u64);
+        }
         prev = x.0;
     }
 }
@@ -174,6 +199,7 @@ pub enum TermPost {
 /// Cursor sobre una lista de postings.
 pub struct Cursor<'a> {
     post: &'a [u8],
+    with_tf: bool,
     single: Option<(u32, u32)>,
     df: usize,
     nfull: usize,
@@ -188,9 +214,10 @@ pub struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
-    fn new(post: &'a [u8], t: TermPost) -> Self {
+    fn new(post: &'a [u8], t: TermPost, with_tf: bool) -> Self {
         let mut c = Cursor {
             post,
+            with_tf,
             single: None,
             df: 1,
             nfull: 0,
@@ -242,9 +269,13 @@ impl<'a> Cursor<'a> {
             let tb = self.post[o + 1];
             let init = if b == 0 { 0 } else { self.lasts[b - 1] };
             let n = bp.decompress_sorted(init, &self.post[o + 2..], &mut self.docs, db);
-            bp.decompress(&self.post[o + 2 + n..], &mut self.tfs, tb);
-            for t in self.tfs.iter_mut() {
-                *t += 1;
+            if self.with_tf {
+                bp.decompress(&self.post[o + 2 + n..], &mut self.tfs, tb);
+                for t in self.tfs.iter_mut() {
+                    *t += 1;
+                }
+            } else {
+                self.tfs.fill(1);
             }
             self.len = BLK;
         } else {
@@ -254,7 +285,7 @@ impl<'a> Cursor<'a> {
             for i in 0..cnt {
                 prev += get(self.post, &mut p) as u32;
                 self.docs[i] = prev;
-                self.tfs[i] = get(self.post, &mut p) as u32;
+                self.tfs[i] = if self.with_tf { get(self.post, &mut p) as u32 } else { 1 };
             }
             self.len = cnt;
         }
@@ -348,7 +379,7 @@ impl Bm25 {
     }
 
     pub fn cursor(&self, t: TermPost) -> Cursor<'_> {
-        Cursor::new(&self.post, t)
+        Cursor::new(&self.post, t, self.info.with_tf)
     }
 
     #[inline]

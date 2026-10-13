@@ -1,0 +1,6 @@
+leídos 80363 ítems (2366 borrados omitidos) en 0.2s
+  LM: 5000/80363 registros (92 reg/s, faltan ~14 min)
+  LM: 10000/80363 registros (84 reg/s, faltan ~14 min)
+  LM: 15000/80363 registros (77 reg/s, faltan ~14 min)
+  LM: 20000/80363 registros (73 reg/s, faltan ~14 min)
+  LM: 25000/80363 registros (73 reg/s, faltan ~13 min)

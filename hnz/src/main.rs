@@ -90,6 +90,33 @@ enum Cmd {
         lm: PathBuf,
         parquet: Vec<PathBuf>,
     },
+    /// Cambia el nivel de un segmento (p.ej. zstd -> lm al envejecer) usando sus propios textos.
+    /// Reconstruye en una carpeta temporal, verifica y sustituye; conserva los vectores.
+    Retier {
+        #[arg(long)]
+        seg: PathBuf,
+        #[arg(long, value_enum)]
+        tier: TierArg,
+        #[arg(long, default_value_t = 16)]
+        block: usize,
+        #[arg(long, default_value_t = 19)]
+        level: i32,
+        #[arg(long, default_value = "models/lm-pythia-70m.hnzlm")]
+        lm: PathBuf,
+    },
+    /// Reconstruye el índice BM25 de un segmento con otras opciones (para medir tamaño/calidad)
+    Rebm25 {
+        #[arg(long)]
+        seg: PathBuf,
+        /// postings booleanos (sin frecuencia del término)
+        #[arg(long)]
+        no_tf: bool,
+        /// no indexar términos presentes en más de esta fracción de documentos
+        #[arg(long, default_value_t = 1.0)]
+        max_df: f32,
+        #[arg(long, env = "HNZ_MODELS", default_value = "models")]
+        models: PathBuf,
+    },
     /// Añade el índice vectorial (binario) a un segmento a partir de embeddings
     Index {
         #[arg(long)]
@@ -421,6 +448,110 @@ fn main() -> Result<()> {
             };
             let m = segment::build(&items, deleted, &out, &name, t)?;
             eprintln!("segmento {} ({}) listo: {} docs en {:.1}s", m.name, m.text_tier, m.n_docs, t0.elapsed().as_secs_f64());
+        }
+        Cmd::Retier { seg, tier, block, level, lm } => {
+            let t0 = Instant::now();
+            let s = Segment::open(&seg)?;
+            let models = lm.parent().unwrap_or(Path::new(".")).to_path_buf();
+            let codec_old = match &s.text {
+                TextSource::Lm(_) => Some(LmCodec::load(&models.join(s.man.lm_model.as_ref().context("lm_model")?))?),
+                _ => None,
+            };
+            // reconstruir todos los ítems desde el propio segmento
+            let mut items = Vec::with_capacity(s.man.n_docs);
+            match &s.text {
+                TextSource::Zstd(ts) => {
+                    for b in 0..ts.n_blocks() {
+                        for (k, t) in ts.get_block(b)?.into_iter().enumerate() {
+                            items.push(segment::join(&s.meta.row(b * ts.block + k), t, &s.meta.authors));
+                        }
+                    }
+                }
+                TextSource::Lm(ls) => {
+                    let c = codec_old.as_ref().unwrap();
+                    for c0 in (0..s.man.n_docs).step_by(64) {
+                        let docs: Vec<usize> = (c0..(c0 + 64).min(s.man.n_docs)).collect();
+                        let raws: Vec<&[u8]> = docs.iter().map(|&d| ls.raw(d)).collect();
+                        for (&d, (t, _)) in docs.iter().zip(c.decode_records(&raws, true, None, false)?) {
+                            items.push(segment::join(&s.meta.row(d), t, &s.meta.authors));
+                        }
+                    }
+                }
+            }
+            eprintln!("leídos {} ítems del segmento ({:.1}s)", items.len(), t0.elapsed().as_secs_f64());
+            let tmp = seg.with_extension("retier");
+            let _ = std::fs::remove_dir_all(&tmp);
+            let codec;
+            let t = match tier {
+                TierArg::Zstd => Tier::Zstd { block, level },
+                TierArg::Lm => {
+                    codec = LmCodec::load(&lm)?;
+                    Tier::Lm { codec: &codec, model_file: lm.file_name().unwrap().to_string_lossy().to_string() }
+                }
+            };
+            let mut m = segment::build(&items, s.man.deleted_skipped, &tmp, &s.man.name, t)?;
+            // conservar vectores
+            if s.man.vec_bits > 0 {
+                std::fs::copy(seg.join("vec.bin"), tmp.join("vec.bin"))?;
+                std::fs::copy(seg.join("vec.has"), tmp.join("vec.has"))?;
+                m.vec_bits = s.man.vec_bits;
+                segment::write_manifest(&tmp, &m)?;
+            }
+            // verificación por muestreo antes de sustituir
+            let ns = Segment::open(&tmp)?;
+            let codec_new = if ns.is_lm() { Some(LmCodec::load(&models.join(ns.man.lm_model.as_ref().unwrap()))?) } else { None };
+            let sample = rand_docs(200.min(items.len()), items.len(), 77);
+            for &d in &sample {
+                if ns.item(d, codec_new.as_ref())? != items[d] {
+                    bail!("verificación fallida en doc {d}; se conserva el segmento original");
+                }
+            }
+            drop(s);
+            drop(ns);
+            let old = seg.with_extension("old");
+            let _ = std::fs::remove_dir_all(&old);
+            std::fs::rename(&seg, &old)?;
+            std::fs::rename(&tmp, &seg)?;
+            std::fs::remove_dir_all(&old)?;
+            eprintln!("segmento {} ahora en nivel {} ({:.1}s)", m.name, m.text_tier, t0.elapsed().as_secs_f64());
+        }
+        Cmd::Rebm25 { seg, no_tf, max_df, models } => {
+            let t0 = Instant::now();
+            let s = Segment::open(&seg)?;
+            let mut texts: Vec<String> = Vec::with_capacity(s.man.n_docs);
+            match &s.text {
+                TextSource::Zstd(ts) => {
+                    for b in 0..ts.n_blocks() {
+                        for r in ts.get_block(b)? {
+                            texts.push(segment::index_text(&r.title, &r.url, &r.text));
+                        }
+                    }
+                }
+                TextSource::Lm(ls) => {
+                    let c = LmCodec::load(&models.join(s.man.lm_model.as_ref().context("lm_model")?))?;
+                    for c0 in (0..s.man.n_docs).step_by(64) {
+                        let raws: Vec<&[u8]> = (c0..(c0 + 64).min(s.man.n_docs)).map(|d| ls.raw(d)).collect();
+                        for (r, _) in c.decode_records(&raws, true, None, false)? {
+                            texts.push(segment::index_text(&r.title, &r.url, &r.text));
+                        }
+                    }
+                }
+            }
+            let mut b = bm25::Builder::new();
+            for ch in texts.chunks(1 << 16) {
+                b.add_batch(ch);
+            }
+            let info = b.write_opts(&seg, !no_tf, max_df)?;
+            let sz: u64 = ["bm25.fst", "bm25.post", "bm25.norms"].iter().map(|f| std::fs::metadata(seg.join(f)).map(|m| m.len()).unwrap_or(0)).sum();
+            eprintln!(
+                "BM25 (tf={}, max_df={}): {} términos, {} postings, {:.1} B/doc ({:.1}s)",
+                !no_tf,
+                max_df,
+                info.n_terms,
+                info.n_postings,
+                sz as f64 / s.man.n_docs as f64,
+                t0.elapsed().as_secs_f64()
+            );
         }
         Cmd::Index { seg, emb, ids, bits } => {
             let t1 = Instant::now();

@@ -33,6 +33,9 @@ pub struct Engine {
     pub lm: Option<LmCodec>,
     /// caché L1 (RAM) de registros del nivel LM ya descomprimidos completos
     cache: Mutex<HashMap<(usize, u32), TextRec>>,
+    /// caché L2 (disco) de registros del nivel LM ya descomprimidos
+    pub l2: Option<crate::cache::L2>,
+    seg_keys: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,7 +164,9 @@ impl Engine {
             None => None,
         };
         let total_docs = segs.iter().map(|x| x.s.man.n_docs).sum();
-        Ok(Self { segs, total_docs, lm, cache: Mutex::new(HashMap::new()) })
+        let l2 = if lm.is_some() { crate::cache::L2::open(&root.join("_cache_l2.bin"), 512 << 20).ok() } else { None };
+        let seg_keys = segs.iter().map(|s| crate::cache::seg_key(&s.s.man.name)).collect();
+        Ok(Self { segs, total_docs, lm, cache: Mutex::new(HashMap::new()), l2, seg_keys })
     }
 
     pub fn search(&self, q: &Query, qvec: Option<&[f32]>) -> Vec<Hit> {
@@ -280,7 +285,10 @@ impl Engine {
                     TextSource::Zstd(t) => out[i] = Some((t.get(doc)?, false)),
                     TextSource::Lm(_) => match cache.get(&(si, doc as u32)) {
                         Some(r) => out[i] = Some((r.clone(), false)),
-                        None => pending.push(i),
+                        None => match self.l2.as_ref().and_then(|l2| l2.get(self.seg_keys[si], doc as u32)) {
+                            Some(r) => out[i] = Some((r, false)),
+                            None => pending.push(i),
+                        },
                     },
                 }
             }
@@ -302,6 +310,9 @@ impl Engine {
                         cache.clear();
                     }
                     cache.insert((docs[i].0, docs[i].1 as u32), rec.clone());
+                    if let Some(l2) = &self.l2 {
+                        l2.put(self.seg_keys[docs[i].0], docs[i].1 as u32, &rec);
+                    }
                 }
                 out[i] = Some((rec, partial));
             }
