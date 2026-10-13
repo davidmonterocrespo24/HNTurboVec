@@ -8,10 +8,11 @@ y recuperación literal de los resultados. Diseño y mediciones en [`../doc/`](.
   compila con `target-cpu=x86-64-v3` (`hnz/.cargo/config.toml`). AVX-VNNI se usa si existe; el
   resultado del LM es idéntico con o sin él.
 - Windows: Rust `stable-x86_64-pc-windows-gnu` y GCC (WinLibs) en el PATH para compilar.
-- Entorno Python (`requirements.txt`) solo para preparar modelos y embeddings:
+- Entorno Python solo para preparar modelos y embeddings (torch CPU primero, desde su índice):
   ```bash
   uv venv .venv --python 3.12
-  uv pip install --python .venv -r requirements.txt --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple
+  uv pip install --python .venv -r requirements-torch.txt --index-url https://download.pytorch.org/whl/cpu
+  uv pip install --python .venv -r requirements.txt
   python prepare_models.py     # crea models/: EmbeddingGemma 2 (IR), tokenizador, LM .hnzlm
   ```
 - En ejecución, el embedding de consultas usa `openvino_c.dll` (del paquete Python `openvino`, o de
@@ -22,7 +23,12 @@ cd hnz && cargo build --release          # binario en hnz/target/release/hnz.exe
 ```
 
 ## Construir un archivo (desde la raíz del proyecto)
-Todo HN, por años y reanudable: `python pipeline.py --years 2006-2026` (ver su ayuda).
+Todo HN, por años y reanudable: `python pipeline.py --years 2006-2026` (ver su ayuda). Al volver a
+ejecutarlo baja los meses que han cambiado en el dataset (el mes en curso se publica a medias),
+recalcula sus embeddings y reconstruye solo los años afectados; un segmento nunca se reconstruye
+solo por cambiar de nivel: `--retier` enfría a LM los años que ya no son calientes (con
+`--delete-old`, verificando todo antes de borrar el original). Sin conexión usa los Parquet locales,
+y si se borraron Parquet ya archivados no reconstruye el año (perdería datos).
 A mano, por segmentos:
 ```bash
 hnz build --out out/seg-2024-01 --tier zstd data/2024/2024-01.parquet                 # caliente

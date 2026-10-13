@@ -22,8 +22,10 @@ Detalle numérico en [BITACORA.md](BITACORA.md) (E00-E03, E09, E12, E15-E17, E20
 
 - **Determinismo bit a bit:** motor propio en Rust con matmul int8 exacta (el resultado no depende
   del núcleo SIMD ni de los hilos), exp/erf propias y sumas en orden fijo; `MATH_VERSION` en `lm.json`.
-- **Integridad:** 1 byte de comprobación por registro: una divergencia (otro modelo u otro binario)
-  da un error en vez de texto inventado.
+- **Integridad:** 1 byte de comprobación por registro, validado al descomprimir el registro
+  **completo** (`--full`, `get`, `verify`): una divergencia (otro modelo u otro binario) da un error
+  en vez de texto inventado. Los fragmentos y títulos se cortan antes del final y no lo comprueban;
+  ahí protege que al abrir el segmento se exige el mismo id de modelo y la misma `MATH_VERSION`.
 - **Descompresión secuencial:** lote de todos los resultados de una consulta, pool de hilos propio,
   modo fragmento (64 tokens del cuerpo) y cachés L1 (RAM) + L2 (disco).
 - **Coste de compresión:** ~120 reg/s en 16 hilos (≈ 4 días para ~40 M ítems fríos), en paralelo con

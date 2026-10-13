@@ -15,7 +15,9 @@ Estado: **implementado y verificado sobre 3 meses de muestra** (2010-06 y 2015-0
    las filas `deleted`, que se guardan como metadatos para no romper los hilos).
 5. **Determinismo del nivel LM**: matmul int8 exacta + matemática propia en orden fijo → el mismo
    binario da los mismos bits en cualquier CPU compatible (requiere x86-64-v3 / AVX2; AVX-VNNI es
-   opcional: con o sin él el resultado es idéntico). Cada registro lleva 1 byte de comprobación.
+   opcional: con o sin él el resultado es idéntico). Cada registro lleva 1 byte de comprobación
+   (se valida al descomprimirlo entero; los fragmentos no lo cubren) y al abrir se exige el mismo
+   id de modelo y `MATH_VERSION`.
 
 ## Segmentos (carpeta autocontenida e inmutable; `build` es atómico vía `<seg>.building`)
 | Fichero | Contenido | B/doc caliente (2024-01) | B/doc frío (2015-06) |

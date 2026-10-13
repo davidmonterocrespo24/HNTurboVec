@@ -31,7 +31,7 @@ importa es el uso diario: **rápido, preciso y compacto**. Implementación en **
 
 ## Entorno
 
-- Python: `.venv` creado con `uv` (Python 3.12) e instalado desde [`../requirements.txt`](../requirements.txt)
+- Python: `.venv` creado con `uv` (Python 3.12) e instalado desde [`../requirements-torch.txt`](../requirements-torch.txt) (torch CPU, índice de PyTorch) y [`../requirements.txt`](../requirements.txt)
   (versiones fijadas). Modelos: `python prepare_models.py`.
 - Datos: dataset `open-index/hacker-news` de Hugging Face: **239 Parquet mensuales** (2006-10 →
   2026-08) más ficheros horarios de los últimos días (`today/…`) y estadísticas (628 ficheros en total).
