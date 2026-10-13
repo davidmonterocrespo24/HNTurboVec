@@ -27,8 +27,10 @@ impl Embedder {
         let old = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{};{}", ov_libs.display(), old));
         let mut core = Core::new().map_err(ov)?;
-        let xml = models.join("gemma2_text_b1_s64.xml");
-        let bin = models.join("gemma2_text_b1_s64.bin");
+        // preferir la versión con pesos int8 (NNCF): mitad de tamaño, ~2,5x más rápida, coseno 0,9998
+        let name = if models.join("gemma2_text_b1_s64_int8.xml").exists() { "gemma2_text_b1_s64_int8" } else { "gemma2_text_b1_s64" };
+        let xml = models.join(format!("{name}.xml"));
+        let bin = models.join(format!("{name}.bin"));
         let model = core.read_model_from_file(&xml.to_string_lossy(), &bin.to_string_lossy()).map_err(ov)?;
         let mut compiled = core.compile_model(&model, DeviceType::CPU).map_err(ov)?;
         let req = compiled.create_infer_request().map_err(ov)?;

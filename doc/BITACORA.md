@@ -281,3 +281,30 @@ Con BM25 df ≤ 2 %, 300 consultas, 382.681 docs:
 
 ### E21 — Segmento caliente definitivo (2024-01, zstd + BM25 df ≤ 2 % + 768 bits)
 Verificación 100 % idéntica. **261,7 B/doc**: texto 116,8 · vectores 96,1 · BM25 43,3 · meta 5,5.
+
+### E22 — turbovec (TurboQuant) vs índice binario asimétrico, a igual tamaño (`bench_turbovec_rerank.py`)
+Mes completo 2024-01 (364.891 docs con vector), 300 consultas, solo vector (sin BM25):
+| Índice | B/vec | P@10 | MRR |
+|---|---|---|---|
+| float32 768d (techo) | 3072 | 0,294 | 0,563 |
+| **binario asimétrico 768 bits (hnz)** | **96** | **0,293** | **0,577** |
+| binario asimétrico 512 bits (hnz) | 64 | 0,280 | 0,558 |
+| binario asimétrico 256 bits | 32 | 0,235 | 0,514 |
+| turbovec 2-bit 256d (calibrado) | ~64 | 0,285 | 0,557 |
+| turbovec 2-bit 384d | ~96 | 0,301 | 0,563 |
+| turbovec 4-bit 256d | ~128 | 0,277 | 0,543 |
+| turbovec 2-bit 768d | ~192 | 0,310 | 0,575 |
+**Conclusión:** a igual tamaño turbovec da +1,8-2,7 % de P@10 pero MRR igual o peor; con 300 consultas el
+error estándar de P@10 es ~0,015 → diferencias dentro del ruido. El binario asimétrico (sin
+entrenamiento, búsqueda de 2 etapas en Rust) se mantiene; turbovec queda como alternativa futura.
+La parte (2) del script (reranker cross-encoder, equivalente a Jev/System One) **no llegó a ejecutarse**:
+el sistema detuvo los procesos en segundo plano por falta de memoria RAM.
+
+### E23 — EmbeddingGemma 2 de consultas en int8 (`compress_embedder.py`, NNCF de Intel)
+Pesos int8 asimétricos por canal: **545 MB → 276 MB**, **~2,5x más rápido en CPU**, coseno con fp16:
+media 0,99980, mínimo 0,99942 (100 consultas). `hnz` usa el IR int8 si existe.
+
+### Incidencia (2026-10-13 ~06:30): procesos detenidos por falta de memoria
+El sistema detuvo en segundo plano la recompresión v2 de 2010-06/2015-06 (iba por 50k/80k de 2010) y
+el benchmark de reranker. `out/seg-2010-06` quedó incompleto (sin manifest: el motor lo ignora).
+Pendiente de relanzar, de uno en uno para no agotar la RAM.

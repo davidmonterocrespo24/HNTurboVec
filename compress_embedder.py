@@ -1,0 +1,35 @@
+"""Comprime los pesos del IR de consultas de EmbeddingGemma 2 a int8 (NNCF, Intel) para que el sistema
+ocupe menos y embeba más rápido en CPU. Compara coseno y latencia con el IR fp16.
+Uso: python compress_embedder.py models/gemma2_text_b1_s64.xml"""
+import sys, time, json
+import numpy as np, openvino as ov, nncf
+from tokenizers import Tokenizer
+
+src = sys.argv[1] if len(sys.argv) > 1 else 'models/gemma2_text_b1_s64.xml'
+dst = src.replace('.xml', '_int8.xml')
+core = ov.Core()
+m = core.read_model(src)
+t0 = time.time()
+mc = nncf.compress_weights(m, mode=nncf.CompressWeightsMode.INT8_ASYM)
+ov.save_model(mc, dst, compress_to_fp16=False)
+print(f'comprimido en {time.time()-t0:.0f}s -> {dst}')
+
+tok = Tokenizer.from_file('models/gemma2_tokenizer.json')
+qs = [json.loads(l)['q'] for l in open('eval/2024-01.jsonl', encoding='utf-8')][:100]
+def run(path):
+    cm = core.compile_model(path, 'CPU', {'PERFORMANCE_HINT': 'LATENCY'})
+    req = cm.create_infer_request()
+    out, times = [], []
+    for q in qs:
+        ids = tok.encode('task: search result | query: ' + q).ids[:64]
+        a = np.zeros((1, 64), np.int64); b = np.zeros((1, 64), np.int64)
+        a[0, :len(ids)] = ids; b[0, :len(ids)] = 1
+        t = time.time(); r = req.infer([a, b]); times.append((time.time() - t) * 1000)
+        v = r[cm.output(0)][0]; out.append(v / np.linalg.norm(v))
+    return np.array(out), np.median(times[5:])
+A, ta = run(src)
+B, tb = run(dst)
+import os
+sz = lambda p: (os.path.getsize(p) + os.path.getsize(p.replace('.xml', '.bin'))) / 1e6
+print(f'fp16: {sz(src):.0f} MB, {ta:.1f} ms/consulta | int8: {sz(dst):.0f} MB, {tb:.1f} ms/consulta | '
+      f'coseno medio {float(np.mean(np.sum(A*B, 1))):.5f}, mínimo {float(np.min(np.sum(A*B, 1))):.5f}')

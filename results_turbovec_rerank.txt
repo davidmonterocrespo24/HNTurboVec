@@ -1,0 +1,11 @@
+364,891 docs con vector, 300 consultas
+(1) índices vectoriales, solo vector:
+  float32 768d (3072 B, techo)                 P@10 0.294  MRR 0.563
+  binario asimétrico 768 bits (96 B) [hnz]     P@10 0.293  MRR 0.577
+  binario asimétrico 512 bits (64 B) [hnz]     P@10 0.280  MRR 0.558
+  binario asimétrico 256 bits (32 B) [hnz]     P@10 0.235  MRR 0.514
+  turbovec 2-bit 256d (~64 B), 0.8 ms/cons.    P@10 0.285  MRR 0.557
+  turbovec 2-bit 384d (~96 B), 1.0 ms/cons.    P@10 0.301  MRR 0.563
+  turbovec 4-bit 256d (~128 B), 0.8 ms/cons.   P@10 0.277  MRR 0.543
+  turbovec 2-bit 768d (~192 B), 1.0 ms/cons.   P@10 0.310  MRR 0.575
+(2) reranker cross-encoder sobre el top-30 del vector binario 768:
