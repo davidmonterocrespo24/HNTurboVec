@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub struct L2 {
+    #[allow(dead_code)]
     path: PathBuf,
     cap: u64,
     inner: Mutex<Inner>,
@@ -57,7 +58,9 @@ fn decode(b: &[u8]) -> Option<TextRec> {
 impl L2 {
     /// Abre (o crea) la caché y reconstruye el índice leyendo el fichero.
     pub fn open(path: &Path, cap_bytes: u64) -> Result<Self> {
-        let mut file = OpenOptions::new().read(true).append(true).create(true).open(path)?;
+        // OJO (Windows): un fichero abierto en modo append no admite set_len (acceso denegado);
+        // se abre en lectura/escritura y cada escritura hace seek al final.
+        let mut file = OpenOptions::new().read(true).write(true).create(true).open(path)?;
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
         let mut index = HashMap::new();
@@ -95,9 +98,6 @@ impl L2 {
         }
         if g.len + payload.len() as u64 + 16 > self.cap {
             // vaciar
-            if let Ok(f) = OpenOptions::new().read(true).write(true).truncate(true).open(&self.path) {
-                drop(f);
-            }
             g.index.clear();
             g.len = 0;
             let _ = g.file.set_len(0);
@@ -107,8 +107,9 @@ impl L2 {
         rec.extend_from_slice(&doc.to_le_bytes());
         rec.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         rec.extend_from_slice(&payload);
-        if g.file.seek(SeekFrom::End(0)).is_ok() && g.file.write_all(&rec).is_ok() {
-            let off = g.len + 16;
+        let at = g.len;
+        if g.file.seek(SeekFrom::Start(at)).is_ok() && g.file.write_all(&rec).is_ok() {
+            let off = at + 16;
             g.index.insert((seg, doc), (off, payload.len() as u32));
             g.len += rec.len() as u64;
         }

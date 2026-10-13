@@ -308,3 +308,24 @@ media 0,99980, mínimo 0,99942 (100 consultas). `hnz` usa el IR int8 si existe.
 El sistema detuvo en segundo plano la recompresión v2 de 2010-06/2015-06 (iba por 50k/80k de 2010) y
 el benchmark de reranker. `out/seg-2010-06` quedó incompleto (sin manifest: el motor lo ignora).
 Pendiente de relanzar, de uno en uno para no agotar la RAM.
+
+### E24 — Segmentos fríos v2 verificados al completo + latencias reales del servidor
+- Recompresión v2 (512 bits): 2010-06 en 625 s (129 reg/s, **181,6 B/doc**), 2015-06 en 1.368 s
+  (122 reg/s, **183,4 B/doc**: texto LM 65,3 · vectores 64,1 · BM25 48,2 · meta 5,8).
+- **Verificación completa con el LM: 80.363 + 166.390 = 246.753 registros idénticos al original.**
+  (verify a 24 reg/s: el lote de 64 espera a su registro más largo → mejora futura: lotes continuos).
+- Latencias con `hnz serve` (modelos cargados una vez; embedder int8), k=10 (`results_latency.txt`):
+| Consulta | Total | Embedding | Búsqueda | Recuperar/descomprimir |
+|---|---|---|---|---|
+| caliente 2024, híbrida | 49-51 ms | 25-37 | 6-15 | 6-11 |
+| caliente 2024, palabras | 11-20 ms | — | 2-5 | 9-15 |
+| frío 2010 / 2015, fragmentos | 430 / 326 ms | ~30 | 4-7 | 393 / 284 |
+| todo el archivo, híbrida | 44-49 ms | ~30 | 5-6 | 3-13 |
+| frío, texto completo, 1ª vez | 601-641 ms | | | 568-603 |
+| frío, texto completo, repetida (L1) | 116 → **46 ms** | | | 74 → **3** |
+| frío, texto completo, tras reinicio (L2) | 655 → **83 ms** | | | 627 → **54** |
+| `/item/<id>` frío sin caché | ~200 ms | | | |
+- **Bug encontrado y corregido:** la caché L2 nunca se escribía en Windows (un fichero abierto en modo
+  append no admite `set_len` → `L2::open` fallaba y el error se ignoraba). Ahora se abre en lectura/
+  escritura y se avisa si falla. Además: caché de títulos de stories y un único lote LM para
+  resultados + títulos del hilo.

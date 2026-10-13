@@ -35,6 +35,8 @@ pub struct Engine {
     cache: Mutex<HashMap<(usize, u32), TextRec>>,
     /// caché L2 (disco) de registros del nivel LM ya descomprimidos
     pub l2: Option<crate::cache::L2>,
+    /// títulos de stories del nivel LM ya decodificados (contexto del hilo)
+    titles: Mutex<HashMap<(usize, u32), String>>,
     seg_keys: Vec<u64>,
 }
 
@@ -164,9 +166,19 @@ impl Engine {
             None => None,
         };
         let total_docs = segs.iter().map(|x| x.s.man.n_docs).sum();
-        let l2 = if lm.is_some() { crate::cache::L2::open(&root.join("_cache_l2.bin"), 512 << 20).ok() } else { None };
+        let l2 = if lm.is_some() {
+            match crate::cache::L2::open(&root.join("_cache_l2.bin"), 512 << 20) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    eprintln!("aviso: caché L2 desactivada ({e})");
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let seg_keys = segs.iter().map(|s| crate::cache::seg_key(&s.s.man.name)).collect();
-        Ok(Self { segs, total_docs, lm, cache: Mutex::new(HashMap::new()), l2, seg_keys })
+        Ok(Self { segs, total_docs, lm, cache: Mutex::new(HashMap::new()), l2, titles: Mutex::new(HashMap::new()), seg_keys })
     }
 
     pub fn search(&self, q: &Query, qvec: Option<&[f32]>) -> Vec<Hit> {
@@ -273,23 +285,36 @@ impl Engine {
         Some((si, doc, sg.s.meta.row(doc)))
     }
 
-    /// Textos de varios documentos: zstd directo, LM en un único lote (con caché L1).
+    /// Textos de varios documentos: zstd directo, LM en un único lote (con cachés L1/L2).
     /// `limit`: tokens máximos para el nivel LM (fragmento); `title_only`: solo títulos.
     pub fn texts(&self, docs: &[(usize, usize)], limit: Option<usize>, title_only: bool) -> Result<Vec<(TextRec, bool)>> {
-        let mut out: Vec<Option<(TextRec, bool)>> = vec![None; docs.len()];
+        let w: Vec<(usize, usize, Option<usize>, bool)> = docs.iter().map(|&(s, d)| (s, d, limit, title_only)).collect();
+        self.texts_each(&w)
+    }
+
+    /// Igual que `texts` pero con (segmento, doc, límite, solo_título) por documento: todo lo que
+    /// haya que decodificar con el LM va en UN solo lote.
+    pub fn texts_each(&self, wants: &[(usize, usize, Option<usize>, bool)]) -> Result<Vec<(TextRec, bool)>> {
+        let mut out: Vec<Option<(TextRec, bool)>> = vec![None; wants.len()];
         let mut pending: Vec<usize> = Vec::new();
         {
             let cache = self.cache.lock().unwrap();
-            for (i, &(si, doc)) in docs.iter().enumerate() {
+            let titles = self.titles.lock().unwrap();
+            for (i, &(si, doc, _, title_only)) in wants.iter().enumerate() {
                 match &self.segs[si].s.text {
                     TextSource::Zstd(t) => out[i] = Some((t.get(doc)?, false)),
-                    TextSource::Lm(_) => match cache.get(&(si, doc as u32)) {
-                        Some(r) => out[i] = Some((r.clone(), false)),
-                        None => match self.l2.as_ref().and_then(|l2| l2.get(self.seg_keys[si], doc as u32)) {
-                            Some(r) => out[i] = Some((r, false)),
-                            None => pending.push(i),
-                        },
-                    },
+                    TextSource::Lm(_) => {
+                        let key = (si, doc as u32);
+                        if let Some(r) = cache.get(&key) {
+                            out[i] = Some((r.clone(), false));
+                        } else if let Some(r) = self.l2.as_ref().and_then(|l2| l2.get(self.seg_keys[si], doc as u32)) {
+                            out[i] = Some((r, false));
+                        } else if let (true, Some(t)) = (title_only, titles.get(&key)) {
+                            out[i] = Some((TextRec { title: t.clone(), ..Default::default() }, true));
+                        } else {
+                            pending.push(i);
+                        }
+                    }
                 }
             }
         }
@@ -297,21 +322,29 @@ impl Engine {
             let codec = self.lm.as_ref().context("falta el modelo LM")?;
             let raws: Vec<&[u8]> = pending
                 .iter()
-                .map(|&i| match &self.segs[docs[i].0].s.text {
-                    TextSource::Lm(l) => l.raw(docs[i].1),
+                .map(|&i| match &self.segs[wants[i].0].s.text {
+                    TextSource::Lm(l) => l.raw(wants[i].1),
                     _ => unreachable!(),
                 })
                 .collect();
-            let dec = codec.decode_records(&raws, true, limit, title_only)?;
+            let limits: Vec<Option<usize>> = pending.iter().map(|&i| wants[i].2).collect();
+            let tonly: Vec<bool> = pending.iter().map(|&i| wants[i].3).collect();
+            let dec = codec.decode_records_each(&raws, true, &limits, &tonly)?;
             let mut cache = self.cache.lock().unwrap();
+            let mut titles = self.titles.lock().unwrap();
             for (&i, (rec, partial)) in pending.iter().zip(dec) {
+                let key = (wants[i].0, wants[i].1 as u32);
+                if titles.len() >= CACHE_MAX {
+                    titles.clear();
+                }
+                titles.insert(key, rec.title.clone());
                 if !partial {
                     if cache.len() >= CACHE_MAX {
                         cache.clear();
                     }
-                    cache.insert((docs[i].0, docs[i].1 as u32), rec.clone());
+                    cache.insert(key, rec.clone());
                     if let Some(l2) = &self.l2 {
-                        l2.put(self.seg_keys[docs[i].0], docs[i].1 as u32, &rec);
+                        l2.put(self.seg_keys[wants[i].0], wants[i].1 as u32, &rec);
                     }
                 }
                 out[i] = Some((rec, partial));
@@ -352,8 +385,6 @@ impl Engine {
     /// Resultados completos. `full=false`: en el nivel LM solo se decodifica un fragmento.
     pub fn fetch(&self, hits: &[Hit], full: bool) -> Result<Vec<ResultItem>> {
         let rows: Vec<MetaRow> = hits.iter().map(|h| self.segs[h.seg].s.meta.row(h.doc as usize)).collect();
-        let docs: Vec<(usize, usize)> = hits.iter().map(|h| (h.seg, h.doc as usize)).collect();
-        let texts = self.texts(&docs, if full { None } else { Some(SNIPPET_TOKENS) }, false)?;
         // contexto del hilo: story raíz de cada comentario (títulos en un solo lote)
         let roots: Vec<Option<u32>> = hits
             .iter()
@@ -371,7 +402,13 @@ impl Engine {
                 root_docs.push((si, doc));
             }
         }
-        let root_titles = self.texts(&root_docs, None, true)?;
+        // resultados (fragmento o completo) + títulos de las stories: un solo lote para el LM
+        let limit = if full { None } else { Some(SNIPPET_TOKENS) };
+        let mut wants: Vec<(usize, usize, Option<usize>, bool)> = hits.iter().map(|h| (h.seg, h.doc as usize, limit, false)).collect();
+        wants.extend(root_docs.iter().map(|&(si, d)| (si, d, None, true)));
+        let mut got = self.texts_each(&wants)?;
+        let root_titles: Vec<(TextRec, bool)> = got.split_off(hits.len());
+        let texts = got;
         let mut out = Vec::with_capacity(hits.len());
         for (i, ((h, m), (t, partial))) in hits.iter().zip(&rows).zip(texts).enumerate() {
             let story_id = roots[i];

@@ -307,6 +307,14 @@ impl LmCodec {
     /// - `title_only`: parar en el primer salto de línea (solo el título).
     /// Devuelve (texto, parcial).
     pub fn decode_records(&self, recs: &[&[u8]], parallel: bool, limit: Option<usize>, title_only: bool) -> Result<Vec<(TextRec, bool)>> {
+        let limits = vec![limit; recs.len()];
+        let titles = vec![title_only; recs.len()];
+        self.decode_records_each(recs, parallel, &limits, &titles)
+    }
+
+    /// Como `decode_records` pero con límite y modo "solo título" POR REGISTRO, para decodificar
+    /// en un único lote cosas distintas (fragmentos de resultados + títulos de las stories).
+    pub fn decode_records_each(&self, recs: &[&[u8]], parallel: bool, limits: &[Option<usize>], title_only: &[bool]) -> Result<Vec<(TextRec, bool)>> {
         let n = recs.len();
         let mut out: Vec<Option<(TextRec, bool)>> = vec![None; n];
         let mut lm_idx = Vec::new();
@@ -341,7 +349,7 @@ impl LmCodec {
         let mut produced = vec![0usize; k];
         if k > 0 {
             let v = self.model.h.vocab;
-            let target: Vec<usize> = ntok.iter().map(|&t| limit.map_or(t, |l| l.min(t))).collect();
+            let target: Vec<usize> = lm_idx.iter().zip(&ntok).map(|(&i, &t)| limits[i].map_or(t, |l| l.min(t))).collect();
             let mut done = vec![false; k];
             let mut batch = Batch::new(&self.model, k);
             let mut last = vec![self.model.h.bos; k];
@@ -382,7 +390,7 @@ impl LmCodec {
                     bytes[j].extend_from_slice(tb);
                     produced[j] += 1;
                     last[j] = t;
-                    if title_only && tb.contains(&b'\n') {
+                    if title_only[lm_idx[j]] && tb.contains(&b'\n') {
                         done[j] = true;
                     }
                 }
