@@ -8,6 +8,9 @@ Uso: python bench_rerank.py [--n 300] [--cand 30]
 """
 import argparse, json, os, subprocess, sys, time, urllib.parse, urllib.request
 import numpy as np
+# el descargador hf_xet de huggingface_hub muere a mitad de descarga en este Windows (exit 127,
+# E26): se usa la descarga HTTP de siempre (también reanudable). Se hereda en los subprocesos.
+os.environ.setdefault('HF_HUB_DISABLE_XET', '1')
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 HNZ = os.path.join(ROOT, 'hnz', 'target', 'release', 'hnz.exe' if os.name == 'nt' else 'hnz')
@@ -39,9 +42,10 @@ def search(q, k):
 
 
 def doc_text(r):
-    # lo que vería el reranker: título (o el de su hilo) + texto plano
-    head = r['title'] or ('re: ' + (r.get('story_title') or ''))
-    return (head + '\n' + r['text'])[:1500]
+    # solo el propio documento (título si lo tiene + texto plano), igual que lo que ven los
+    # embeddings y BM25. OJO: añadir el título del hilo a los comentarios filtra la etiqueta (la
+    # consulta ES el título de la story) y da un falso P@10 de 0,44 (E26)
+    return ((r['title'] + '\n' if r['title'] else '') + r['text'])[:1500]
 
 
 def metrics(qs, lists):
@@ -58,8 +62,9 @@ def main():
     ap.add_argument('--n', type=int, default=300)
     ap.add_argument('--cand', type=int, default=30)
     ap.add_argument('--models', default=','.join(MODELS))
+    ap.add_argument('--eval', default=os.path.join('eval', '2024-01.jsonl'))
     a = ap.parse_args()
-    qs = [json.loads(l) for l in open(os.path.join(ROOT, 'eval', '2024-01.jsonl'), encoding='utf-8-sig') if l.strip()][:a.n]
+    qs = [json.loads(l) for l in open(os.path.join(ROOT, a.eval), encoding='utf-8-sig') if l.strip()][:a.n]
     srv = start()
     try:
         cands = []
@@ -69,7 +74,7 @@ def main():
     finally:
         srv.terminate()
     p, m = metrics(qs, cands)
-    print(f'{len(qs)} consultas, top-{a.cand} de hnz (híbrida, todo out/)')
+    print(f'{len(qs)} consultas de {a.eval}, top-{a.cand} de hnz (híbrida, todo out/)')
     print(f'  {"hnz híbrida (sin reranker)":<44} P@10 {p:.3f}  MRR {m:.3f}', flush=True)
     from fastembed.rerank.cross_encoder import TextCrossEncoder
     threads = max(1, (os.cpu_count() or 2) // 2)

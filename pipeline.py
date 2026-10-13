@@ -24,6 +24,9 @@ solaparse: no mezcle segmentos mensuales (seg-YYYY-MM) y anuales (seg-YYYY) del 
 """
 import argparse, glob, json, os, re, subprocess, sys, time
 import numpy as np
+# el descargador hf_xet de huggingface_hub muere a mitad de descarga en este Windows (exit 127,
+# E26): se usa la descarga HTTP de siempre (también reanudable). Se hereda en los subprocesos.
+os.environ.setdefault('HF_HUB_DISABLE_XET', '1')
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 HNZ = os.path.join(ROOT, 'hnz', 'target', 'release', 'hnz.exe' if os.name == 'nt' else 'hnz')

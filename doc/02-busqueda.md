@@ -1,6 +1,6 @@
 # Búsqueda (índices)
 
-Detalle numérico en [BITACORA.md](BITACORA.md) (E04-E07, E10, E13, E14, E18, E19, E22, E25).
+Detalle numérico en [BITACORA.md](BITACORA.md) (E04-E07, E10, E13, E14, E18, E19, E22, E25, E26).
 
 ## Qué hemos aprendido
 
@@ -23,9 +23,20 @@ Detalle numérico en [BITACORA.md](BITACORA.md) (E04-E07, E10, E13, E14, E18, E1
    ~204 docs/s con buckets de longitud → todo HN en ~2,8 días (E13). Consultas en CPU con pesos int8:
    ~25-40 ms (E23).
 9. **Filtros** (autor, tipo, dead, fechas) se aplican al generar candidatos: el autor y los tipos raros
-   recorren los metadatos del rango (exacto); el resto se sobre-muestrea y reintenta (E25).
+   recorren los metadatos del rango (exacto); el resto se sobre-muestrea y se filtra en orden de
+   puntuación con una columna de banderas de 1 B/doc en RAM (`meta.flags.zst`), reintentando solo
+   el segmento que se queda corto (E25, E26). Sin texto: listado de lo más reciente.
+10. **Segmentos con distintos bits (768 caliente / 512 frío) ya son comparables**: el coseno
+    renormalizado en cada prefijo MRL queda a 0,003 de P@10 de tenerlo todo a 768; calibrar
+    (regresión o momentos) hunde a los fríos y empeora las consultas sobre años viejos (E26).
+11. **Validar con consultas cuyas respuestas estén en distintos niveles** (2024, 2010, 2015): con un
+    solo conjunto, cualquier sesgo contra lo antiguo parece una mejora (E26).
+12. **La métrica título → hilo baja al crecer el archivo** (los hilos parecidos de otros años cuentan
+    como fallos): comparar versiones con la misma composición del archivo (E26).
+13. **Reranker cross-encoder** (MiniLM 80-120 MB, equivalente a Jev/System One): +5-10 % de P@10 por
+    0,4-0,8 s/consulta en CPU → no por defecto. Cuidado con la fuga de la etiqueta: el reranker debe ver
+    solo el propio documento, no el título del hilo (E26).
 
 ## Pendiente
-- Reranker cross-encoder sobre el top-N (equivalente open source a Jev/System One): la prueba se
-  interrumpió por falta de memoria (E22); repetir con menos RAM.
+- Rerankers mayores (jina, bge-reranker-v2-m3 int8): descarga fallida por la red (E26).
 - Evaluar con consultas de palabras clave y preguntas (hoy solo títulos → hilo).

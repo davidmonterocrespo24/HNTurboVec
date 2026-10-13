@@ -26,8 +26,25 @@ importa es el uso diario: **rápido, preciso y compacto**. Implementación en **
 - [x] LM compresor determinista propio (Pythia int8, AVX-VNNI, codificador aritmético) (E17, E20).
 - [x] Cachés L1/L2, `retier`, embedder de consultas int8, latencias medidas (E23, E24).
 - [x] Revisión adversarial (141 agentes): 60 hallazgos confirmados y corregidos (E25).
+- [x] 2ª y 3ª revisión (18 + 4 hallazgos corregidos); segmentos de muestra reconstruidos con el
+      binario final y verificados; mismo resultado byte a byte con dos binarios distintos (E26).
+- [x] Reranker cross-encoder (equivalente open source a Jev/System One) probado (E26): poca
+      ganancia para su coste en CPU → no se usa por defecto.
 - [ ] Construcción completa de los 239 meses (`pipeline.py`; días de CPU/iGPU).
-- [ ] Reranker cross-encoder (equivalente open source a Jev/System One): prueba interrumpida por memoria.
+
+## Resultado con la muestra de 3 meses (637.046 ítems, E26)
+
+| | Caliente (zstd) | Frío (LM) |
+|---|---|---|
+| Tamaño por ítem (texto + metadatos + BM25 + vectores) | 267,6 B | 187-188 B |
+| Todo HN (~49,3 M; 2 años en caliente) | **≈ 10,0 GB** + modelos 0,35 GB | |
+| Búsqueda híbrida (embedding + búsqueda + texto, k=10) | 24-29 ms | 280-350 ms (fragmentos) |
+| Texto completo de 10 resultados fríos | — | 464 ms; 25 ms en caché RAM, 79 ms en caché disco |
+| Abrir el archivo | 180 ms | |
+
+Calidad (P@10 híbrida, título → comentarios del hilo, todo el archivo): 0,278 / 0,208 / 0,249 con
+consultas de 2024 / 2010 / 2015. Con más meses esta cifra baja aunque la búsqueda no empeore: los
+hilos parecidos de otros años cuentan como fallos (E26).
 
 ## Entorno
 
@@ -37,6 +54,8 @@ importa es el uso diario: **rápido, preciso y compacto**. Implementación en **
   2026-08) más ficheros horarios de los últimos días (`today/…`) y estadísticas (628 ficheros en total).
   Muestras descargadas: 2010-06, 2015-06 y 2024-01.
 - Embeddings cacheados en `emb/` (`*.npy`) para no recalcular.
+- Descargas de Hugging Face con `HF_HUB_DISABLE_XET=1`: el descargador `hf_xet` muere a mitad de
+  descarga en esta máquina (E26); `pipeline.py`, `prepare_models.py` y `bench_rerank.py` lo fijan.
 - Máquina: Intel Core Ultra 7 265H (16 núcleos, iGPU Arc 140T, NPU), 31 GB RAM, sin GPU NVIDIA.
 - Rust: toolchain `stable-x86_64-pc-windows-gnu` (instalación de usuario, sin Visual Studio); el
   binario requiere CPU x86-64-v3 (AVX2).

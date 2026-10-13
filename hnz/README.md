@@ -53,7 +53,10 @@ hnz serve --port 8088                                # web en http://127.0.0.1:8
 - `-k` nº de resultados (máx. 500; 100 por HTTP) · `--from/--to` año, año-mes o fecha, inclusive ·
   `--mode hybrid|vector|keyword` · `--type story,comment,job,poll` · `--by autor` · `--dead`.
 - Los filtros se aplican al buscar (autor y tipos raros recorren los metadatos del rango): se
-  devuelven hasta k resultados que cumplen todos los filtros.
+  devuelven hasta k resultados que cumplen todos los filtros, y solo documentos con alguna señal de
+  la consulta (algún término en modo palabras, vector en modo vectorial, una de las dos en híbrido).
+- Sin texto (`hnz search --type job --from 2024`) se listan los ítems más recientes que cumplen los
+  filtros.
 - Nivel frío: por defecto se devuelve un **fragmento** (título y url completos + 64 tokens del
   cuerpo, `partial: true`); `--full` o `GET /item/<id>` descomprimen el texto completo.
 

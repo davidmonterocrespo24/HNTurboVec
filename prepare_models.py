@@ -5,6 +5,9 @@
   - lm-pythia-70m.hnzlm + .tokenizer.json (LM compresor del nivel frío)
 Uso: python prepare_models.py            (requiere el entorno Python de requirements.txt)"""
 import os, shutil, subprocess, sys
+# el descargador hf_xet de huggingface_hub muere a mitad de descarga en este Windows (exit 127,
+# E26): se usa la descarga HTTP de siempre (también reanudable). Se hereda en los subprocesos.
+os.environ.setdefault('HF_HUB_DISABLE_XET', '1')
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 M = os.path.join(ROOT, 'models')

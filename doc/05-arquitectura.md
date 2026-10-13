@@ -23,15 +23,16 @@ Estado: **implementado y verificado sobre 3 meses de muestra** (2010-06 y 2015-0
 | Fichero | Contenido | B/doc caliente (2024-01) | B/doc frío (2015-06) |
 |---|---|---|---|
 | `manifest.json` | rango de ids/fechas, nivel, modelo LM, `build_id` | — | — |
-| `meta.bin/.idx`, `authors.zst` | id/time/parent/tipo/dead/deleted/score/descendants/autor/poll/parts, bloques de 1024, varint delta + zstd | ~5,5 | ~5,8 |
-| `text.bin/.idx/.dict` (**nivel zstd**) | bloques de 16, columnar, HTML→forma compacta reversible (2 dialectos, enlaces truncados), zstd-19 + diccionario | ~116,8 | — |
-| `lm.bin/.idx/.json` (**nivel LM**) | por registro: cabecera varint + byte de comprobación + flujo aritmético; grupos de 32 | — | ~65 |
-| `bm25.fst/.post/.norms/.json` | FST de términos (df=1 inline), postings en bloques de 128 con BitPacker4x, normas 1 B, MaxScore | ~49 | ~48-50 |
-| `vec.bin/.has` | signo de las dims de EmbeddingGemma 2: 768 bits (caliente) / 512 bits (frío, E19) | 96 | 64 |
-| **Total** | | **~267** | **~185** |
+| `meta.bin/.idx`, `authors.zst` | id/time/parent/tipo/dead/deleted/score/descendants/autor/poll/parts, bloques de 1024, varint delta + zstd | 5,5 | 5,7 |
+| `meta.flags.zst` | 1 B/doc (tipo, dead, deleted) para filtrar sin descomprimir; se carga en RAM al abrir | 0,10 | 0,16 |
+| `text.bin/.idx/.dict` (**nivel zstd**) | bloques de 16, columnar, HTML→forma compacta reversible (2 dialectos, enlaces truncados), zstd-19 + diccionario | 116,6 | — |
+| `lm.bin/.idx/.json` (**nivel LM**) | por registro: cabecera varint + byte de comprobación + flujo aritmético; grupos de 32 | — | 64,4 |
+| `bm25.fst/.post/.norms/.json` | FST de términos (df=1 inline), postings en bloques de 128 con BitPacker4x, normas 1 B, MaxScore; sin poda (E25) | 49,2 | 53,9 |
+| `vec.bin/.has` | signo de las dims de EmbeddingGemma 2: 768 bits (caliente) / 512 bits (frío, E19) | 96,1 | 64,1 |
+| **Total** (`hnz stats`, E26) | | **267,6** | **188,2** |
 
 Proyección para ~49,3 M ítems con los 2 últimos años en caliente (~9 M) y el resto en frío:
-≈ 9 M × 267 B + 40 M × 185 B ≈ **9,8 GB**, más los modelos (~0,35 GB).
+≈ 9 M × 267,6 B + 40,3 M × 188 B ≈ **10,0 GB**, más los modelos (~0,35 GB).
 
 ## Consulta
 ```

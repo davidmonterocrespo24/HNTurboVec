@@ -1,0 +1,12 @@
+Loading weights:   0%|          | 0/1376 [00:00<?, ?it/s]Loading weights:  14%|█▎        | 186/1376 [00:00<00:00, 1644.64it/s]Loading weights:  26%|██▌       | 351/1376 [00:00<00:00, 1517.43it/s]Loading weights:  38%|███▊      | 523/1376 [00:00<00:00, 1600.14it/s]Loading weights:  50%|████▉     | 684/1376 [00:00<00:00, 1484.76it/s]Loading weights:  61%|██████    | 834/1376 [00:00<00:00, 889.25it/s] Loading weights:  69%|██████▉   | 948/1376 [00:00<00:00, 869.92it/s]Loading weights:  76%|███████▋  | 1051/1376 [00:01<00:00, 708.32it/s]Loading weights: 100%|██████████| 1376/1376 [00:01<00:00, 1232.70it/s]
+Loading weights:   0%|          | 0/1376 [00:00<?, ?it/s]Loading weights:  12%|█▎        | 172/1376 [00:00<00:00, 1694.78it/s]Loading weights:  25%|██▍       | 342/1376 [00:00<00:00, 1216.83it/s]Loading weights:  34%|███▍      | 472/1376 [00:00<00:00, 1241.17it/s]Loading weights:  46%|████▌     | 629/1376 [00:00<00:00, 1354.21it/s]Loading weights:  56%|█████▌    | 769/1376 [00:00<00:00, 782.94it/s] Loading weights:  64%|██████▎   | 874/1376 [00:01<00:00, 639.25it/s]Loading weights:  70%|██████▉   | 958/1376 [00:01<00:00, 500.68it/s]Loading weights: 100%|██████████| 1376/1376 [00:01<00:00, 1027.97it/s]
+2024-01: 364,891 docs, 2010-06: 80,362 docs, 2015-06: 166,387 docs
+OLS:      s768 ≈ 0.9361·s512 +0.0190   (r = 0.937)
+momentos: s768 ≈ 0.9995·s512 -0.0057
+
+variante (frío a 512 bits)                 consultas 2024-01       consultas 2010-06       consultas 2015-06           media
+todo a 768 bits (referencia)            P@10 0.265 MRR 0.538    P@10 0.197 MRR 0.462    P@10 0.234 MRR 0.503      P@10 0.232
+renormalizada (hnz antes de E26)        P@10 0.259 MRR 0.532    P@10 0.194 MRR 0.472    P@10 0.235 MRR 0.488      P@10 0.229
+OLS a·s+b                               P@10 0.268 MRR 0.551    P@10 0.177 MRR 0.450    P@10 0.210 MRR 0.457      P@10 0.218
+momentos a·s+b                          P@10 0.265 MRR 0.539    P@10 0.183 MRR 0.465    P@10 0.221 MRR 0.473      P@10 0.223
+sin renormalizar                        P@10 0.292 MRR 0.575    P@10 0.065 MRR 0.180    P@10 0.070 MRR 0.172      P@10 0.142
