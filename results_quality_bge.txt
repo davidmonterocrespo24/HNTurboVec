@@ -1,0 +1,14 @@
+BAAI/bge-small-en-v1.5: 200 queries, 16,667 docs (6,667 relevantes en hilos)
+embeddings 35.2 docs/s
+variante                                  B/vec   P@10  R@100
+384d float32                                 1536  0.578  0.433
+384d binario asimetrico                        48  0.538  0.414
+384d binario + re-embed top-100                48  0.575  0.414
+256d float32                                 1024  0.541  0.409
+256d binario asimetrico                        32  0.489  0.381
+256d binario + re-embed top-100                32  0.573  0.381
+128d float32                                  512  0.475  0.363
+128d binario asimetrico                        16  0.370  0.302
+128d binario + re-embed top-100                16  0.541  0.302
+BM25 (palabras clave)                       ~35  0.490  0.339
+hibrido BM25 + binario 384d (RRF)            48  0.585  0.449

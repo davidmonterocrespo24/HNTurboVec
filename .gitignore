@@ -1,0 +1,35 @@
+# Entorno Python
+.venv/
+__pycache__/
+*.pyc
+
+# Datos descargados de HN (Parquet, GB) — se regeneran con los scripts
+data/
+
+# Embeddings y artefactos intermedios cacheados (.npy, cientos de MB)
+emb/
+*.npy
+
+# Índices generados por los benchmarks
+tantivy_idx/
+
+# Rust: compilados
+target/
+
+# Salidas del sistema construido (almacén comprimido, índices) — se regeneran con el build
+out/
+store/
+*.hnz
+
+# Modelos descargados / convertidos
+models/
+*.onnx
+*.onnx_data
+*.gguf
+*.safetensors
+
+# Sistema / editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

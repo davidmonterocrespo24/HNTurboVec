@@ -1,0 +1,31 @@
+382,681 registros
+transformacion HTML: 0.9453 reversibles, texto 125.0 MB -> 118.6 MB (9.1s)
+
+== Linea base (de tu investigacion) ==
+json/registro zstd19+dict64K (baseline)      blk=1      raw= 422.3 B/reg ->  181.2 B/reg  x2.33  comp   47.2s  leer 1 bloque        2 us  | 49.3M ->  8.94 GB
+
+== Efecto de cada idea, una a una ==
+columnar/registro zstd19+dict64K             blk=1      raw= 357.4 B/reg ->  168.4 B/reg  x2.12  comp   49.3s  leer 1 bloque        3 us  | 49.3M ->  8.30 GB
+columnar+transf/registro zstd19+dict64K      blk=1      raw= 341.7 B/reg ->  166.7 B/reg  x2.05  comp   50.0s  leer 1 bloque        3 us  | 49.3M ->  8.22 GB
+columnar+transf orden-id zstd19+dict         blk=16     raw= 334.2 B/reg ->  125.5 B/reg  x2.66  comp   84.0s  leer 1 bloque       25 us  | 49.3M ->  6.19 GB
+columnar+transf orden-id zstd19+dict         blk=64     raw= 333.8 B/reg ->  121.4 B/reg  x2.75  comp  148.7s  leer 1 bloque       39 us  | 49.3M ->  5.98 GB
+columnar+transf orden-id zstd19+dict         blk=256    raw= 333.7 B/reg ->  118.5 B/reg  x2.82  comp  220.3s  leer 1 bloque      248 us  | 49.3M ->  5.84 GB
+columnar+transf orden-id zstd19+dict         blk=1024   raw= 333.7 B/reg ->  115.8 B/reg  x2.88  comp  135.2s  leer 1 bloque      745 us  | 49.3M ->  5.71 GB
+columnar+transf orden-HILO zstd19+dict       blk=16     raw= 335.2 B/reg ->  123.9 B/reg  x2.71  comp   62.6s  leer 1 bloque       18 us  | 49.3M ->  6.11 GB
+columnar+transf orden-HILO zstd19+dict       blk=64     raw= 334.9 B/reg ->  118.0 B/reg  x2.84  comp  159.0s  leer 1 bloque       61 us  | 49.3M ->  5.82 GB
+columnar+transf orden-HILO zstd19+dict       blk=256    raw= 334.8 B/reg ->  114.4 B/reg  x2.93  comp  236.3s  leer 1 bloque      212 us  | 49.3M ->  5.64 GB
+columnar+transf orden-HILO zstd19+dict       blk=1024   raw= 334.8 B/reg ->  113.1 B/reg  x2.96  comp  132.3s  leer 1 bloque      691 us  | 49.3M ->  5.58 GB
+
+== Compresores mas fuertes (orden-hilo, bloque 256 y 4096) ==
+columnar+transf orden-HILO zstd22+dict       blk=256    raw= 334.8 B/reg ->  114.4 B/reg  x2.93  comp  245.8s  leer 1 bloque      298 us  | 49.3M ->  5.64 GB
+columnar+transf orden-HILO brotli-11         blk=256    raw= 334.8 B/reg ->  113.8 B/reg  x2.94  comp  225.7s  leer 1 bloque      538 us  | 49.3M ->  5.61 GB
+Traceback (most recent call last):
+  File "C:\Desarrollo\Odoo\AI\HNTurboVec\bench_store.py", line 188, in <module>
+    run('columnar+transf orden-HILO xz-9e', order_thread, blk, 'col', ttext, 'xz-9e')
+  File "C:\Desarrollo\Odoo\AI\HNTurboVec\bench_store.py", line 166, in run
+    comp_blocks = [lzma.compress(b, preset=9 | lzma.PRESET_EXTREME, format=lzma.FORMAT_RAW,
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\DavidMonteroCrespo\AppData\Roaming\uv\python\cpython-3.12-windows-x86_64-none\Lib\lzma.py", line 327, in compress
+    comp = LZMACompressor(format, check, preset, filters)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: Cannot specify both preset and filter chain
