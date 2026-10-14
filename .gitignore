@@ -50,3 +50,6 @@ data_lm/
 train_lm.log
 train_lm.err
 .venv-xpu/
+
+# Módulo de Python compilado (maturin develop)
+*.pyd

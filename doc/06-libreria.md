@@ -1,4 +1,7 @@
-# Librería `hnz` para backends: diseño (2026-10-14, pendiente de aprobación)
+# Librería `hnz` para backends: diseño (2026-10-14)
+
+**Estado:** aprobadas P0 y P1. **P1 hecha** (`import hnz` sobre el formato actual; E30). P0 en curso
+(E30b medido: embeber con CPU). El resto, pendiente.
 
 Diseño hecho con un panel de 5 agentes (3 especialistas —API y empaquetado, presupuesto de RAM,
 formato compacto y consulta—, un arquitecto que lo integra y una revisión adversarial contra el

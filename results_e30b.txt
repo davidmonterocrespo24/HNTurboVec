@@ -1,0 +1,17 @@
+INFO:nncf:Statistics of the bitwidth distribution:
++---------------------------+-----------------------------+----------------------------------------+
+| Weight compression mode   | % all parameters (layers)   | % ratio-defining parameters (layers)   |
++===========================+=============================+========================================+
+| int8_asym, per-channel    | 100% (219 / 219)            | 100% (219 / 219)                       |
++---------------------------+-----------------------------+----------------------------------------+
+Applying Weight Compression -------------------------- 100% • 0:00:05 • 0:00:00
+IR int8 de documentos creado: models/gemma2_text_b32_s128_int8.xml
+1024 documentos, 64 tokens de media (máx. 128)
+  fp16 32x128  16 hilos, 4 flujos:   21.3 docs/s
+  fp16 32x128  16 hilos, 2 flujos:   20.8 docs/s
+  fp16 32x128   8 hilos, 2 flujos:   15.9 docs/s
+  fp16 32x128   8 hilos, 1 flujos:   14.4 docs/s
+  int8 32x128  16 hilos, 4 flujos:   38.2 docs/s
+  int8 32x128  16 hilos, 2 flujos:   36.3 docs/s
+  int8 32x128   8 hilos, 2 flujos:   28.2 docs/s
+  int8 32x128   8 hilos, 1 flujos:   25.7 docs/s

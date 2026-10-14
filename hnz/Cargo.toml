@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Hacker News comprimido al máximo con búsqueda híbrida (vectores binarios + BM25) y recuperación literal"
 
+[workspace]
+# py/: el paquete de Python (PyO3); `cargo build` en esta carpeta sigue compilando solo hnz
+members = ["py"]
+
 [dependencies]
 anyhow = "1"
 arrow = { version = "60", default-features = false }

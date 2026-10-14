@@ -578,3 +578,30 @@ coste por token → el motor de Rust y `export_lm.py` sirven sin cambios y desco
   sin tf = **5,24 GB** (−1 %); con cabeceras de registro más cortas, vocabulario compartido por año y
   embedder int4 (sin medir) **≈ 4,96 GB**. Más datos de entrenamiento (5 % de HN, ~7 h en la iGPU)
   deberían bajar algo más el texto.
+
+### E30 — Librería para backends: P1 (`import hnz`) y primeras mediciones de P0
+Diseño en [06-libreria.md](06-libreria.md). Decisiones del usuario (2026-10-14): Windows; instantánea de
+solo lectura; un proceso con varias consultas a la vez; perfil compacto (~5 GB, ~4 s en frío); **el
+servidor puede no tener iGPU**; caché persistente y precalentamiento opcionales; las palabras
+frecuentes se buscan entre los candidatos semánticos.
+- **E30b — embeber documentos solo con CPU** (`bench_cpu_embed.py` → `results_e30b.txt`; 1.024
+  documentos reales de 2024-01, 64 tokens de media, rellenados a 128; modo THROUGHPUT):
+| IR | 16 hilos | 8 hilos (lo que queda libre mientras descomprime el LM) |
+|---|---|---|
+| fp16 32×128 | 21,3 docs/s | 15,9 docs/s |
+| **int8 32×128** (NNCF) | **38,2 docs/s** | **28,2 docs/s** |
+  Sin iGPU, re-embeber ~115 candidatos costaría ~4 s además del LM: el perfil para CPU necesitará
+  menos candidatos (~50, con vectores de 384 bits, +0,8 GB) o agrupar por longitud (sin medir); se
+  decide con las mediciones E30a/E30d.
+- **P1 — librería de Python sobre el formato actual:**
+  - `hnz::api`: fachada segura entre hilos (comprobado al compilar que el motor es `Send + Sync`); el
+    embedder de OpenVINO vive en un hilo propio (sus objetos no se pueden compartir entre hilos) y el LM
+    descomprime de una consulta en una (su pool de hilos es global).
+  - crate `hnz-py` (PyO3 0.29, rueda `abi3` para Python ≥ 3.10, toolchain GNU sin Visual Studio) y
+    paquete `hnz`: `open(path, ram=…)`, `search(…)` con dataclasses o `raw=True`, `get(id)`, `embed`,
+    `stats`; suelta el GIL; las DLL de OpenVINO se toman del paquete pip.
+  - Pruebas (`hnz/py/tests`, 9): mismos resultados que la CLI (híbrida, palabras y con filtros);
+    `get()` idéntico al Parquet en 75 registros de los 3 meses (incluido el nivel LM); 48 operaciones
+    mezcladas en 8 hilos = el mismo resultado que de una en una; errores de argumentos → `ValueError`.
+  - Latencia desde Python: **33 ms** de mediana (2024, caliente; la capa de Python añade ~0,2 ms);
+    **45 consultas/s** con 8 hilos (el embedder, de una consulta en una, es el cuello de botella).

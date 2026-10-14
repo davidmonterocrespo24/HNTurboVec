@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[project]
+name = "hnz"
+version = "0.1.0"
+description = "Todo Hacker News comprimido sin pérdida, con búsqueda híbrida (semántica + palabras) y recuperación literal"
+requires-python = ">=3.10"
+# solo se usan las DLL de OpenVINO (el embedder de consultas); el paquete no se importa
+dependencies = ["openvino>=2025.1"]
+classifiers = ["Programming Language :: Rust", "Operating System :: Microsoft :: Windows"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "hnz._hnz"
+features = ["pyo3/extension-module"]

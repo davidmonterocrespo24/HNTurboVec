@@ -71,6 +71,29 @@ hnz serve --port 8088                                # web en http://127.0.0.1:8
 API HTTP: `GET /search?q=…&k=10&from=2015&to=2018&type=comment&by=pg&mode=hybrid&full=0`,
 `GET /item/<id>`.
 
+## Desde Python (`import hnz`)
+Paquete en `hnz/py/` (núcleo en Rust con PyO3; rueda `abi3` para Python ≥ 3.10, Windows x86-64):
+```bash
+cd hnz/py && maturin develop --release        # instala en el entorno activo (o: maturin build --release)
+```
+```python
+import hnz
+with hnz.open(r"C:\ruta\out", ram="4GB", preload=True) as hn:     # modelos en out/models o out/../models
+    r = hn.search("how do I deal with burnout", k=10, since="2015", until="2018-06", types="comment")
+    for h in r:                                                    # dataclasses Hit (o raw=True: dicts)
+        print(h.rank, h.date, h.by, h.story_title, h.text[:120])
+    item = hn.get(9700000)                                         # literal: item.html = HTML original
+    nuevos = hn.search(types="job", since="2024")                  # sin texto: lo más reciente
+    print(r.timings_ms, hn.stats())
+```
+- `Archive` es seguro entre hilos y suelta el GIL: un backend (p.ej. FastAPI con un worker) atiende
+  varias consultas a la vez sobre el mismo archivo abierto. Errores de argumentos → `ValueError`.
+- Las DLL de OpenVINO se toman del paquete `openvino` instalado (o `ov_libs=` / `HNZ_OV_LIBS`).
+- `ram=`: en esta versión se guarda e informa; el control estricto de la memoria es la fase P2
+  ([doc/06-libreria.md](../doc/06-libreria.md)).
+- Pruebas: `python -m pytest hnz/py/tests` (mismos resultados que la CLI, sin pérdida frente al
+  Parquet, 8 hilos a la vez).
+
 ## Variables de entorno
 - `HNZ_MODELS` (carpeta de modelos), `HNZ_OV_LIBS` (carpeta de `openvino_c.dll`).
 - `HNZ_LM_THREADS` (hilos del LM; por defecto la mitad de los lógicos, mínimo 1),

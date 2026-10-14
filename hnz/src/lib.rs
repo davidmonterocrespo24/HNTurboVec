@@ -1,4 +1,5 @@
 //! hnz: Hacker News comprimido al máximo, con búsqueda híbrida y recuperación literal.
+pub mod api;
 pub mod bm25;
 pub mod cache;
 pub mod dates;
