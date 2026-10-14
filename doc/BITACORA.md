@@ -541,3 +541,40 @@ entrenado con HN.
   Bajar de 5 GB depende de un **LM entrenado con HN** (pendiente, E29): para entrenarlo y evaluarlo
   con meses que no haya visto se descarga todo el dataset (`download_hn.py`: reanudable byte a byte,
   versión fija del dataset y SHA-256 de cada fichero).
+
+### E29 — LM entrenado con HN: −9 % de texto con el mismo coste (`train_lm.py`, `train_lm.log`)
+Continuación del preentrenamiento de pythia-70m con texto de HN; misma arquitectura, tokenizador y
+coste por token → el motor de Rust y `export_lm.py` sirven sin cambios y descomprime igual de rápido.
+- **Datos:** `hnz lmdump` (el texto EXACTO que codifica el nivel frío: título, url y cuerpo en la
+  representación "e") de 1 de cada 100 ítems de todos los meses salvo los de evaluación y sus vecinos
+  (2010-05..07, 2015-05..07, 2023-12..2024-02): 456.059 registros, **36,8 M tokens** (~1 % de HN).
+  El dataset completo se bajó antes con `download_hn.py` (239 meses, 12,42 GB, SHA-256 comprobados).
+- **Entrenamiento:** iGPU Arc 140T con PyTorch XPU (entorno aparte `.venv-xpu`), fp16 mixto con
+  escalado de la pérdida; **bf16 rompe pythia** (pérdida 5,71 frente a 4,00 en fp32; fp16 da lo mismo
+  que fp32). lr 2e-4, calentamiento de 200 pasos y coseno, lotes de ~8.000 tokens, 5.000 pasos (una
+  pasada) a ~7.300 tokens/s: **93 minutos**. La CPU entrena a ~1.000 tokens/s.
+- **Evolución** (bits/byte en float32 sobre 1.000 registros de cada mes NO visto):
+| Paso | 2024-01 | 2015-06 | 2010-06 |
+|---|---|---|---|
+| pythia-70m original | 1,429 | 1,397 | 1,428 |
+| 500 | 1,500 | 1,466 | 1,526 |
+| 1.000 | 1,384 | 1,356 | 1,411 |
+| 2.500 | 1,338 | 1,313 | 1,370 |
+| 4.000 | 1,304 | 1,280 | 1,336 |
+| **5.000** | **1,296 (−9,3 %)** | **1,272 (−9,0 %)** | **1,326 (−7,1 %)** |
+  Al principio empeora (subir el lr sobre un modelo ya entrenado lo desajusta) y se recupera desde el
+  paso 1.000; al final aún mejoraba.
+- **En el compresor real** (int8, `hnz lmtest`, los mismos 300 registros de cada mes; 0 errores):
+| Mes | pythia-70m original | LM de HN | Ahorro |
+|---|---|---|---|
+| 2024-01 | 59,8 B/reg (1,492 bits/byte) | **53,4 B (1,333)** | **−10,7 %** |
+| 2015-06 | 70,6 B (1,334) | **64,3 B (1,216)** | **−8,9 %** |
+| 2010-06 | 58,0 B (1,482) | **53,4 B (1,365)** | **−7,9 %** |
+  Todo HN en el nivel LM: **3,13 → 2,84 GB**. Descompresión igual de rápida (mismo modelo).
+- **Ojo:** el fichero del LM forma parte del archivo, como un diccionario: sin él (o con otro) no se
+  puede descomprimir; el manifiesto de cada segmento guarda su id (hash) y se comprueba al abrir.
+- **Perfil compacto con lo medido (todo HN):** todo en el nivel LM con el LM de HN + vectores binarios de
+  256 bits con reordenación + índice de términos raros = **5,74 GB** (calidad como hoy); con 192 bits y
+  sin tf = **5,24 GB** (−1 %); con cabeceras de registro más cortas, vocabulario compartido por año y
+  embedder int4 (sin medir) **≈ 4,96 GB**. Más datos de entrenamiento (5 % de HN, ~7 h en la iGPU)
+  deberían bajar algo más el texto.

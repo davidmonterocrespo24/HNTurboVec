@@ -1,0 +1,11 @@
+2026-10-14 00:43:24 base (pythia-70m sin entrenar): eval_2024-01 1.4291 bits/byte, eval_2015-06 1.3974 bits/byte, eval_2010-06 1.4276 bits/byte
+2026-10-14 00:52:42 evaluación paso 500: eval_2024-01 1.5004 bits/byte, eval_2015-06 1.4659 bits/byte, eval_2010-06 1.5263 bits/byte
+2026-10-14 01:02:14 evaluación paso 1000: eval_2024-01 1.3837 bits/byte, eval_2015-06 1.3564 bits/byte, eval_2010-06 1.4114 bits/byte
+2026-10-14 01:11:27 evaluación paso 1500: eval_2024-01 1.3687 bits/byte, eval_2015-06 1.3424 bits/byte, eval_2010-06 1.3978 bits/byte
+2026-10-14 01:20:36 evaluación paso 2000: eval_2024-01 1.3532 bits/byte, eval_2015-06 1.3259 bits/byte, eval_2010-06 1.3825 bits/byte
+2026-10-14 01:29:46 evaluación paso 2500: eval_2024-01 1.3378 bits/byte, eval_2015-06 1.3127 bits/byte, eval_2010-06 1.3699 bits/byte
+2026-10-14 01:38:59 evaluación paso 3000: eval_2024-01 1.3265 bits/byte, eval_2015-06 1.3032 bits/byte, eval_2010-06 1.3572 bits/byte
+2026-10-14 01:48:09 evaluación paso 3500: eval_2024-01 1.3147 bits/byte, eval_2015-06 1.2885 bits/byte, eval_2010-06 1.3436 bits/byte
+2026-10-14 01:57:19 evaluación paso 4000: eval_2024-01 1.3040 bits/byte, eval_2015-06 1.2797 bits/byte, eval_2010-06 1.3356 bits/byte
+2026-10-14 02:06:31 evaluación paso 4500: eval_2024-01 1.2987 bits/byte, eval_2015-06 1.2729 bits/byte, eval_2010-06 1.3266 bits/byte
+2026-10-14 02:15:41 evaluación paso 5000: eval_2024-01 1.2959 bits/byte, eval_2015-06 1.2718 bits/byte, eval_2010-06 1.3258 bits/byte
