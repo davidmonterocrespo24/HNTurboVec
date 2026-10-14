@@ -1,7 +1,13 @@
 # Librería `hnz` para backends: diseño (2026-10-14)
 
-**Estado:** aprobadas P0 y P1. **P1 hecha** (`import hnz` sobre el formato actual; E30). P0 en curso
-(E30b medido: embeber con CPU). El resto, pendiente.
+**Estado:** **P1 hecha** (`import hnz` sobre el formato actual, revisada: E30). P0 en curso (E30a y E30b
+medidos). Aprobado seguir con P2 al terminar P0.
+
+**Decisiones tomadas (2026-10-14):** servidor posiblemente **sin iGPU** (todo debe ir bien solo con
+CPU); **vectores binarios de 256 bits** y reordenación de **100 candidatos** re-embebiendo los 128
+primeros tokens descomprimidos (~5,5 GB para todo HN, ~4-4,5 s en frío con CPU; P@10 vectorial 0,221
+frente a 0,229 hoy, E30a); caché persistente y precalentamiento opcionales (desactivados por
+defecto); las palabras frecuentes se buscan entre los candidatos semánticos.
 
 Diseño hecho con un panel de 5 agentes (3 especialistas —API y empaquetado, presupuesto de RAM,
 formato compacto y consulta—, un arquitecto que lo integra y una revisión adversarial contra el
