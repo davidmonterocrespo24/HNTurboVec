@@ -9,7 +9,11 @@ Consultas: eval/{2024-01,2010-06,2015-06}.jsonl (relevantes = comentarios del hi
 """
 import json, os, numpy as np, pyarrow.parquet as pq
 
+import sys
 MONTHS = {'2024-01': 2024, '2010-06': 2010, '2015-06': 2015}
+# conjunto de embeddings: g2 = texto completo (E27a); g2p128 = prefijos de 128 tokens del LM (E30a,
+# embed_prefix.py), usados a la vez para los códigos y para la reordenación
+TAG = sys.argv[1] if len(sys.argv) > 1 else 'g2'
 BITS = [768, 512, 384, 256, 192, 128]
 KS = [0, 50, 100, 200]
 
@@ -21,8 +25,8 @@ def queries(m):
 
 
 def month(m, y):
-    E = np.load(f'emb/g2_{m}.f16.npy', mmap_mode='r')
-    ids = np.load(f'emb/g2_{m}.ids.npy')
+    E = np.load(f'emb/{TAG}_{m}.f16.npy', mmap_mode='r')
+    ids = np.load(f'emb/{TAG}_{m}.ids.npy')
     t = pq.read_table(f'data/{y}/{m}.parquet', columns=['id', 'parent', 'dead'])
     pid, par, dead = (t[c].to_pylist() for c in ['id', 'parent', 'dead'])
     idx = {i: k for k, i in enumerate(pid)}
@@ -45,7 +49,7 @@ root = np.concatenate([data[m][2] for m in MONTHS])
 alive = np.concatenate([data[m][3] for m in MONTHS])
 En = E.astype(np.float32)
 En /= np.linalg.norm(En, axis=1, keepdims=True)
-print(f'{len(ids):,} docs con vector (3 meses)', flush=True)
+print(f'{len(ids):,} docs con vector (3 meses), embeddings {TAG}', flush=True)
 
 
 def binary_scores(Q, bits, chunk=60000):

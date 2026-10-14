@@ -621,4 +621,19 @@ frecuentes se buscan entre los candidatos semánticos.
   - un entero se tomaba como año sin comprobar (una marca de tiempo daba resultados vacíos o sin
     filtrar) → solo años 1970-2100; el motor rechaza años fuera de 1-9999;
   - abrir una carpeta sin segmentos "funcionaba" con un archivo vacío → error claro.
+- **E30a — reordenar re-embebiendo solo el PRINCIPIO de cada candidato** (`experimentos/embed_prefix.py`
+  + `experimentos/bench_rescore.py g2p128` → `resultados/results_e30a.txt`): embeddings del prefijo de
+  128 tokens del LM (título y url completos + los 128 primeros tokens del cuerpo; recorta el 16 % de los
+  documentos), usados a la vez para los códigos binarios y para la reordenación, como en el perfil
+  compacto. 611.626 docs, 900 consultas, solo vector:
+| Bits | Sin reordenar | Top-50 | Top-100 | Top-200 | (texto completo, E27a, top-100) |
+|---|---|---|---|---|---|
+| 512 | 0,214 | 0,226 | 0,227 | 0,226 | 0,232 |
+| 384 | 0,198 | 0,223 | **0,227** | 0,226 | 0,231 |
+| **256** | 0,181 | 0,217 | **0,221** | 0,223 | 0,225 |
+| 192 | 0,148 | 0,202 | 0,213 | 0,218 | 0,217 |
+  Techo (float exacto): 0,225 con prefijos frente a 0,230 con texto completo. **Usar solo el prefijo
+  cuesta ~0,005 de P@10 (~2 %) en todas las combinaciones**; la relación bits / nº de candidatos no
+  cambia. Con CPU sola (E30b: ~28 docs/s re-embebiendo con 8 hilos mientras el LM usa los otros 8):
+  256 bits + top-100 ≈ 4-4,5 s en frío (~5,5 GB); 384 bits + top-50 ≈ 2-2,5 s (~6,3 GB).
 
