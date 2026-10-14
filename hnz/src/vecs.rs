@@ -157,6 +157,134 @@ impl VecIndex {
         &self.codes[doc * self.nbytes..(doc + 1) * self.nbytes]
     }
 
+    /// Distancia de Hamming de la etapa 1 (los primeros `s1` × 64 bits) entre un documento y la consulta.
+    #[inline]
+    fn ham(&self, q: &QueryLut, d: usize, s1: usize) -> u32 {
+        let c = self.code(d);
+        let mut h = 0u32;
+        for w in 0..s1 {
+            let x = u64::from_le_bytes(c[w * 8..w * 8 + 8].try_into().unwrap());
+            h += (x ^ q.sign1[w]).count_ones();
+        }
+        h
+    }
+
+    /// Los `cand` documentos con menor (Hamming, doc) de [lo, hi), en ese orden. Sin montículos (E30d:
+    /// con 49 M documentos y 20.000 candidatos, ordenar lo que guardaban los montículos de cada trozo
+    /// costaba ~0,6 s): una muestra estima la distancia de corte; una sola pasada recoge lo que queda
+    /// por debajo y cuenta el histograma exacto; si la estimación se quedó corta, una 2ª pasada con el
+    /// corte exacto. Mismo conjunto y orden que la versión con montículos (`hamming_select_heap`).
+    fn hamming_select(&self, q: &QueryLut, lo: usize, hi: usize, cand: usize) -> Vec<u32> {
+        const CH: usize = 1 << 16;
+        let s1 = self.nbytes.min(32) / 8;
+        let maxd = s1 * 64;
+        // 1) corte estimado con ~65.000 documentos de muestra (margen x2)
+        let step = ((hi - lo) / 65_536).max(1);
+        let mut sample = vec![0u64; maxd + 1];
+        let mut ns = 0u64;
+        for d in (lo..hi).step_by(step) {
+            if self.has(d) {
+                sample[self.ham(q, d, s1) as usize] += 1;
+                ns += 1;
+            }
+        }
+        let frac = cand as f64 / (ns as f64 * step as f64).max(1.0);
+        let want = (frac * ns as f64 * 2.0).ceil() as u64 + 16;
+        let cut = |hist: &[u64], need: u64| -> u32 {
+            let mut acc = 0u64;
+            for (d, &c) in hist.iter().enumerate() {
+                acc += c;
+                if acc >= need {
+                    return d as u32;
+                }
+            }
+            maxd as u32
+        };
+        let t_est = cut(&sample, want);
+        // 2) una pasada: candidatos con Hamming <= t e histograma exacto de todo el rango
+        let pass = |t: u32| -> (Vec<(u32, u32)>, Vec<u64>) {
+            let starts: Vec<usize> = (lo..hi).step_by(CH).collect();
+            let parts: Vec<(Vec<(u32, u32)>, Vec<u64>)> = starts
+                .par_iter()
+                .map(|&st| {
+                    let en = (st + CH).min(hi);
+                    let mut v = Vec::new();
+                    let mut hist = vec![0u64; maxd + 1];
+                    for d in st..en {
+                        if !self.has(d) {
+                            continue;
+                        }
+                        let h = self.ham(q, d, s1);
+                        hist[h as usize] += 1;
+                        if h <= t {
+                            v.push((h, d as u32));
+                        }
+                    }
+                    (v, hist)
+                })
+                .collect();
+            let mut all = Vec::new();
+            let mut hist = vec![0u64; maxd + 1];
+            for (v, h) in parts {
+                all.extend(v);
+                for (a, b) in hist.iter_mut().zip(h) {
+                    *a += b;
+                }
+            }
+            (all, hist)
+        };
+        let (mut all, hist) = pass(t_est);
+        let t_exact = cut(&hist, cand as u64);
+        if t_exact > t_est {
+            all = pass(t_exact).0; // la muestra subestimó el corte (raro)
+        }
+        if all.len() > cand {
+            all.select_nth_unstable(cand - 1);
+            all.truncate(cand);
+        }
+        all.sort_unstable();
+        all.into_iter().map(|x| x.1).collect()
+    }
+
+    /// Versión anterior de la etapa 1 (montículos por trozo), solo para comparar en pruebas y en el
+    /// banco de pruebas `examples/stage1.rs`.
+    #[doc(hidden)]
+    pub fn hamming_select_heap(&self, q: &QueryLut, lo: usize, hi: usize, cand: usize) -> Vec<u32> {
+        const CH: usize = 1 << 16;
+        let s1 = self.nbytes.min(32) / 8;
+        let starts: Vec<usize> = (lo..hi).step_by(CH).collect();
+        let heaps: Vec<BinaryHeap<(u32, u32)>> = starts
+            .par_iter()
+            .map(|&st| {
+                let en = (st + CH).min(hi);
+                let mut h: BinaryHeap<(u32, u32)> = BinaryHeap::with_capacity(cand.min(en - st) + 1);
+                for d in st..en {
+                    if !self.has(d) {
+                        continue;
+                    }
+                    let ham = self.ham(q, d, s1);
+                    if h.len() < cand {
+                        h.push((ham, d as u32));
+                    } else if ham < h.peek().unwrap().0 {
+                        h.pop();
+                        h.push((ham, d as u32));
+                    }
+                }
+                h
+            })
+            .collect();
+        let mut all: Vec<(u32, u32)> = heaps.into_iter().flatten().collect();
+        all.sort_unstable();
+        all.truncate(cand);
+        all.into_iter().map(|x| x.1).collect()
+    }
+
+    /// Para el banco de pruebas: la selección nueva, expuesta.
+    #[doc(hidden)]
+    pub fn hamming_select_pub(&self, q: &QueryLut, lo: usize, hi: usize, cand: usize) -> Vec<u32> {
+        self.hamming_select(q, lo, hi, cand)
+    }
+
     /// Top-k en [lo, hi): Hamming (256 bits) -> `cand` candidatos -> asimétrico.
     pub fn search(&self, q: &QueryLut, lo: usize, hi: usize, cand: usize, k: usize) -> Vec<(u32, f32)> {
         let hi = hi.min(self.n);
@@ -166,38 +294,7 @@ impl VecIndex {
         let cands: Vec<u32> = if hi - lo <= cand {
             (lo as u32..hi as u32).filter(|&d| self.has(d as usize)).collect()
         } else {
-            const CH: usize = 1 << 16;
-            let s1 = self.nbytes.min(32) / 8; // palabras de 64 bits en la etapa 1
-            let starts: Vec<usize> = (lo..hi).step_by(CH).collect();
-            let heaps: Vec<BinaryHeap<(u32, u32)>> = starts
-                .par_iter()
-                .map(|&st| {
-                    let en = (st + CH).min(hi);
-                    let mut h: BinaryHeap<(u32, u32)> = BinaryHeap::with_capacity(cand.min(en - st) + 1);
-                    for d in st..en {
-                        if !self.has(d) {
-                            continue;
-                        }
-                        let c = self.code(d);
-                        let mut ham = 0u32;
-                        for w in 0..s1 {
-                            let x = u64::from_le_bytes(c[w * 8..w * 8 + 8].try_into().unwrap());
-                            ham += (x ^ q.sign1[w]).count_ones();
-                        }
-                        if h.len() < cand {
-                            h.push((ham, d as u32));
-                        } else if ham < h.peek().unwrap().0 {
-                            h.pop();
-                            h.push((ham, d as u32));
-                        }
-                    }
-                    h
-                })
-                .collect();
-            let mut all: Vec<(u32, u32)> = heaps.into_iter().flatten().collect();
-            all.sort_unstable();
-            all.truncate(cand);
-            all.into_iter().map(|x| x.1).collect()
+            self.hamming_select(q, lo, hi, cand)
         };
         let mut scored: Vec<(u32, f32)> = cands.par_iter().map(|&d| (d, q.score(self.code(d as usize)))).collect();
         scored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));

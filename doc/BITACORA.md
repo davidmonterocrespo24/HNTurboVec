@@ -636,4 +636,17 @@ frecuentes se buscan entre los candidatos semánticos.
   cuesta ~0,005 de P@10 (~2 %) en todas las combinaciones**; la relación bits / nº de candidatos no
   cambia. Con CPU sola (E30b: ~28 docs/s re-embebiendo con 8 hilos mientras el LM usa los otros 8):
   256 bits + top-100 ≈ 4-4,5 s en frío (~5,5 GB); 384 bits + top-50 ≈ 2-2,5 s (~6,3 GB).
+- **E30d — 1ª etapa de vectores a la escala de todo HN** (`hnz/examples/stage1.rs` →
+  `resultados/results_e30d.txt`): los códigos reales de 256 bits de los 3 meses replicados hasta
+  **49,7 M documentos** (1,59 GB; 8 bits cambiados al azar en cada copia).
+  - Con la selección de entonces (un montículo de `cand` candidatos por cada trozo de 65.536 docs y
+    ordenar todo al final): **545-695 ms** con 20.000 candidatos (~760 trozos × 20.000 entradas que
+    ordenar) y 83-111 ms con 2.000. El recorrido en sí ya estaba cerca del límite de la memoria.
+  - **Nueva selección por histograma de distancias de Hamming** (enteros 0-256): una muestra de ~65.000
+    docs estima el corte, una sola pasada recoge lo que queda por debajo y cuenta el histograma exacto,
+    y solo si la estimación se quedó corta hay una 2ª pasada. **Mismo conjunto y orden** que con
+    montículos (comprobado en el banco de pruebas; `hnz eval` da exactamente las mismas cifras).
+  - Resultado: selección **37 ms** (frente a 545 ms con 20.000 candidatos); búsqueda completa (etapa 1
+    + puntuación asimétrica del top-100) **~53 ms con 8 hilos y ~40 ms con 16** sobre los 49,7 M
+    documentos, con 2.000 o con 20.000 candidatos. Mejora también el perfil rápido actual.
 
