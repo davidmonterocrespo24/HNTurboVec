@@ -4,7 +4,7 @@ re-embeber por consulta en un servidor sin GPU.
 EmbeddingGemma 2 (IR de OpenVINO) en CPU, modo THROUGHPUT con varias peticiones en paralelo, sobre
 documentos reales de HN (prompt "title: … | text: …", hasta 128 tokens), con 16 hilos y con 8 (lo que
 quedaría libre mientras el LM descomprime). Variantes: fp16 estático 32x128 y su versión int8 (NNCF).
-Uso: python bench_cpu_embed.py
+Uso: python experimentos/bench_cpu_embed.py
 """
 import html, json, os, re, time
 import numpy as np, openvino as ov, pyarrow.parquet as pq

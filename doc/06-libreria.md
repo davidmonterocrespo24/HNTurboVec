@@ -97,7 +97,7 @@ reciente (~137.000 docs/hora, opcional) o un fichero de caché persistente (opci
 | P2 Gobierno de la RAM | contabilidad, planificador, lecturas sin mmap, admisión | memoria ≤ 1,03 × `ram` con 8 clientes durante 30 min |
 | P3 Bloque compacto v1 | contenedor, `hnz pack`, índice global, `verify-block` | sin pérdida en la muestra; tamaño proyectado ≤ 5,6 GB |
 | P4 Reordenación | descompresión de prefijos + re-embedding + BM25 exacto + fusión | calidad ≥ hoy − 0,01; latencias medidas |
-| P5 Construcción completa | `pipeline.py --profile compact` de todo HN | tamaño, sin pérdida (muestra 0,5 % + comprobaciones), memoria |
+| P5 Construcción completa | `scripts/pipeline.py --profile compact` de todo HN | tamaño, sin pérdida (muestra 0,5 % + comprobaciones), memoria |
 | P6 Empaquetado | rueda, DLL de OpenVINO, servidor, C ABI opcional, tests | instalación limpia en Windows |
 | P7 Mejoras opcionales | cabeceras de registro, reordenación en cascada, embedder int4, caché persistente, nivel zstd para lo más reciente | cada una medida |
 

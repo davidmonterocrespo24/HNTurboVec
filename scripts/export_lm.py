@@ -3,7 +3,7 @@
 - filas de query_key_value reordenadas a [Q de todas las cabezas | K | V]
 - tabla RoPE (cos/sin) precalculada en f32 (así Rust no usa sin/cos de la libm)
 - vocabulario: bytes de cada token (BPE a nivel de byte)
-Uso: python export_lm.py EleutherAI/pythia-70m models/lm-pythia-70m.hnzlm"""
+Uso: python scripts/export_lm.py EleutherAI/pythia-70m models/lm-pythia-70m.hnzlm"""
 import sys, json, struct, numpy as np, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 

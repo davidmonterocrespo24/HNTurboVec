@@ -1,7 +1,7 @@
 """Genera embeddings EmbeddingGemma 2 (768d) de un mes de HN en la iGPU (OpenVINO), agrupando por
 longitud (buckets 32/64/128/256 tokens). Salida: emb/g2_<mes>.f16.npy (N x 768, float16, mismo orden
 que el parquet filtrado) + emb/g2_<mes>.ids.npy (ids de HN).
-Uso: python embed_month.py data/2024/2024-01.parquet [GPU|CPU]"""
+Uso: python scripts/embed_month.py data/2024/2024-01.parquet [GPU|CPU]"""
 import sys, os, time, re, html
 import numpy as np, pyarrow.parquet as pq, openvino as ov
 from huggingface_hub import hf_hub_download

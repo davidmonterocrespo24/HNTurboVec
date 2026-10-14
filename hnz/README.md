@@ -15,7 +15,7 @@ y recuperación literal de los resultados. Diseño y mediciones en [`../doc/`](.
   uv pip install --python .venv -r requirements-torch.txt --index-url https://download.pytorch.org/whl/cpu
   uv pip install --python .venv -r requirements.txt
   .venv\Scripts\activate       # PowerShell/cmd (en Git Bash: source .venv/Scripts/activate)
-  python prepare_models.py     # crea models/: EmbeddingGemma 2 (IR), tokenizadores, LM .hnzlm
+  python scripts/prepare_models.py     # crea models/: EmbeddingGemma 2 (IR), tokenizadores, LM .hnzlm
   ```
   Los comandos `python …` de este documento suponen el entorno activado (o usar
   `.venv\Scripts\python` en su lugar).
@@ -27,8 +27,8 @@ cd hnz && cargo build --release          # binario en hnz/target/release/hnz.exe
 ```
 
 ## Construir un archivo (desde la raíz del proyecto)
-Solo descargar todo el dataset (reanudable, con SHA-256): `python download_hn.py`.
-Todo HN, por años y reanudable: `python pipeline.py --years 2006-2026` (ver su ayuda). Al volver a
+Solo descargar todo el dataset (reanudable, con SHA-256): `python scripts/download_hn.py`.
+Todo HN, por años y reanudable: `python scripts/pipeline.py --years 2006-2026` (ver su ayuda). Al volver a
 ejecutarlo baja los meses que han cambiado en el dataset (el mes en curso se publica a medias),
 recalcula sus embeddings y reconstruye solo los años afectados; un segmento nunca se reconstruye
 solo por cambiar de nivel: `--retier` enfría a LM los años que ya no son calientes (con

@@ -67,9 +67,9 @@ Latencias medidas: ver la tabla de [README.md](README.md) y E26 en la bitácora.
 - Varios modelos LM pueden convivir en un archivo (cada segmento indica el suyo).
 
 ## Construcción (offline)
-1. `prepare_models.py`: IR de EmbeddingGemma 2 (documentos en buckets, consultas int8), tokenizador y
+1. `scripts/prepare_models.py`: IR de EmbeddingGemma 2 (documentos en buckets, consultas int8), tokenizador y
    LM `.hnzlm`.
-2. `pipeline.py --years 2006-2026`: descarga → embeddings en la iGPU (~204 docs/s, ~2,8 días para todo)
+2. `scripts/pipeline.py --years 2006-2026`: descarga → embeddings en la iGPU (~204 docs/s, ~2,8 días para todo)
    → segmento por año (zstd los 2 últimos años del dataset, LM el resto; ~120 reg/s en CPU, ~4 días)
    → vectores (768/512 bits). Reanudable; reconstruye el año en curso si aparecen meses nuevos.
 3. `hnz verify` por segmento (lote continuo en el nivel LM).
@@ -100,7 +100,7 @@ y no implementarlo por ahora.
   ~100 candidatos (~3 s) y re-embeberlos en la iGPU; BM25 exacto; texto completo del top-10 → ~4 s de
   mediana (estimación, sin implementar).
 - Por implementar: etapa de reordenación en el motor; índice de términos raros + BM25 al vuelo;
-  perfil elegible en `build`/`pipeline.py`; cabeceras de registro más cortas; vocabulario compartido
+  perfil elegible en `build`/`scripts/pipeline.py`; cabeceras de registro más cortas; vocabulario compartido
   por año; embedder int4; reconstruir todo HN (~5 días de iGPU + CPU, reanudable).
 - Descartado (E28): códigos PQ de 16-18 B (peores candidatos que el binario) y el título del hilo como
   contexto del LM (no ahorra).
@@ -108,7 +108,7 @@ y no implementarlo por ahora.
 - El LM forma parte del archivo (como un diccionario): hay que guardar una copia del `.hnzlm` exacto.
 
 ## Pendiente / mejoras
-- [ ] Construcción completa de los 239 meses (días de cómputo); el dataset ya está descargado (`download_hn.py`).
+- [ ] Construcción completa de los 239 meses (días de cómputo); el dataset ya está descargado (`scripts/download_hn.py`).
 - [x] LM específico de HN: entrenado en la iGPU en 93 min, −9 % de texto con el mismo coste (E29).
 - [ ] Perfil compacto (~5 GB, consultas de ~4 s): plan arriba.
 - [x] Reranker cross-encoder (equivalente open source a Jev/System One), probado en E26: +6-10 % de

@@ -7,8 +7,8 @@ sirven sin cambios y la descompresión va igual de rápida. Solo cambia lo bien 
 - Evaluación: bits/byte en meses que NO están en el entrenamiento (2010-06, 2015-06, 2024-01).
 - Reanudable: punto de control (modelo + optimizador + paso) cada --save pasos; al relanzar sigue.
 Uso:
-  python train_lm.py --data data_lm/train.jsonl --eval data_lm/eval_*.jsonl --steps 6000 --out models/lm-hn-70m
-  python train_lm.py ... --probe 20        # solo mide tokens/s
+  python scripts/train_lm.py --data data_lm/train.jsonl --eval data_lm/eval_*.jsonl --steps 6000 --out models/lm-hn-70m
+  python scripts/train_lm.py ... --probe 20        # solo mide tokens/s
 """
 import argparse, glob, json, math, os, random, time
 import numpy as np, torch
@@ -176,7 +176,7 @@ def main():
     if not a.probe:
         model.save_pretrained(a.out)
         tok.save_pretrained(a.out)
-        log(f'modelo final en {a.out} (exportar con: python export_lm.py {a.out} {a.out}.hnzlm)')
+        log(f'modelo final en {a.out} (exportar con: python scripts/export_lm.py {a.out} {a.out}.hnzlm)')
 
 
 if __name__ == '__main__':

@@ -1,6 +1,6 @@
 """Genera consultas de evaluación (JSONL, UTF-8) para `hnz eval`: título de una story -> relevantes =
 comentarios de su hilo.
-Uso: python make_eval.py data/2024/2024-01.parquet 300 --out eval/2024-01.jsonl
+Uso: python experimentos/make_eval.py data/2024/2024-01.parquet 300 --out eval/2024-01.jsonl
 (escribe el fichero directamente en UTF-8: redirigir la salida con '>' en PowerShell 5.1 la convierte a UTF-16)"""
 import argparse, json, collections, sys
 import numpy as np, pyarrow.parquet as pq

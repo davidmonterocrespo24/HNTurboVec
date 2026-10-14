@@ -13,15 +13,15 @@
   se vuelve a bajar.
 
 Uso (con el entorno .venv activado):
-  python download_hn.py                    # todos los meses: data/YYYY/YYYY-MM.parquet (~12,4 GB)
-  python download_hn.py --years 2010-2012  # solo esos años
-  python download_hn.py --verify           # recalcula el SHA-256 de todo lo ya bajado
+  python scripts/download_hn.py                    # todos los meses: data/YYYY/YYYY-MM.parquet (~12,4 GB)
+  python scripts/download_hn.py --years 2010-2012  # solo esos años
+  python scripts/download_hn.py --verify           # recalcula el SHA-256 de todo lo ya bajado
 Si se corta, basta con volver a lanzar el mismo comando.
 """
 import argparse, concurrent.futures as cf, hashlib, json, os, re, sys, threading, time
 
 os.environ.setdefault('HF_HUB_DISABLE_XET', '1')   # hf_xet muere a mitad de descarga en esta máquina (E26)
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # raíz del proyecto
 REPO = 'open-index/hacker-news'
 MONTH_RE = re.compile(r'^data/(\d{4})/(\d{4})-(\d{2})\.parquet$')
 REGISTRO = os.path.join(ROOT, 'data', '_descargas.json')

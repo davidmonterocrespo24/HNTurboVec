@@ -3,7 +3,7 @@
 - velocidad de CODIFICAR (pasada paralela, tokens/s)
 - velocidad de DECODIFICAR (secuencial con KV-cache, lote de 10 registros, ms/paso)
 - round-trip del tokenizador (decode(encode(x)) == x)
-Uso: python bench_lm2.py <parquet> <n_registros> <modelo1,modelo2,...>"""
+Uso: python experimentos/bench_lm2.py <parquet> <n_registros> <modelo1,modelo2,...>"""
 import sys, math, time, os
 import numpy as np, torch, pyarrow.parquet as pq
 from transformers import AutoTokenizer, AutoModelForCausalLM

@@ -1,5 +1,7 @@
 # Bitácora de experimentos
 
+> **Dónde están los ficheros citados** (reorganización del 2026-10-14): los scripts de los experimentos (`bench_*.py`, `make_eval.py`) en `experimentos/`; sus salidas (`results_*.txt`) en `resultados/`; las herramientas (`pipeline.py`, `download_hn.py`, `prepare_models.py`, `embed_month.py`, `export_*.py`, `compress_embedder.py`, `train_lm.py`) en `scripts/`. Se ejecutan desde la raíz del proyecto, p.ej. `python experimentos/bench_store.py`.
+
 Regla: **cada experimento se anota aquí** (fecha, script, datos, resultado, conclusión) para no
 repetir pruebas. Los números "49,3 M" son extrapolaciones lineales desde el mes de muestra.
 Muestra por defecto: `data/2024/2024-01.parquet` = **382.681 ítems** (346.509 comentarios,

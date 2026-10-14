@@ -1,6 +1,6 @@
 """Comprime los pesos del IR de consultas de EmbeddingGemma 2 a int8 (NNCF, Intel) para que el sistema
 ocupe menos y embeba más rápido en CPU. Compara coseno y latencia con el IR fp16.
-Uso: python compress_embedder.py models/gemma2_text_b1_s64.xml"""
+Uso: python scripts/compress_embedder.py models/gemma2_text_b1_s64.xml"""
 import sys, time, json
 import numpy as np, openvino as ov, nncf
 from tokenizers import Tokenizer

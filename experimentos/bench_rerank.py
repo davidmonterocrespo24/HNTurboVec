@@ -8,7 +8,7 @@ de extremo a extremo frente a la consulta normal (k=10, fragmentos), cada una co
 arrancado y la caché L2 vacía.
   --full 1: el reranker lee el texto completo de los candidatos (los del nivel LM se descomprimen enteros)
   --full 0: lee lo que hnz devuelve por defecto (título + fragmento de 64 tokens en el nivel LM)
-Uso: python bench_rerank.py [--eval eval/2015-06.jsonl] [--full 0] [--models a,b] [--n 300] [--cand 30]
+Uso: python experimentos/bench_rerank.py [--eval eval/2015-06.jsonl] [--full 0] [--models a,b] [--n 300] [--cand 30]
 """
 import argparse, json, os, subprocess, sys, time, urllib.parse, urllib.request
 import numpy as np
@@ -16,7 +16,7 @@ import numpy as np
 # E26): se usa la descarga HTTP de siempre (también reanudable). Se hereda en los subprocesos.
 os.environ.setdefault('HF_HUB_DISABLE_XET', '1')
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # raíz del proyecto
 HNZ = os.path.join(ROOT, 'hnz', 'target', 'release', 'hnz.exe' if os.name == 'nt' else 'hnz')
 PORT = 8097
 # pequeños (80-150 MB) y uno grande de referencia (BGE-M3 int8, 570 MB)

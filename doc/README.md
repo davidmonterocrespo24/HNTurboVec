@@ -17,6 +17,18 @@ importa es el uso diario: **rápido, preciso y compacto**. Implementación en **
 | [05-arquitectura.md](05-arquitectura.md) | El sistema construido en Rust: formato, consulta, cachés, robustez, tamaños. |
 | [06-libreria.md](06-libreria.md) | Diseño de la librería para backends (Python, presupuesto de RAM, bloque compacto); pendiente de aprobación. |
 
+## Estructura del repositorio
+
+| Carpeta | Qué hay |
+|---|---|
+| `hnz/` | Motor en Rust (biblioteca + CLI `hnz.exe`) y paquete de Python en `hnz/py` (`import hnz`) |
+| `scripts/` | Herramientas para construir el archivo: descarga, pipeline, modelos, entrenamiento del LM |
+| `experimentos/` | Scripts de los experimentos (`bench_*.py`, `make_eval.py`) citados en la bitácora |
+| `resultados/` | Salidas de los experimentos (`results_*.txt`) |
+| `eval/` | Conjuntos de consultas de evaluación (título → comentarios del hilo) |
+| `doc/` | Esta documentación; `doc/investigacion/` = investigación previa (Hermes) |
+| `data/`, `emb/`, `models/`, `out/` | Fuera de git: dataset, embeddings, modelos y archivo construido |
+
 ## Estado actual
 
 - [x] Medición del tamaño de HN y de la línea base (investigación previa en Hermes).
@@ -32,12 +44,12 @@ importa es el uso diario: **rápido, preciso y compacto**. Implementación en **
       resultado byte a byte con dos binarios distintos (E26).
 - [x] Reranker cross-encoder (equivalente open source a Jev/System One) probado (E26): +6-10 % de
       P@10 pero multiplica la latencia por 5-7 (necesita el texto completo) → no se usa por defecto.
-- [x] Todo el dataset descargado (`download_hn.py`: 239 meses, 12,42 GB, SHA-256 comprobados).
+- [x] Todo el dataset descargado (`scripts/download_hn.py`: 239 meses, 12,42 GB, SHA-256 comprobados).
 - [x] LM entrenado con HN en la iGPU: −9 % de texto con el mismo coste (E29).
 - [x] Plan de **perfil compacto** medido (E27-E29): **~5 GB** para todo HN (5,74 sin pérdida, 5,24
       con −1 %) con consultas de ~4 s; documentado en [05-arquitectura.md](05-arquitectura.md), sin
       implementar por ahora.
-- [ ] Construcción completa de los 239 meses (`pipeline.py`; días de CPU/iGPU).
+- [ ] Construcción completa de los 239 meses (`scripts/pipeline.py`; días de CPU/iGPU).
 
 ## Resultado con la muestra de 3 meses (637.046 ítems, E26)
 
@@ -60,14 +72,14 @@ hilos parecidos de otros años cuentan como fallos (E26).
 ## Entorno
 
 - Python: `.venv` creado con `uv` (Python 3.12) e instalado desde [`../requirements-torch.txt`](../requirements-torch.txt) (torch CPU, índice de PyTorch) y [`../requirements.txt`](../requirements.txt)
-  (versiones fijadas). Modelos: `.venv\Scripts\python prepare_models.py` (o con el entorno activado; ver `hnz/README.md`).
+  (versiones fijadas). Modelos: `.venv\Scripts\python scripts\prepare_models.py` (o con el entorno activado; ver `hnz/README.md`).
 - Datos: dataset `open-index/hacker-news` de Hugging Face: **239 Parquet mensuales** (2006-10 →
   2026-08) más ficheros horarios de los últimos días (`today/…`) y estadísticas (628 ficheros en total).
-  Todo el dataset se baja con `download_hn.py` (~12,4 GB en `data/`): reanudable byte a byte si se
+  Todo el dataset se baja con `scripts/download_hn.py` (~12,4 GB en `data/`): reanudable byte a byte si se
   corta (basta con volver a lanzarlo), versión fija del dataset y SHA-256 de cada fichero.
 - Embeddings cacheados en `emb/` (`*.npy`) para no recalcular.
 - Descargas de Hugging Face con `HF_HUB_DISABLE_XET=1`: el descargador `hf_xet` muere a mitad de
-  descarga en esta máquina (E26); `pipeline.py`, `prepare_models.py` y `bench_rerank.py` lo fijan.
+  descarga en esta máquina (E26); `scripts/pipeline.py`, `scripts/prepare_models.py` y `experimentos/bench_rerank.py` lo fijan.
 - Máquina: Intel Core Ultra 7 265H (16 núcleos, iGPU Arc 140T, NPU), 31 GB RAM, sin GPU NVIDIA.
 - Rust: toolchain `stable-x86_64-pc-windows-gnu` (instalación de usuario, sin Visual Studio); el
   binario requiere CPU x86-64-v3 (AVX2).

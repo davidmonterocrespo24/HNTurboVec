@@ -15,11 +15,11 @@ año en curso, que se reconstruye entero cuando el dataset añade un mes). Los s
 sources.json (construidos a mano con `hnz build`) no se tocan.
 
 Ejemplos (con el entorno .venv activado, o con .venv\\Scripts\\python en vez de python):
-  python pipeline.py --years 2006-2026                       # todo HN (caliente = últimos 2 años)
-  python pipeline.py --years 2024 --steps download,embed     # solo preparar 2024
-  python pipeline.py --years 2006-2015 --all-zstd            # rápido (horas); enfriar luego con --retier
-  python pipeline.py --years 2006-2024 --steps build --retier   # enfriar a LM los años fríos ya construidos
-  python pipeline.py --years 2026 --offline                  # sin conexión: solo Parquet locales
+  python scripts/pipeline.py --years 2006-2026                       # todo HN (caliente = últimos 2 años)
+  python scripts/pipeline.py --years 2024 --steps download,embed     # solo preparar 2024
+  python scripts/pipeline.py --years 2006-2015 --all-zstd            # rápido (horas); enfriar luego con --retier
+  python scripts/pipeline.py --years 2006-2024 --steps build --retier   # enfriar a LM los años fríos ya construidos
+  python scripts/pipeline.py --years 2026 --offline                  # sin conexión: solo Parquet locales
 
 La compresión LM de todo HN tarda días en CPU: una estrategia práctica es construir todo con
 --all-zstd y enfriar después los años viejos con --retier (o `hnz retier --tier lm`), que
@@ -35,7 +35,7 @@ import numpy as np
 # E26): se usa la descarga HTTP de siempre (también reanudable). Se hereda en los subprocesos.
 os.environ.setdefault('HF_HUB_DISABLE_XET', '1')
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # raíz del proyecto
 HNZ = os.path.join(ROOT, 'hnz', 'target', 'release', 'hnz.exe' if os.name == 'nt' else 'hnz')
 PY = sys.executable
 REPO = 'open-index/hacker-news'
@@ -149,7 +149,7 @@ def embed(year, device):
         for f in emb_paths(m):
             if os.path.exists(f):
                 os.remove(f)
-        subprocess.run([PY, os.path.join(ROOT, 'embed_month.py'), p, device], check=True, cwd=ROOT)
+        subprocess.run([PY, os.path.join(ROOT, 'scripts', 'embed_month.py'), p, device], check=True, cwd=ROOT)
         json.dump({'parquet_size': os.path.getsize(p)}, open(emb_paths(m)[2], 'w', encoding='utf-8'))
 
 

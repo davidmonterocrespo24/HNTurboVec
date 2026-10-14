@@ -1,9 +1,9 @@
 """Compresion con bloques ordenados por tema (etiquetas de bench_tags.py) vs por hilo / por id.
-Uso: python bench_store_topic.py <tamano_bloque>"""
-import sys
+Uso: python experimentos/bench_store_topic.py <tamano_bloque>"""
+import os, sys
 import numpy as np
 BLK = int(sys.argv[1]); sys.argv = sys.argv[:1]  # bench_store lee sys.argv[1] como ruta del parquet
-src = open('bench_store.py', encoding='utf-8').read()
+src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bench_store.py'), encoding='utf-8').read()
 exec(src.split("texts_raw = cols['text']")[0])
 order_topic = np.load('emb/order_topic.npy').tolist()
 order_thr_topic = np.load('emb/order_thread_topic.npy').tolist()

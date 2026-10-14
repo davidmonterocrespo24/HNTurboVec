@@ -4,12 +4,12 @@ Cada caso se mide con el servidor recién arrancado (caché L1 vacía), sin cach
 consultas DISTINTAS (títulos de eval/*.jsonl): se da la mediana y el p90 (una sola consulta con la
 caché caliente no es representativa, E26). Después, los escenarios de caché a propósito: el mismo
 texto completo la 1ª vez, repetido (L1) y tras reiniciar el servidor (L2 en disco).
-Uso: python bench_serve.py [--n 30]   (con out/ construido y hnz compilado en hnz/target/release)
+Uso: python experimentos/bench_serve.py [--n 30]   (con out/ construido y hnz compilado en hnz/target/release)
 """
 import argparse, json, os, subprocess, time, urllib.parse, urllib.request
 import numpy as np
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # raíz del proyecto
 HNZ = os.path.join(ROOT, 'hnz', 'target', 'release', 'hnz.exe' if os.name == 'nt' else 'hnz')
 PORT = 8099
 L2 = os.path.join(ROOT, 'out', '_cache_l2.bin')
