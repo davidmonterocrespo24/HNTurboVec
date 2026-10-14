@@ -27,6 +27,7 @@ cd hnz && cargo build --release          # binario en hnz/target/release/hnz.exe
 ```
 
 ## Construir un archivo (desde la raíz del proyecto)
+Solo descargar todo el dataset (reanudable, con SHA-256): `python download_hn.py`.
 Todo HN, por años y reanudable: `python pipeline.py --years 2006-2026` (ver su ayuda). Al volver a
 ejecutarlo baja los meses que han cambiado en el dataset (el mes en curso se publica a medias),
 recalcula sus embeddings y reconstruye solo los años afectados; un segmento nunca se reconstruye

@@ -109,15 +109,10 @@ def download(year):
         log(f'  (sin ficheros para {year} en el dataset; se omite)')
     if not _online:
         return
-    from huggingface_hub import hf_hub_download
-    for f, size in sorted(files.items()):
-        dst = os.path.join(ROOT, f)
-        if os.path.exists(dst) and os.path.getsize(dst) == size:
-            continue
-        log(f'  descargando {f}' + (' (ha cambiado en el dataset)' if os.path.exists(dst) else ''))
-        p = hf_hub_download(REPO, f, repo_type='dataset', local_dir=os.path.join(ROOT, '_dl'), force_download=True)
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        os.replace(p, dst)
+    # descarga reanudable byte a byte y con comprobación de SHA-256 (download_hn.py)
+    import download_hn
+    if download_hn.run({year})['fallo']:
+        raise SystemExit(f'no se pudieron bajar todos los meses de {year}: vuelva a ejecutar para reanudar')
 
 
 def months(year):

@@ -40,3 +40,7 @@ models/
 Thumbs.db
 .vscode/
 .idea/
+
+# Registros de la descarga del dataset
+download_hn.log
+download_hn.err

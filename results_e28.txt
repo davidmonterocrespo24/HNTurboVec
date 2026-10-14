@@ -1,0 +1,16 @@
+== E28a: primera etapa PQ de 16-18 B/doc frente a binario 256 + reordenación
+611,640 docs; 900 consultas
+  binario 256 bits (hnz)              32 B/doc   P@10 sin reordenar 0.183 | top-100 0.225 | top-200 0.228
+  OPQ16 + PQ16 (256d)                 16 B/doc   P@10 sin reordenar 0.079 | top-100 0.158 | top-200 0.177
+  IVF4096 + PQ16 residuo (256d)       18 B/doc   P@10 sin reordenar 0.120 | top-100 0.186 | top-200 0.202
+  OPQ32 + PQ32 (256d)                 32 B/doc   P@10 sin reordenar 0.140 | top-100 0.211 | top-200 0.219
+== E28b: título del hilo (y padre) como contexto del LM
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+2024-01: 300 comentarios, 380 B de texto de media
+  solo               64.7 B/comentario  1.362 bits/byte  (+0.0 %)
+  título             65.0 B/comentario  1.369 bits/byte  (+0.5 %)
+  título + padre     63.3 B/comentario  1.333 bits/byte  (-2.2 %)
+2015-06: 300 comentarios, 427 B de texto de media
+  solo               68.9 B/comentario  1.289 bits/byte  (+0.0 %)
+  título             69.2 B/comentario  1.295 bits/byte  (+0.4 %)
+  título + padre     66.9 B/comentario  1.253 bits/byte  (-2.8 %)

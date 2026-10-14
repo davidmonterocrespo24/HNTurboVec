@@ -57,7 +57,8 @@ hilos parecidos de otros años cuentan como fallos (E26).
   (versiones fijadas). Modelos: `.venv\Scripts\python prepare_models.py` (o con el entorno activado; ver `hnz/README.md`).
 - Datos: dataset `open-index/hacker-news` de Hugging Face: **239 Parquet mensuales** (2006-10 →
   2026-08) más ficheros horarios de los últimos días (`today/…`) y estadísticas (628 ficheros en total).
-  Muestras descargadas: 2010-06, 2015-06 y 2024-01.
+  Todo el dataset se baja con `download_hn.py` (~12,4 GB en `data/`): reanudable byte a byte si se
+  corta (basta con volver a lanzarlo), versión fija del dataset y SHA-256 de cada fichero.
 - Embeddings cacheados en `emb/` (`*.npy`) para no recalcular.
 - Descargas de Hugging Face con `HF_HUB_DISABLE_XET=1`: el descargador `hf_xet` muere a mitad de
   descarga en esta máquina (E26); `pipeline.py`, `prepare_models.py` y `bench_rerank.py` lo fijan.

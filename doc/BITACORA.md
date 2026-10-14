@@ -481,3 +481,63 @@ top-30 real de hnz pedido al servidor):
 
 **Incidencias:** el descargador `hf_xet` de huggingface_hub muere a mitad de descarga en esta
 máquina (exit 127) → `HF_HUB_DISABLE_XET=1` en los scripts que descargan.
+
+### E27 — Perfil compacto: cuánto se puede encoger con ≤ 10 s por consulta (`results_e27.txt`)
+El usuario pide **4-5 GB para todo HN** aceptando hasta 10 s por consulta (con descompresión) y una
+compresión lenta. Idea: gastar el tiempo en **reordenar, no en guardar**: un índice mínimo da 100-200
+candidatos y se re-puntúan con su propio texto descomprimido (re-embeber + BM25 exacto); el texto hay
+que guardarlo igualmente, así que hace de "segundo índice" gratis.
+(b) Índice de palabras solo con los términos raros (2024-01, `hnz rebm25 --max-df`, `hnz eval`):
+| Términos indexados (df máx.) | B/doc | P@10 solo palabras | P@10 híbrida |
+|---|---|---|---|
+| todos (hoy) | 49,2 | 0,227 | 0,314 |
+| todos, sin frecuencia (tf) | 40,0 | 0,192 | 0,306 |
+| ≤ 2 % | 43,4 | 0,223 | 0,312 |
+| ≤ 0,5 % | 32,6 | 0,212 | 0,324 |
+| ≤ 0,1 % | 21,1 | 0,174 | 0,322 |
+| **≤ 0,02 %** | **13,2** | 0,141 | **0,320** |
+| ≤ 0,02 %, sin tf | 11,1 | 0,129 | 0,318 |
+| ≤ 0,005 % | 9,1 | 0,097 | 0,304 |
+  En la búsqueda híbrida, lo que aporta el índice de palabras son los términos raros (nombres,
+  identificadores, productos): con solo ellos (−73 % de tamaño) la calidad es igual o algo mejor. La
+  búsqueda solo por palabras frecuentes empeora: en un perfil compacto se puntuarían al vuelo sobre
+  los candidatos descomprimidos.
+(c) LM más grande (200 registros de 2024-01, `hnz lmtest`): pythia-160m **56,2 B/reg frente a 61,6**
+  (−8,8 %) pero descomprime 2,3 veces más lento (10 registros completos: 1,8 s frente a 0,78 s) y
+  comprime a 35 reg/s frente a 76.
+(a) Vectores con menos bits + reordenar el top-K re-embebiendo el texto descomprimido
+  (`bench_rescore.py`: 611.640 docs de los 3 meses, 900 consultas, solo vector; techo float 0,230):
+| Bits/doc | B/doc | Sin reordenar | Top-100 | Top-200 |
+|---|---|---|---|---|
+| 768 | 96 | 0,232 | 0,231 | 0,230 |
+| 512 | 64 | 0,218 | 0,232 | 0,231 |
+| 384 | 48 | 0,201 | 0,231 | 0,230 |
+| **256** | **32** | 0,183 | 0,225 (−0,008) | **0,228 (−0,004, no significativo)** |
+| 192 | 24 | 0,151 | 0,217 | 0,221 (−0,011) |
+| 128 | 16 | 0,100 | 0,178 | 0,193 (−0,039) |
+**Panel de diseño** (workflow de 4 agentes: 3 diseños independientes —texto, índices, consulta— y un
+juez que los contrasta con la bitácora): estimación central ~4,7 GB (4,2-5,3) con consultas de
+p50 ~4 s (descomprimir los primeros 128 tokens de ~100 candidatos ~3 s + re-embeber en la iGPU), que
+dependía de 3 hipótesis: códigos IVF-PQ de 18 B, título del hilo como contexto del LM y un LM
+entrenado con HN.
+
+### E28 — Las hipótesis baratas del panel (`results_e28.txt`)
+- **Cuantización de producto (faiss) frente al binario, para generar candidatos** (`bench_ivfpq.py`):
+| Código (prefijo MRL de 256 dims) | B/doc | Sin reordenar | Top-100 | Top-200 |
+|---|---|---|---|---|
+| binario asimétrico 256 bits (hnz) | 32 | 0,183 | 0,225 | **0,228** |
+| OPQ16 + PQ16 | 16 | 0,079 | 0,158 | 0,177 |
+| IVF4096 + PQ16 del residuo | 18 | 0,120 | 0,186 | 0,202 |
+| OPQ32 + PQ32 | 32 | 0,140 | 0,211 | 0,219 |
+  **Falla:** con EmbeddingGemma 2 los bits de signo son lo mejor por byte (como en E05); PQ de 18 B
+  queda por debajo del binario de 192 bits (0,221 con top-200).
+- **Contexto del hilo para el LM** (`bench_titlectx.py`, pythia-70m, 300 comentarios por mes): con el
+  título de la story, **+0,4-0,5 % (peor)**; con el título y los primeros 64 tokens del comentario
+  padre, −2,2 % (2024) y −2,8 % (2015), pero cada candidato obligaría a descomprimir también su padre
+  (el doble de trabajo al reordenar). **No compensa.**
+- Estimación con lo medido (todo HN): todo LM + binario 256 + términos raros **≈ 6,0 GB** (calidad
+  igual); con binario 192 **≈ 5,6 GB** (−1 %); con cabeceras de registro más cortas, vocabulario
+  compartido por año, embedder int4 y sin vector para comentarios muy cortos **≈ 5,0-5,2 GB** (−1-2 %).
+  Bajar de 5 GB depende de un **LM entrenado con HN** (pendiente, E29): para entrenarlo y evaluarlo
+  con meses que no haya visto se descarga todo el dataset (`download_hn.py`: reanudable byte a byte,
+  versión fija del dataset y SHA-256 de cada fichero).
