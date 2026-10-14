@@ -42,14 +42,13 @@ Thumbs.db
 .idea/
 
 # Registros de la descarga del dataset
-download_hn.log
-download_hn.err
 
 # Texto exportado para entrenar el LM de HN (hnz lmdump)
 data_lm/
-train_lm.log
-train_lm.err
 .venv-xpu/
 
 # Módulo de Python compilado (maturin develop)
 *.pyd
+
+# Registros de procesos largos (descarga, entrenamiento, construcción)
+logs/
