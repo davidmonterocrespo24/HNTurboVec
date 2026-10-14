@@ -35,3 +35,7 @@ debug = false
 
 [profile.dev]
 opt-level = 1
+
+[target.'cfg(windows)'.dependencies]
+# memoria del proceso (presupuesto de RAM, mem.rs)
+windows-sys = { version = "0.61", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }

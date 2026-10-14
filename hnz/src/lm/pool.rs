@@ -53,6 +53,8 @@ impl SpinPool {
     }
 
     fn worker(&self) {
+        // the LM must compute as it did when compressing: default MXCSR on this thread
+        super::fpenv::set_default();
         let mut seen = 0u64;
         loop {
             // esperar trabajo nuevo: girar un rato y luego dormir en la condvar

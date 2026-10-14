@@ -6,6 +6,8 @@ use anyhow::{bail, Context, Result};
 use half::f16;
 use memmap2::Mmap;
 use rayon::prelude::*;
+use crate::blob::Blob;
+use std::borrow::Cow;
 use std::collections::BinaryHeap;
 use std::fs::File;
 use std::path::Path;
@@ -74,8 +76,11 @@ pub fn build(dir: &Path, doc_ids: &[u32], emb_npy: &Path, ids_npy: &Path, bits: 
     Ok(matched)
 }
 
+/// Documents per read when the codes are on disk (memory per thread: this x code bytes).
+pub const DISK_READ_DOCS: usize = 8192;
+
 pub struct VecIndex {
-    codes: Mmap,
+    codes: Blob,
     has: Vec<u64>,
     pub nbytes: usize,
     pub n: usize,
@@ -131,7 +136,13 @@ impl QueryLut {
 
 impl VecIndex {
     pub fn open(dir: &Path, bits: usize, n_docs: usize) -> Result<Self> {
-        let codes = unsafe { Mmap::map(&File::open(dir.join("vec.bin")).context("vec.bin")?)? };
+        Self::open_with(dir, bits, n_docs, true)
+    }
+
+    /// `resident`: codes in RAM (the usual: every query scans them whole); otherwise they are read
+    /// from disk in windows.
+    pub fn open_with(dir: &Path, bits: usize, n_docs: usize, resident: bool) -> Result<Self> {
+        let codes = Blob::open(&dir.join("vec.bin"), resident).context("vec.bin")?;
         let hb = std::fs::read(dir.join("vec.has"))?;
         let has: Vec<u64> = hb.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
         let nbytes = bits / 8;
@@ -152,15 +163,50 @@ impl VecIndex {
         self.has[doc / 64] >> (doc % 64) & 1 == 1
     }
 
+    pub fn ram_bytes(&self) -> usize {
+        self.codes.resident_bytes() + self.has.capacity() * 8
+    }
+
+    pub fn blob(&self) -> &Blob {
+        &self.codes
+    }
+
+    pub fn blob_mut(&mut self) -> &mut Blob {
+        &mut self.codes
+    }
+
+    /// Walks [st, en) in windows: `f(first doc, consecutive codes)`. Resident: one borrowed window;
+    /// on disk, reads of at most `DISK_READ_DOCS` documents.
+    fn windows(&self, st: usize, en: usize, mut f: impl FnMut(usize, &[u8])) {
+        let step = if self.codes.is_resident() { (en - st).max(1) } else { DISK_READ_DOCS };
+        let mut a = st;
+        while a < en {
+            let b = (a + step).min(en);
+            f(a, &self.codes_of(a, b));
+            a = b;
+        }
+    }
+
+    /// Code of the document (borrowed if the codes are resident; read from disk if not).
     #[inline]
-    pub fn code(&self, doc: usize) -> &[u8] {
-        &self.codes[doc * self.nbytes..(doc + 1) * self.nbytes]
+    pub fn code(&self, doc: usize) -> Cow<'_, [u8]> {
+        self.codes.get(doc * self.nbytes, self.nbytes).unwrap_or_else(|e| {
+            eprintln!("hnz: no se pudo leer vec.bin: {e:#}");
+            Cow::Owned(vec![0; self.nbytes])
+        })
+    }
+
+    /// Codes of documents [st, en), consecutive (a single read if they are on disk).
+    fn codes_of(&self, st: usize, en: usize) -> Cow<'_, [u8]> {
+        self.codes.get(st * self.nbytes, (en - st) * self.nbytes).unwrap_or_else(|e| {
+            eprintln!("hnz: no se pudo leer vec.bin: {e:#}");
+            Cow::Owned(vec![0; (en - st) * self.nbytes])
+        })
     }
 
     /// Distancia de Hamming de la etapa 1 (los primeros `s1` × 64 bits) entre un documento y la consulta.
     #[inline]
-    fn ham(&self, q: &QueryLut, d: usize, s1: usize) -> u32 {
-        let c = self.code(d);
+    fn ham(q: &QueryLut, c: &[u8], s1: usize) -> u32 {
         let mut h = 0u32;
         for w in 0..s1 {
             let x = u64::from_le_bytes(c[w * 8..w * 8 + 8].try_into().unwrap());
@@ -178,17 +224,26 @@ impl VecIndex {
         const CH: usize = 1 << 16;
         let s1 = self.nbytes.min(32) / 8;
         let maxd = s1 * 64;
-        // 1) corte estimado con ~65.000 documentos de muestra (margen x2)
-        let step = ((hi - lo) / 65_536).max(1);
+        // 1) estimated cut from a sample of up to 256 windows of 256 documents spread over the range
+        //    (x2 margin); windows rather than single documents, so that on disk it takes few reads
+        const W: usize = 256;
+        let nwin = ((hi - lo) / W).clamp(1, 256);
+        let gap = (hi - lo) / nwin;
         let mut sample = vec![0u64; maxd + 1];
-        let mut ns = 0u64;
-        for d in (lo..hi).step_by(step) {
-            if self.has(d) {
-                sample[self.ham(q, d, s1) as usize] += 1;
-                ns += 1;
+        let (mut ns, mut seen) = (0u64, 0u64);
+        for w in 0..nwin {
+            let st = lo + w * gap;
+            let en = (st + W).min(hi);
+            let bytes = self.codes_of(st, en);
+            for d in st..en {
+                seen += 1;
+                if self.has(d) {
+                    sample[Self::ham(q, &bytes[(d - st) * self.nbytes..], s1) as usize] += 1;
+                    ns += 1;
+                }
             }
         }
-        let frac = cand as f64 / (ns as f64 * step as f64).max(1.0);
+        let frac = cand as f64 / (ns as f64 * (hi - lo) as f64 / seen.max(1) as f64).max(1.0);
         let want = (frac * ns as f64 * 2.0).ceil() as u64 + 16;
         let cut = |hist: &[u64], need: u64| -> u32 {
             let mut acc = 0u64;
@@ -210,16 +265,18 @@ impl VecIndex {
                     let en = (st + CH).min(hi);
                     let mut v = Vec::new();
                     let mut hist = vec![0u64; maxd + 1];
-                    for d in st..en {
-                        if !self.has(d) {
-                            continue;
+                    self.windows(st, en, |a, bytes| {
+                        for d in a..a + bytes.len() / self.nbytes {
+                            if !self.has(d) {
+                                continue;
+                            }
+                            let h = Self::ham(q, &bytes[(d - a) * self.nbytes..], s1);
+                            hist[h as usize] += 1;
+                            if h <= t {
+                                v.push((h, d as u32));
+                            }
                         }
-                        let h = self.ham(q, d, s1);
-                        hist[h as usize] += 1;
-                        if h <= t {
-                            v.push((h, d as u32));
-                        }
-                    }
+                    });
                     (v, hist)
                 })
                 .collect();
@@ -258,18 +315,20 @@ impl VecIndex {
             .map(|&st| {
                 let en = (st + CH).min(hi);
                 let mut h: BinaryHeap<(u32, u32)> = BinaryHeap::with_capacity(cand.min(en - st) + 1);
-                for d in st..en {
-                    if !self.has(d) {
-                        continue;
+                self.windows(st, en, |a, bytes| {
+                    for d in a..a + bytes.len() / self.nbytes {
+                        if !self.has(d) {
+                            continue;
+                        }
+                        let ham = Self::ham(q, &bytes[(d - a) * self.nbytes..], s1);
+                        if h.len() < cand {
+                            h.push((ham, d as u32));
+                        } else if ham < h.peek().unwrap().0 {
+                            h.pop();
+                            h.push((ham, d as u32));
+                        }
                     }
-                    let ham = self.ham(q, d, s1);
-                    if h.len() < cand {
-                        h.push((ham, d as u32));
-                    } else if ham < h.peek().unwrap().0 {
-                        h.pop();
-                        h.push((ham, d as u32));
-                    }
-                }
+                });
                 h
             })
             .collect();
@@ -296,7 +355,7 @@ impl VecIndex {
         } else {
             self.hamming_select(q, lo, hi, cand)
         };
-        let mut scored: Vec<(u32, f32)> = cands.par_iter().map(|&d| (d, q.score(self.code(d as usize)))).collect();
+        let mut scored: Vec<(u32, f32)> = cands.par_iter().map(|&d| (d, q.score(&self.code(d as usize)))).collect();
         scored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
         scored.truncate(k);
         scored
@@ -304,7 +363,7 @@ impl VecIndex {
 
     pub fn score_docs(&self, q: &QueryLut, docs: &[u32]) -> Vec<f32> {
         docs.iter()
-            .map(|&d| if self.has(d as usize) { q.score(self.code(d as usize)) } else { f32::NEG_INFINITY })
+            .map(|&d| if self.has(d as usize) { q.score(&self.code(d as usize)) } else { f32::NEG_INFINITY })
             .collect()
     }
 }

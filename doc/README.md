@@ -16,6 +16,7 @@ importa es el uso diario: **rápido, preciso y compacto**. Implementación en **
 | [04-investigacion-arxiv.md](04-investigacion-arxiv.md) | Papers revisados (prioridad Google/Microsoft), qué sirve y qué no. |
 | [05-arquitectura.md](05-arquitectura.md) | El sistema construido en Rust: formato, consulta, cachés, robustez, tamaños. |
 | [06-libreria.md](06-libreria.md) | Diseño de la librería para backends (Python, presupuesto de RAM, bloque compacto); pendiente de aprobación. |
+| [07-ram.md](07-ram.md) | (English) RAM governance (P2): what `ram=` covers, the planner, disk reads, capped LM batch, admission control, measurements. |
 
 ## Estructura del repositorio
 
@@ -49,6 +50,9 @@ importa es el uso diario: **rápido, preciso y compacto**. Implementación en **
 - [x] Plan de **perfil compacto** medido (E27-E29): **~5 GB** para todo HN (5,74 sin pérdida, 5,24
       con −1 %) con consultas de ~4 s; documentado en [05-arquitectura.md](05-arquitectura.md), sin
       implementar por ahora.
+- [x] Python library `import hnz` (P1, E30) and **RAM governance** (P2, E31): everything hnz holds
+      stays within `ram=`; what does not fit is read from disk with identical results; process
+      memory <= 1.03 x `ram` with 8 concurrent clients ([07-ram.md](07-ram.md)).
 - [ ] Construcción completa de los 239 meses (`scripts/pipeline.py`; días de CPU/iGPU).
 
 ## Resultado con la muestra de 3 meses (637.046 ítems, E26)

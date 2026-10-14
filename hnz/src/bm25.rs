@@ -10,7 +10,8 @@ use crate::varint::{get, put};
 use anyhow::{Context, Result};
 use bitpacking::{BitPacker, BitPacker4x};
 use fst::{Map, MapBuilder};
-use memmap2::Mmap;
+use crate::blob::Blob;
+use std::borrow::Cow;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
@@ -196,14 +197,18 @@ pub enum TermPost {
     List { off: usize },
 }
 
-/// Cursor sobre una lista de postings.
+/// Cursor over a postings list. Each block of 128 is read when the cursor reaches it: borrowed if
+/// bm25.post is in RAM, or with one disk read (memory does not depend on the list's size).
 pub struct Cursor<'a> {
-    post: &'a [u8],
+    post: &'a Blob,
+    /// start of the list in bm25.post
+    base: usize,
     with_tf: bool,
     single: Option<(u32, u32)>,
     df: usize,
     nfull: usize,
     lasts: Vec<u32>,
+    /// start of the payload of each full block (relative to `base`)
     pay: Vec<usize>,
     tail_off: usize,
     blk: usize,
@@ -214,9 +219,10 @@ pub struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
-    fn new(post: &'a [u8], t: TermPost, with_tf: bool) -> Self {
+    fn new(post: &'a Blob, t: TermPost, with_tf: bool) -> Self {
         let mut c = Cursor {
             post,
+            base: 0,
             with_tf,
             single: None,
             df: 1,
@@ -238,39 +244,75 @@ impl<'a> Cursor<'a> {
                 c.len = 1;
             }
             TermPost::List { off } => {
-                let mut p = off;
-                c.df = get(post, &mut p) as usize;
-                c.nfull = c.df / BLK;
-                let mut last = 0u32;
-                let mut plen = Vec::with_capacity(c.nfull);
-                for _ in 0..c.nfull {
-                    last += get(post, &mut p) as u32;
-                    c.lasts.push(last);
-                    plen.push(get(post, &mut p) as usize);
+                c.base = off;
+                if !c.header() {
+                    c.exhaust();
                 }
-                for l in plen {
-                    c.pay.push(p);
-                    p += l;
-                }
-                c.tail_off = p;
-                c.load(0);
             }
         }
         c
     }
 
-    fn load(&mut self, b: usize) {
+    /// Bytes [o, o+len) of the list (clipped at the end of the file); None if the read fails.
+    fn read(&self, o: usize, len: usize) -> Option<Cow<'a, [u8]>> {
+        match self.post.get(self.base + o, len) {
+            Ok(b) => Some(b),
+            Err(e) => {
+                eprintln!("hnz: no se pudieron leer postings de bm25.post: {e:#}");
+                None
+            }
+        }
+    }
+
+    /// Exhausted list (e.g. after a read error): `doc()` returns END.
+    fn exhaust(&mut self) {
+        self.single = None;
+        self.nfull = 0;
+        self.blk = 0;
+        self.len = 0;
+        self.pos = 0;
+    }
+
+    /// Header: df and, per full block, its last doc and payload length. Loads block 0.
+    fn header(&mut self) -> bool {
+        let Some(head) = self.read(0, 10) else { return false };
+        let mut p = 0;
+        let df = get(&head, &mut p) as usize;
+        let nfull = df / BLK;
+        let Some(h) = self.read(0, p + nfull * 20) else { return false };
+        let mut last = 0u32;
+        let mut plen = Vec::with_capacity(nfull);
+        for _ in 0..nfull {
+            last += get(&h, &mut p) as u32;
+            self.lasts.push(last);
+            plen.push(get(&h, &mut p) as usize);
+        }
+        for l in plen {
+            self.pay.push(p);
+            p += l;
+        }
+        self.df = df;
+        self.nfull = nfull;
+        self.tail_off = p;
+        self.load(0)
+    }
+
+    fn load(&mut self, b: usize) -> bool {
         self.blk = b;
         self.pos = 0;
         let bp = BitPacker4x::new();
         if b < self.nfull {
             let o = self.pay[b];
-            let db = self.post[o];
-            let tb = self.post[o + 1];
+            let end = if b + 1 < self.nfull { self.pay[b + 1] } else { self.tail_off };
+            let Some(data) = self.read(o, end - o) else {
+                self.exhaust();
+                return false;
+            };
+            let (db, tb) = (data[0], data[1]);
             let init = if b == 0 { 0 } else { self.lasts[b - 1] };
-            let n = bp.decompress_sorted(init, &self.post[o + 2..], &mut self.docs, db);
+            let n = bp.decompress_sorted(init, &data[2..], &mut self.docs, db);
             if self.with_tf {
-                bp.decompress(&self.post[o + 2 + n..], &mut self.tfs, tb);
+                bp.decompress(&data[2 + n..], &mut self.tfs, tb);
                 for t in self.tfs.iter_mut() {
                     *t += 1;
                 }
@@ -280,15 +322,20 @@ impl<'a> Cursor<'a> {
             self.len = BLK;
         } else {
             let cnt = self.df - self.nfull * BLK;
-            let mut p = self.tail_off;
+            let Some(data) = self.read(self.tail_off, cnt * 20) else {
+                self.exhaust();
+                return false;
+            };
+            let mut p = 0;
             let mut prev = if self.nfull == 0 { 0 } else { self.lasts[self.nfull - 1] };
             for i in 0..cnt {
-                prev += get(self.post, &mut p) as u32;
+                prev += get(&data, &mut p) as u32;
                 self.docs[i] = prev;
-                self.tfs[i] = if self.with_tf { get(self.post, &mut p) as u32 } else { 1 };
+                self.tfs[i] = if self.with_tf { get(&data, &mut p) as u32 } else { 1 };
             }
             self.len = cnt;
         }
+        true
     }
 
     #[inline]
@@ -308,7 +355,7 @@ impl<'a> Cursor<'a> {
     pub fn next(&mut self) {
         self.pos += 1;
         if self.pos >= self.len && self.single.is_none() && self.blk < self.nfull {
-            self.load(self.blk + 1);
+            let _ = self.load(self.blk + 1);
         }
     }
 
@@ -326,7 +373,9 @@ impl<'a> Cursor<'a> {
             while b < self.nfull && self.lasts[b] < target {
                 b += 1;
             }
-            self.load(b);
+            if !self.load(b) {
+                return;
+            }
         }
         loop {
             while self.pos < self.len && self.docs[self.pos] < target {
@@ -335,7 +384,9 @@ impl<'a> Cursor<'a> {
             if self.pos < self.len || self.blk >= self.nfull {
                 return;
             }
-            self.load(self.blk + 1);
+            if !self.load(self.blk + 1) {
+                return;
+            }
         }
     }
 }
@@ -350,19 +401,38 @@ impl Ord for Sc {
 }
 
 pub struct Bm25 {
-    fst: Map<Mmap>,
-    post: Mmap,
-    norms: Mmap,
+    fst: Map<Vec<u8>>,
+    post: Blob,
+    norms: Vec<u8>,
     pub info: Bm25Info,
 }
 
 impl Bm25 {
     pub fn open(dir: &Path) -> Result<Self> {
-        let fst = Map::new(unsafe { Mmap::map(&File::open(dir.join("bm25.fst")).context("bm25.fst")?)? })?;
-        let post = unsafe { Mmap::map(&File::open(dir.join("bm25.post"))?)? };
-        let norms = unsafe { Mmap::map(&File::open(dir.join("bm25.norms"))?)? };
+        Self::open_with(dir, true)
+    }
+
+    /// The dictionary (FST) and the norms are always in RAM; the postings lists, in RAM if
+    /// `resident_postings`, otherwise read from disk block by block.
+    pub fn open_with(dir: &Path, resident_postings: bool) -> Result<Self> {
+        let fst = Map::new(std::fs::read(dir.join("bm25.fst")).context("bm25.fst")?)?;
+        let post = Blob::open(&dir.join("bm25.post"), resident_postings)?;
+        let norms = std::fs::read(dir.join("bm25.norms"))?;
         let info: Bm25Info = serde_json::from_str(&std::fs::read_to_string(dir.join("bm25.json"))?)?;
         Ok(Self { fst, post, norms, info })
+    }
+
+    /// Bytes it takes in RAM.
+    pub fn ram_bytes(&self) -> usize {
+        self.fst.as_fst().as_bytes().len() + self.post.resident_bytes() + self.norms.capacity()
+    }
+
+    pub fn blob(&self) -> &Blob {
+        &self.post
+    }
+
+    pub fn blob_mut(&mut self) -> &mut Blob {
+        &mut self.post
     }
 
     /// (postings, df) del término en este segmento.
@@ -372,8 +442,9 @@ impl Bm25 {
             Some((TermPost::Single { doc: (v >> 9) as u32, tf: ((v >> 1) & 0xff) as u32 }, 1))
         } else {
             let off = (v >> 1) as usize;
-            let mut p = off;
-            let df = get(&self.post, &mut p) as u32;
+            let head = self.post.get(off, 10).ok()?;
+            let mut p = 0;
+            let df = get(&head, &mut p) as u32;
             Some((TermPost::List { off }, df))
         }
     }
@@ -524,6 +595,23 @@ mod tests {
         assert!(r.iter().all(|x| x.0 >= 100 && x.0 < 400 && x.0 % 7 == 0));
         let s = ix.score_docs(&[(ta, 2.0)], &[7, 8, 14]);
         assert!(s[0] > 0.0 && s[1] == 0.0 && s[2] > 0.0);
+        // with the lists on disk (read block by block), exactly the same
+        let dk = Bm25::open_with(&dir, false).unwrap();
+        assert!(!dk.blob().is_resident());
+        let mut c = dk.cursor(tp);
+        let mut got2 = Vec::new();
+        while c.doc() != END {
+            got2.push(c.doc());
+            c.next();
+        }
+        assert_eq!(got2, expect);
+        let mut c = dk.cursor(tp);
+        c.advance(500);
+        assert_eq!(c.doc(), 501);
+        assert_eq!(dk.top_k(&[(tp, 1.0), (ta, 2.0)], 100, 400, 5), ix.top_k(&[(tp, 1.0), (ta, 2.0)], 100, 400, 5));
+        assert_eq!(dk.score_docs(&[(ta, 2.0)], &[7, 8, 14]), s);
+        drop(dk);
+        drop(ix);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

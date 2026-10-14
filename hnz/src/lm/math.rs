@@ -92,6 +92,20 @@ pub fn layer_norm(x: &[f32], w: &[f32], b: &[f32], eps: f32, out: &mut [f32]) {
     }
 }
 
+thread_local! {
+    /// sampling scratch of this thread (exponentials, frequencies)
+    static SCRATCH: std::cell::RefCell<(Vec<f32>, Vec<u32>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
+}
+
+/// Frees this thread's sampling scratch when dropped (for host threads, which should not keep it).
+pub struct ScratchRelease;
+
+impl Drop for ScratchRelease {
+    fn drop(&mut self) {
+        let _ = SCRATCH.try_with(|b| *b.borrow_mut() = (Vec::new(), Vec::new()));
+    }
+}
+
 /// Logits -> frecuencias enteras acumuladas (total ~2^30, todas >= 1). Determinista.
 pub const FREQ_TOTAL: u32 = 1 << 30;
 pub fn logits_to_cum(logits: &[f32], cum: &mut Vec<u64>) {
@@ -102,10 +116,7 @@ pub fn logits_to_cum(logits: &[f32], cum: &mut Vec<u64>) {
             m = l;
         }
     }
-    thread_local! {
-        static E: std::cell::RefCell<(Vec<f32>, Vec<u32>)> = const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
-    }
-    E.with(|buf| {
+    SCRATCH.with(|buf| {
         let (e, f) = &mut *buf.borrow_mut();
         e.resize(v, 0.0);
         f.resize(v, 0);

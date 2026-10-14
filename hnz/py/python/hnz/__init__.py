@@ -1,14 +1,17 @@
-"""hnz: todo Hacker News comprimido sin pérdida, con búsqueda híbrida y recuperación literal.
+"""hnz: all of Hacker News compressed losslessly, with hybrid search and verbatim retrieval.
 
     import hnz
-    with hnz.open(r"C:\\ruta\\out", ram="4GB") as hn:
+    with hnz.open(r"C:\\path\\out", ram="4GB") as hn:
         r = hn.search("how do I deal with burnout", k=10, since="2015", until="2018-06", types="comment")
         for h in r:
             print(h.rank, h.date, h.by, h.story_title, h.text[:120])
-        item = hn.get(9700000)          # texto literal (item.html = HTML original de HN)
+        item = hn.get(9700000)          # verbatim text (item.html = HN's original HTML)
+        print(hn.memory()["budget"])    # RAM used by hnz, per class, against the `ram` limit
 
-`Archive` es seguro entre hilos: un backend (p.ej. FastAPI con un worker) puede atender varias
-consultas a la vez sobre el mismo archivo abierto; el trabajo pesado se hace sin el GIL.
+`Archive` is thread-safe: a backend (e.g. FastAPI with one worker) can serve several queries at
+once on the same open archive; the heavy work runs without the GIL. Everything hnz holds in RAM
+(models, embedder, loaded indexes, decompression memory, caches, per-query memory) stays within
+the `ram` budget given to `open()`; what does not fit is read from disk on demand.
 """
 from __future__ import annotations
 
@@ -23,16 +26,19 @@ from typing import Iterable, Iterator, Literal, Optional, Sequence, Union
 from . import _hnz
 
 __version__: str = _hnz.__version__
-terms = _hnz.terms                  # tokenizador del BM25 del motor: terms("Rust's async") -> ['rusts', 'async']
-index_text = _hnz.index_text        # texto que se indexa de un ítem: index_text(title, url, html)
+terms = _hnz.terms                  # the engine's BM25 tokenizer: terms("Rust's async") -> ['rusts', 'async']
+index_text = _hnz.index_text        # text indexed for an item: index_text(title, url, html)
 MAX_K: int = _hnz.MAX_K
 KINDS = ('story', 'comment', 'job', 'poll', 'pollopt')
 DateLike = Union[str, int, _dt.date, _dt.datetime]
 
+BudgetError = _hnz.BudgetError      # MemoryError: `ram` below the minimum (the message gives it)
+BusyError = _hnz.BusyError          # TimeoutError: no turn within `timeout`; retry or raise the limits
+
 
 @dataclass(frozen=True, slots=True)
 class Hit:
-    """Un resultado de búsqueda. `text` es texto plano (fragmento si `partial`); `html`, el original."""
+    """A search result. `text` is plain text (a snippet if `partial`); `html`, the original."""
     rank: int
     id: int
     kind: str
@@ -73,7 +79,7 @@ class SearchResult:
 
 @dataclass(frozen=True, slots=True)
 class Item:
-    """Un ítem completo y literal (`html` es el HTML original de HN; `text`, el mismo en texto plano)."""
+    """A full, verbatim item (`html` is HN's original HTML; `text`, the same as plain text)."""
     id: int
     kind: str
     by: str
@@ -106,22 +112,24 @@ def _item(d: dict) -> Item:
 
 
 def _size(ram: Union[int, str, None]) -> Optional[int]:
-    """'2GB' -> 2e9, '2GiB' -> 2**31, '512MB', o un número de bytes."""
-    if ram is None or isinstance(ram, int):
+    """'2GB' -> 2e9, '2GiB' -> 2**31, '512MB', or a number of bytes."""
+    if ram is None or (isinstance(ram, int) and not isinstance(ram, bool)):
+        if isinstance(ram, int) and ram < 0:
+            raise ValueError(f'tamaño inválido: {ram!r}')
         return ram
     m = re.fullmatch(r'\s*([\d.]+)\s*([KMGT]?)(i?)B?\s*', str(ram), re.I)
     if not m:
-        raise ValueError(f'ram inválida: {ram!r} (p.ej. "2GB", "512MB")')
+        raise ValueError(f'tamaño inválido: {ram!r} (p.ej. "2GB", "512MB")')
     exp = 'KMGT'.find(m.group(2).upper()) + 1 if m.group(2) else 0
     return int(float(m.group(1)) * (1024 if m.group(3) else 1000) ** exp)
 
 
 def _bound(d: Optional[DateLike], name: str) -> tuple[Optional[str], Optional[int]]:
-    """Límite de fechas -> (texto para el motor, o instante exacto en segundos epoch UTC).
+    """Date bound -> (text for the engine, or exact instant in epoch seconds UTC).
 
-    - str: "2015", "2015-06", "2015-06-01" (el motor lo valida); date: ese día entero.
-    - datetime: el instante exacto (si no lleva zona horaria, se toma como UTC, que es la de HN).
-    - int: un año (1970-2100); para un instante concreto use datetime.
+    - str: "2015", "2015-06", "2015-06-01" (validated by the engine); date: that whole day.
+    - datetime: that exact instant (without a time zone it is taken as UTC, HN's zone).
+    - int: a year (1970-2100); for a specific instant use datetime.
     """
     if d is None:
         return None, None
@@ -143,7 +151,7 @@ def _bound(d: Optional[DateLike], name: str) -> tuple[Optional[str], Optional[in
 
 
 def _ov_libs() -> Optional[str]:
-    """Carpeta con openvino_c.dll: HNZ_OV_LIBS o la del paquete openvino instalado (sin importarlo)."""
+    """Folder with openvino_c.dll: HNZ_OV_LIBS or the one of the installed openvino package (not imported)."""
     env = os.environ.get('HNZ_OV_LIBS')
     if env:
         return env
@@ -156,7 +164,7 @@ def _ov_libs() -> Optional[str]:
 
 
 class Archive:
-    """Archivo hnz abierto. Seguro entre hilos; ciérrelo con `close()` o úselo con `with`."""
+    """An open hnz archive. Thread-safe; close it with `close()` or use it with `with`."""
 
     def __init__(self, inner, path: str, ram: Optional[int]):
         self._a = inner
@@ -168,13 +176,15 @@ class Archive:
                author: Optional[str] = None, mode: Literal['hybrid', 'vector', 'keyword'] = 'hybrid',
                text: Literal['snippet', 'full'] = 'snippet', include_dead: bool = False, raw: bool = False,
                w_bm25: float = 0.15, c_bm25: float = 20.0) -> Union[SearchResult, dict]:
-        """Busca en todo HN (o en el rango [since, until], ambos inclusive: "2015", "2015-06", date, o un
-        datetime para un instante exacto en UTC).
+        """Searches all of HN (or the range [since, until], both inclusive: "2015", "2015-06", a date,
+        or a datetime for an exact instant in UTC).
 
-        - Sin `query`: lo más reciente que cumple los filtros.
-        - `types`: "story", "comment", "job", "poll", "pollopt" (uno o varios).
-        - `text="full"`: texto completo también de los ítems del nivel comprimido con el LM (más lento).
-        - `raw=True`: devuelve el dict JSON tal cual (el mismo formato que el servidor HTTP).
+        - Without `query`: the most recent items that pass the filters.
+        - `types`: "story", "comment", "job", "poll", "pollopt" (one or several).
+        - `text="full"`: full text also for items of the LM-compressed tier (slower).
+        - `raw=True`: returns the JSON dict as is (the same format as the HTTP server).
+
+        Raises `BusyError` if it found no turn within the archive's `timeout`.
         """
         if isinstance(types, str):
             types = [types]
@@ -192,7 +202,7 @@ class Archive:
         return SearchResult(query=d['query'], hits=[Hit(**h) for h in d['results']], timings_ms=d['ms'])
 
     def get(self, id: int, *, raw: bool = False) -> Union[Item, dict, None]:
-        """Un ítem por id de HN, literal y completo; None si no está en el archivo."""
+        """An item by HN id, verbatim and complete; None if it is not in the archive."""
         s = self._live().get_json(int(id))
         if s is None:
             return None
@@ -203,11 +213,18 @@ class Archive:
         return [self.get(i, raw=raw) for i in ids]
 
     def embed(self, text: str) -> list[float]:
-        """Vector de 768 dimensiones (EmbeddingGemma 2) de un texto de consulta."""
+        """768-dimensional vector (EmbeddingGemma 2) of a query text."""
         return self._live().embed(text)
 
     def stats(self) -> dict:
+        """Archive summary (segments, dates, documents) and `memory()`."""
         return json.loads(self._live().stats_json())
+
+    def memory(self) -> dict:
+        """RAM breakdown: `budget` (hnz's own ledger: limit, used, peak, and per class: models, index,
+        cache, working), `plan` (what was loaded into RAM and the size of each pool), `engine` (loaded
+        parts, caches and their hit rates), `embedder`, `admission` and `process` (as the OS sees it)."""
+        return json.loads(self._live().memory_json())
 
     def close(self) -> None:
         self._a = None
@@ -233,20 +250,35 @@ class Archive:
 
 def open(path: Union[str, os.PathLike], *, ram: Union[int, str, None] = '2GB',
          models: Union[str, os.PathLike, None] = None, ov_libs: Union[str, os.PathLike, None] = None,
-         preload: bool = False) -> Archive:
-    """Abre un archivo hnz (la carpeta con los segmentos).
+         preload: bool = False, max_concurrent: int = 8, timeout: float = 30.0,
+         cache_dir: Union[str, os.PathLike, None] = None, cache_dir_size: Union[int, str] = '512MB') -> Archive:
+    """Opens an hnz archive (the folder with the segments).
 
-    - `ram`: presupuesto de RAM ("2GB", "10GB"…). En esta versión se guarda e informa; el control
-      estricto de la memoria llega en una fase posterior.
-    - `models`: carpeta de modelos (por defecto `<path>/models` o `<path>/../models`).
-    - `ov_libs`: carpeta con openvino_c.dll (por defecto la del paquete `openvino` instalado).
-    - `preload`: cargar ya el modelo de embeddings (si no, en la primera búsqueda semántica).
+    - `ram`: RAM budget for everything hnz holds ("2GB", "10GB", bytes, or None for no limit). At
+      open, a planner loads into RAM what fits by benefit (vectors, metadata, word index, then
+      caches and compressed text, newest segments first) and reads the rest from disk on demand.
+      Raises `BudgetError` if it is below the minimum (models + fixed structures).
+    - `models`: models folder (default `<path>/models` or `<path>/../models`).
+    - `ov_libs`: folder with openvino_c.dll (default: the one of the installed `openvino` package).
+    - `preload`: load the embedding model now (otherwise at the first semantic search). Until it is
+      loaded, its load peak stays reserved in the budget.
+    - `max_concurrent`, `timeout`: at most `max_concurrent` searches/gets run at once; the rest wait
+      up to `timeout` seconds and then raise `BusyError`.
+    - `cache_dir`: folder for an optional persistent cache of decompressed records (survives
+      restarts; up to `cache_dir_size` on disk). Off by default.
     """
     path = os.fspath(path)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 <= timeout < 1e9:
+        raise ValueError(f'timeout inválido: {timeout!r} (segundos, >= 0)')
+    if isinstance(max_concurrent, bool) or not isinstance(max_concurrent, int) or max_concurrent < 1:
+        raise ValueError(f'max_concurrent inválido: {max_concurrent!r} (entero >= 1)')
     opts = {'models': os.fspath(models) if models else None,
             'ov_libs': os.fspath(ov_libs) if ov_libs else _ov_libs(),
-            'preload': bool(preload), 'ram': _size(ram)}
+            'preload': bool(preload), 'ram': _size(ram), 'max_concurrent': int(max_concurrent),
+            'timeout': float(timeout), 'cache_dir': os.fspath(cache_dir) if cache_dir else None,
+            'cache_dir_bytes': _size(cache_dir_size)}
     return Archive(_hnz.open(path, json.dumps(opts)), path, opts['ram'])
 
 
-__all__ = ['open', 'Archive', 'SearchResult', 'Hit', 'Item', 'KINDS', 'MAX_K', 'terms', 'index_text', '__version__']
+__all__ = ['open', 'Archive', 'SearchResult', 'Hit', 'Item', 'BudgetError', 'BusyError', 'KINDS', 'MAX_K',
+           'terms', 'index_text', '__version__']

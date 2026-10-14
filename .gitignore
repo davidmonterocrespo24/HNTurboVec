@@ -16,6 +16,7 @@ tantivy_idx/
 # Rust: compilados
 target/
 target2/
+target_*/
 
 # Salidas del sistema construido (almacén comprimido, índices) — se regeneran con el build
 out/
@@ -52,3 +53,6 @@ data_lm/
 
 # Registros de procesos largos (descarga, entrenamiento, construcción)
 logs/
+
+# Claude Code (scheduled-task lock)
+.claude/scheduled_tasks.lock

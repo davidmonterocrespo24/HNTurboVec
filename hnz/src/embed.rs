@@ -56,6 +56,13 @@ fn load_openvino(ov_libs: &Path) -> Result<()> {
 
 impl Embedder {
     pub fn new(models: &Path, ov_libs: &Path) -> Result<Self> {
+        // the tokenizer first, so its temporary copy below does not add to OpenVINO's compile peak
+        let mut tok = Tokenizer::from_file(models.join("gemma2_tokenizer.json")).map_err(|e| anyhow!("tokenizer: {e}"))?;
+        // no BPE cache: Gemma's pre-tokenizer makes each whole query one BPE sequence, so the
+        // per-thread cache would only keep up to 10,000 past queries in memory nobody accounts for
+        let mut bpe = tok.get_model().clone();
+        bpe.resize_cache(0);
+        tok.with_model(bpe);
         load_openvino(ov_libs)?;
         let mut core = Core::new().map_err(ov)?;
         // preferir la versión con pesos int8 (NNCF): mitad de tamaño, ~2,5x más rápida, coseno 0,9998
@@ -65,7 +72,6 @@ impl Embedder {
         let model = core.read_model_from_file(&xml.to_string_lossy(), &bin.to_string_lossy()).map_err(ov)?;
         let mut compiled = core.compile_model(&model, DeviceType::CPU).map_err(ov)?;
         let req = compiled.create_infer_request().map_err(ov)?;
-        let tok = Tokenizer::from_file(models.join("gemma2_tokenizer.json")).map_err(|e| anyhow!("tokenizer: {e}"))?;
         Ok(Self { req, _model: compiled, _core: core, tok, seq: 64 })
     }
 

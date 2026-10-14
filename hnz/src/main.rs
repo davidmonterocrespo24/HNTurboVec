@@ -531,7 +531,8 @@ fn main() -> Result<()> {
                 TextSource::Lm(ls) => {
                     let c = codec_old.as_ref().unwrap();
                     ls.check_model(c)?;
-                    let raws: Vec<&[u8]> = (0..s.man.n_docs).map(|d| ls.raw(d)).collect();
+                    let owned: Vec<_> = (0..s.man.n_docs).map(|d| ls.raw(d)).collect::<Result<Vec<_>>>()?;
+                    let raws: Vec<&[u8]> = owned.iter().map(|c| c.as_ref()).collect();
                     let mut texts: Vec<Option<hnz::textstore::TextRec>> = vec![None; s.man.n_docs];
                     c.decode_stream(&raws, ls.rec_check(), 64, |d, t| {
                         texts[d] = Some(t);
@@ -587,7 +588,8 @@ fn main() -> Result<()> {
                     }
                     TextSource::Lm(ls) => {
                         let c = LmCodec::load(&models.join(ns.man.lm_model.as_ref().unwrap()))?;
-                        let raws: Vec<&[u8]> = docs.iter().map(|&d| ls.raw(d)).collect();
+                        let owned: Vec<_> = docs.iter().map(|&d| ls.raw(d)).collect::<Result<Vec<_>>>()?;
+                        let raws: Vec<&[u8]> = owned.iter().map(|c| c.as_ref()).collect();
                         let mut bad = None;
                         c.decode_stream(&raws, ls.rec_check(), 64, |j, t| {
                             let d = docs[j];
@@ -647,7 +649,8 @@ fn main() -> Result<()> {
                 TextSource::Lm(ls) => {
                     let c = LmCodec::load(&models.join(s.man.lm_model.as_ref().context("lm_model")?))?;
                     ls.check_model(&c)?;
-                    let raws: Vec<&[u8]> = (0..s.man.n_docs).map(|d| ls.raw(d)).collect();
+                    let owned: Vec<_> = (0..s.man.n_docs).map(|d| ls.raw(d)).collect::<Result<Vec<_>>>()?;
+                    let raws: Vec<&[u8]> = owned.iter().map(|c| c.as_ref()).collect();
                     let mut got: Vec<String> = vec![String::new(); s.man.n_docs];
                     c.decode_stream(&raws, ls.rec_check(), 64, |d, r| {
                         got[d] = segment::index_text(&r.title, &r.url, &r.text);
@@ -675,7 +678,8 @@ fn main() -> Result<()> {
         Cmd::Index { seg, emb, ids, bits } => {
             check_bits(bits)?;
             let t1 = Instant::now();
-            let s = Segment::open(&seg)?;
+            // only the metadata is needed (the doc ids)
+            let s = Segment::open_with(&seg, hnz::blob::Residency { meta: true, ..hnz::blob::Residency::NONE })?;
             let doc_ids: Vec<u32> = (0..s.meta.n_blocks()).flat_map(|bi| s.meta.block(bi).into_iter().map(|r| r.id)).collect();
             let matched = vecs::build(&seg, &doc_ids, &emb, &ids, bits)?;
             let mut man = s.man.clone();
@@ -853,7 +857,8 @@ fn main() -> Result<()> {
                     ls.check_model(&codec)?;
                     let mut bad = 0;
                     let mut seen = 0usize;
-                    let raws: Vec<&[u8]> = (0..s.man.n_docs).map(|d| ls.raw(d)).collect();
+                    let owned: Vec<_> = (0..s.man.n_docs).map(|d| ls.raw(d)).collect::<Result<Vec<_>>>()?;
+                    let raws: Vec<&[u8]> = owned.iter().map(|c| c.as_ref()).collect();
                     // lote continuo de 64 huecos: no se espera al registro más largo de cada lote
                     codec.decode_stream(&raws, ls.rec_check(), 64, |d, t| {
                         let got = segment::join(&s.meta.row(d), t, &s.meta.authors);
@@ -945,7 +950,8 @@ fn main() -> Result<()> {
                     for (label, limit) in [("fragmento (64 tokens)", Some(64usize)), ("completo", None)] {
                         let mut times = Vec::new();
                         for c in docs.chunks(10) {
-                            let raws: Vec<&[u8]> = c.iter().map(|&d| ls.raw(d)).collect();
+                            let owned: Vec<_> = c.iter().map(|&d| ls.raw(d)).collect::<Result<Vec<_>>>()?;
+                            let raws: Vec<&[u8]> = owned.iter().map(|c| c.as_ref()).collect();
                             let t = Instant::now();
                             codec.decode_records(&raws, true, limit, false, ls.rec_check())?;
                             times.push(t.elapsed().as_secs_f64() * 1e3);

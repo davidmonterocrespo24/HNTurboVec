@@ -4,7 +4,7 @@
 use crate::htmlx::{self, Mode};
 use crate::varint::{get, put};
 use anyhow::{Context, Result};
-use memmap2::Mmap;
+use crate::blob::Blob;
 use rayon::prelude::*;
 use std::fs::File;
 use std::io::Write;
@@ -116,29 +116,48 @@ pub fn write(dir: &Path, recs: &[(&str, &str, &str)], block: usize, level: i32, 
 }
 
 pub struct TextStore {
-    bin: Mmap,
+    bin: Blob,
     off: Vec<u64>,
     dict: zstd::dict::DecoderDictionary<'static>,
+    dict_len: usize,
     pub block: usize,
     pub n_docs: usize,
 }
 
 impl TextStore {
     pub fn open(dir: &Path, block: usize, n_docs: usize) -> Result<Self> {
-        let f = File::open(dir.join("text.bin")).context("text.bin")?;
-        let bin = unsafe { Mmap::map(&f)? };
+        Self::open_with(dir, block, n_docs, false)
+    }
+
+    pub fn open_with(dir: &Path, block: usize, n_docs: usize, resident: bool) -> Result<Self> {
+        let bin = Blob::open(&dir.join("text.bin"), resident).context("text.bin")?;
         let idx = std::fs::read(dir.join("text.idx"))?;
         let off = idx.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
-        let dict = zstd::dict::DecoderDictionary::copy(&std::fs::read(dir.join("text.dict"))?);
-        Ok(Self { bin, off, dict, block, n_docs })
+        let dict_bytes = std::fs::read(dir.join("text.dict"))?;
+        let dict = zstd::dict::DecoderDictionary::copy(&dict_bytes);
+        Ok(Self { bin, off, dict, dict_len: dict_bytes.len(), block, n_docs })
     }
 
     pub fn n_blocks(&self) -> usize {
         self.off.len() - 1
     }
 
+    /// Bytes it takes in RAM (with the prepared zstd dictionary, ~3x its size).
+    pub fn ram_bytes(&self) -> usize {
+        self.bin.resident_bytes() + self.off.capacity() * 8 + self.dict_len * 3
+    }
+
+    pub fn blob(&self) -> &Blob {
+        &self.bin
+    }
+
+    pub fn blob_mut(&mut self) -> &mut Blob {
+        &mut self.bin
+    }
+
     pub fn get_block(&self, b: usize) -> Result<Vec<TextRec>> {
-        let data = &self.bin[self.off[b] as usize..self.off[b + 1] as usize];
+        let data = self.bin.get(self.off[b] as usize, (self.off[b + 1] - self.off[b]) as usize)?;
+        let data = &data[..];
         let cap = zstd::zstd_safe::get_frame_content_size(data).ok().flatten().unwrap_or(1 << 20) as usize;
         let mut d = zstd::bulk::Decompressor::with_prepared_dictionary(&self.dict)?;
         let raw = d.decompress(data, cap)?;

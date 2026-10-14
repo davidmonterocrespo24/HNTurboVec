@@ -13,7 +13,8 @@ use crate::htmlx::{self, Mode};
 use crate::textstore::TextRec;
 use crate::varint::{get, put};
 use anyhow::{anyhow, bail, Context, Result};
-use memmap2::Mmap;
+use crate::blob::Blob;
+use std::borrow::Cow;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -24,6 +25,9 @@ use tokenizers::Tokenizer;
 const GROUP: usize = 32;
 /// máximo de tokens por registro (y nunca más que el contexto del modelo - 1)
 const MAX_TOKENS: usize = 2000;
+/// token cap when decoding only the title (HN titles have <= 80 characters: <= 321 tokens with the
+/// newline, even if every byte were a token)
+const TITLE_TOKENS: usize = 400;
 
 /// Forma compacta (marcadores de htmlx) -> forma "natural" para el LM. None si sería ambigua.
 pub fn to_lm(c: &str) -> Option<String> {
@@ -267,6 +271,7 @@ impl LmCodec {
     /// Formato: varint(cabecera) [+ 1 byte de comprobación si es LM con tokens] + payload, con
     /// cabecera = ntok<<4 | codec<<3 | lmmap<<2 | modo (codec 1 = zstd de reserva).
     pub fn encode_record(&self, title: &str, url: &str, text: &str) -> (Vec<u8>, u64) {
+        let _fp = super::fpenv::FpGuard::new();
         let fallback = || {
             let mut raw = Vec::new();
             put(&mut raw, title.len() as u64);
@@ -340,6 +345,50 @@ impl LmCodec {
         title_only: &[bool],
         has_check: &[bool],
     ) -> Result<Vec<(TextRec, bool)>> {
+        self.decode_records_pool(recs, parallel, limits, title_only, has_check, u64::MAX)
+    }
+
+    /// Maximum memory a record of `ntok` tokens can use in the batch: its full KV cache, x 7/6 for
+    /// the moment a layer grows (old and new keys, and values being moved, at once), + its logits
+    /// and activations in each step.
+    pub fn record_cost(&self, ntok: usize) -> u64 {
+        ntok as u64 * self.model.kv_bytes_per_token() * 7 / 6 + self.model.step_bytes_per_seq()
+    }
+
+    /// Fixed memory of a batch besides its records: the sampling scratch of every thread that
+    /// samples (exponentials, frequencies and cumulative frequencies: vocabulary x 16 B each).
+    pub fn batch_overhead(&self) -> u64 {
+        (super::pool::pool().threads as u64 + 1) * self.model.h.vocab as u64 * 16
+    }
+
+    /// The smallest pool that can decode any record.
+    pub fn min_pool(&self) -> u64 {
+        self.max_record_cost() + self.batch_overhead()
+    }
+
+    /// Cost of the longest possible record (the LM batch never needs less).
+    pub fn max_record_cost(&self) -> u64 {
+        self.record_cost(MAX_TOKENS.max(self.model.h.max_pos))
+    }
+
+    /// Like `decode_records_each` with a memory cap for the batch (`pool` bytes): records join the
+    /// batch in order while the sum of their bounds (`record_cost`) fits, and each one that finishes
+    /// frees its KV cache and makes room for the next (continuous batching). The result is the same
+    /// with any cap: each sequence is computed identically in any batch.
+    pub fn decode_records_pool(
+        &self,
+        recs: &[&[u8]],
+        parallel: bool,
+        limits: &[Option<usize>],
+        title_only: &[bool],
+        has_check: &[bool],
+        pool: u64,
+    ) -> Result<Vec<(TextRec, bool)>> {
+        // the caller's thread also runs part of the math (a host may have changed its MXCSR), and
+        // must not keep the sampling scratch afterwards (a host may have many threads)
+        let _fp = super::fpenv::FpGuard::new();
+        let _scratch = super::math::ScratchRelease;
+        let pool = pool.saturating_sub(self.batch_overhead());
         let n = recs.len();
         let mut out: Vec<Option<(TextRec, bool)>> = vec![None; n];
         let mut lm_idx = Vec::new();
@@ -369,8 +418,19 @@ impl LmCodec {
             let prof = std::env::var("HNZ_PROF").is_ok();
             let (mut t_model, mut t_code) = (0f64, 0f64);
             let mut steps = 0;
+            // tokens each record may decode (bound of its KV cache) and its cost
+            let bound: Vec<usize> = (0..k).map(|j| if title_only[lm_idx[j]] { heads[j].ntok.min(TITLE_TOKENS) } else { heads[j].ntok }).collect();
+            let cost: Vec<u64> = bound.iter().map(|&b| self.record_cost(b)).collect();
+            let (mut next, mut in_use) = (0usize, 0u64);
+            let mut active: Vec<usize> = Vec::new();
             loop {
-                let active: Vec<usize> = (0..k).filter(|&j| !done[j] && produced[j] < heads[j].ntok).collect();
+                // admit in order while it fits (always at least one: the cap never blocks)
+                while next < k && (active.is_empty() || in_use + cost[next] <= pool) {
+                    batch.reset_limited(next, bound[next]);
+                    in_use += cost[next];
+                    active.push(next);
+                    next += 1;
+                }
                 if active.is_empty() {
                     break;
                 }
@@ -391,10 +451,20 @@ impl LmCodec {
                     }
                     nl[j] += tb.iter().filter(|&&b| b == b'\n').count();
                     let i = lm_idx[j];
-                    if (title_only[i] && nl[j] >= 1) || limits[i].is_some_and(|l| nl[j] >= 2 && body[j] >= l) {
+                    if (title_only[i] && nl[j] >= 1) || limits[i].is_some_and(|l| nl[j] >= 2 && body[j] >= l) || produced[j] >= bound[j] {
                         done[j] = true;
                     }
                 }
+                // finished ones free their KV cache and make room for the next ones
+                active.retain(|&j| {
+                    if done[j] || produced[j] >= heads[j].ntok {
+                        batch.reset_limited(j, 0);
+                        in_use -= cost[j];
+                        false
+                    } else {
+                        true
+                    }
+                });
                 if prof {
                     t_model += (t1 - t0).as_secs_f64();
                     t_code += t1.elapsed().as_secs_f64();
@@ -444,6 +514,7 @@ impl LmCodec {
     /// su hueco lo ocupa el siguiente (no se espera al más largo del lote). Llama a
     /// `sink(índice, texto)` por cada registro. Para verify / retier / rebm25.
     pub fn decode_stream(&self, recs: &[&[u8]], has_check: bool, slots: usize, mut sink: impl FnMut(usize, TextRec) -> Result<()>) -> Result<()> {
+        let _fp = super::fpenv::FpGuard::new();
         let slots = slots.max(1);
         let mut batch = Batch::new(&self.model, slots);
         let mut slot_rec: Vec<Option<usize>> = vec![None; slots];
@@ -631,30 +702,50 @@ fn math_v1() -> u32 {
 }
 
 pub struct LmStore {
-    bin: Mmap,
+    bin: Blob,
     off: Vec<u64>,
     pub info: LmInfo,
 }
 
 impl LmStore {
     pub fn open(dir: &Path) -> Result<Self> {
-        let bin = unsafe { Mmap::map(&File::open(dir.join("lm.bin")).context("lm.bin")?)? };
+        Self::open_with(dir, true)
+    }
+
+    pub fn open_with(dir: &Path, resident: bool) -> Result<Self> {
+        let bin = Blob::open(&dir.join("lm.bin"), resident).context("lm.bin")?;
         let idx = std::fs::read(dir.join("lm.idx"))?;
         let off = idx.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
         let info: LmInfo = serde_json::from_str(&std::fs::read_to_string(dir.join("lm.json"))?)?;
         Ok(Self { bin, off, info })
     }
 
-    /// Bytes comprimidos del registro `doc`.
-    pub fn raw(&self, doc: usize) -> &[u8] {
+    pub fn ram_bytes(&self) -> usize {
+        self.bin.resident_bytes() + self.off.capacity() * 8
+    }
+
+    pub fn blob(&self) -> &Blob {
+        &self.bin
+    }
+
+    pub fn blob_mut(&mut self) -> &mut Blob {
+        &mut self.bin
+    }
+
+    /// Compressed bytes of record `doc` (borrowed if lm.bin is resident; read if not).
+    pub fn raw(&self, doc: usize) -> Result<Cow<'_, [u8]>> {
         let g = doc / self.info.group;
         let k = doc % self.info.group;
-        let data = &self.bin[self.off[g] as usize..self.off[g + 1] as usize];
+        let data = self.bin.get(self.off[g] as usize, (self.off[g + 1] - self.off[g]) as usize)?;
         let n = (self.info.n_docs - g * self.info.group).min(self.info.group);
         let mut p = 0;
-        let lens: Vec<usize> = (0..n).map(|_| get(data, &mut p) as usize).collect();
+        let lens: Vec<usize> = (0..n).map(|_| get(&data, &mut p) as usize).collect();
         let start = p + lens[..k].iter().sum::<usize>();
-        &data[start..start + lens[k]]
+        let end = start + lens[k];
+        Ok(match data {
+            Cow::Borrowed(b) => Cow::Borrowed(&b[start..end]),
+            Cow::Owned(v) => Cow::Owned(v[start..end].to_vec()),
+        })
     }
 
     pub fn rec_check(&self) -> bool {

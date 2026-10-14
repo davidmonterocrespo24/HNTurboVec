@@ -668,3 +668,85 @@ frecuentes se buscan entre los candidatos semánticos.
   el umbral global de 0,02 % (proporcional al del mes, E27b) se estiman ~0,4-0,5 GB para todo HN.
 - **P0 terminada.**
 
+### E31 — P2: RAM governance (`hnz.open(path, ram=…)`)
+*(From this entry on, the log is written in English, as the user asked on 2026-10-14.)*
+Full description and API: [07-ram.md](07-ram.md). Everything hnz holds in the process stays within
+`ram`; what does not fit is read from disk, with identical results.
+- **Own ledger** (`hnz/src/mem.rs`): classes models / index / cache / working, RAII charges, peak.
+  Opaque parts (OpenVINO, tokenizers, LM weights) measured with the OS counters while loading.
+- **Planner** (`plan.rs`): floor = models + fixed structures + minimum pools + minimum cache
+  (`BudgetError` below it); then the pools (≤ 5 % each), a small cache share, vectors → metadata →
+  BM25 postings (newest segments first), cache up to 25 %, compressed text, the rest to cache.
+- **No more mmap** (`blob.rs`): each file is resident (a `Vec`, charged) or read with positional
+  reads (through the OS file cache, outside the process). BM25 cursors read one 128-doc block at a
+  time; vectors are scanned in windows of 8,192 docs per thread; metadata/text one block/record.
+- **LM batch under a cap** (`decode_records_pool`): continuous batching; each record's bound = tokens
+  × 24 KiB × 7/6 + per-step buffers (the KV cache can never grow past it, `KvCache::with_limit`),
+  finished records free their memory at once; the batch also reserves its threads' sampling
+  scratch. Minimum pool: the longest record (2,048 tokens) + scratch ≈ 63 MiB.
+- **Caches** bounded in bytes (two generations ≈ LRU). The L2 disk cache is now **opt-in**
+  (`cache_dir=`): opened after planning with its RAM index capped (newest entries kept) and scanned
+  header by header (before, the whole file was read into RAM at open).
+- **Admission** (FIFO; `max_concurrent`=8; working pool; `timeout`=30 s → `BusyError`): a search
+  declares 2 MB + k × (8 KB | 64 KB) + its candidate lists (first round of each segment it touches,
+  as many at once as worker threads); widening a round asks for the extra memory without waiting.
+- **Limits:** query text ≤ 8 KB; BM25 uses at most the 64 rarest query terms that exist.
+- **Embedder:** its load peak stays reserved until it loads, then its measured size is charged and
+  the rest goes to the caches. Tokenizer without its per-thread BPE cache, parsed *before* OpenVINO
+  compiles the model.
+- **E31a — embedder memory** (int8 EmbeddingGemma 2: 272 MB of weights + 32 MB tokenizer): parsed
+  after the compile, the tokenizer's transient landed on the compiled model: **+746 MB peak**,
+  +470 MB steady. Parsed first: **peak = steady = +447 MiB**. Reservation estimate 1.4 × weights +
+  4 × tokenizer + 32 MiB = 519 MiB. The sample archive's minimum went from 955 MiB to **712 MiB**.
+- **E31b — process memory vs `ram`** (sample archive, 8 clients with mixed queries, 90 s per budget;
+  working-set peak above the baseline before opening, as Windows reports it):
+
+| `ram` | Loaded into RAM | Process peak / `ram` | Ledger peak |
+|---|---|---|---|
+| floor + 24 MiB (736 MiB) | nothing | +586 MiB / 736 = **0.80** | 705 MiB |
+| floor + 120 MiB (832 MiB) | vectors, metadata, postings | +664 / 832 = 0.80 | 789 MiB |
+| 2 GB | everything (146 MiB) | +728 / 1,907 = 0.38 | 933 MiB |
+| None | everything | +728 MiB | 1,254 MiB |
+
+  **Acceptance (P2): 8 clients for 30 minutes at the minimum budget** — first build (minimum 963
+  MiB): 29,088 operations, 0 errors, peak 0.84 × `ram`; final build: running at the time of this commit (result in the next one).
+- **Regression:** the new CLI against the previous binary (mmap, HEAD 3f2888a): `hnz eval` identical
+  on the 3 months and **83 searches identical** (ids, text, HTML, scores, thread titles), before and
+  after the review fixes. In the library, everything-on-disk with the minimum LM pool gives exactly
+  the same results as everything-in-RAM (36 searches, 3 listings, 4 gets, k=500 with a type filter).
+- **Adversarial review** (workflow of 21 agents: 5 lenses — ledger completeness, concurrency, disk
+  mode, LM batch and planner, API/Python — and a skeptical verifier per finding, several with
+  allocator-level measurements): 16 findings, 12 confirmed = **9 distinct problems**, 4 refuted.
+  All 9 fixed, with tests:
+  - query text unbounded: a 0.8 MB query opened ~250k BM25 cursors (~300 MB) while declaring 2 MB →
+    queries ≤ 8 KB and at most the 64 rarest existing terms (unknown words cannot crowd out the
+    real ones — found while testing the fix);
+  - search working memory under-declared for large k / type filters (candidate lists of every
+    segment in parallel) → declared per segment; widening asks for its memory;
+  - the embedder tokenizer's per-thread BPE cache kept up to 10,000 past queries (30-85 MB) → off;
+  - author lists counted at about half their real size (Vec slack + allocator overhead) → one buffer
+    + offsets per segment (exact, and about half the RAM);
+  - persistent cache emptied on reopen when it held more entries than the new cap, and its whole
+    index loaded before planning (ledger above the limit while opening) → opened after the plan,
+    newest entries kept;
+  - admission not FIFO (a big request could starve behind small ones) → FIFO;
+  - a huge `timeout` panicked → validated (`ValueError`);
+  - `BudgetError`/`BusyError` not picklable (module `_hnz`) → module `hnz`.
+  Refuted: slots held while waiting for the LM lock (only under overload, the documented contract);
+  a cache shrink overshoot (bounded by the original share; hardened anyway); disk-mode files no
+  longer blocking in-place rewrites (outside the immutable-snapshot contract — denying writes would
+  let a concurrent `rebm25` leave a half-written segment); the LM's sampling scratch (covered by the
+  static pool; hardened anyway: counted as batch overhead and released on host threads).
+- Also found while writing: a lock-order inversion between the two RAM caches (fixed before the
+  review); the LM bound needs 7/6, not 1.05, for the moment a layer's KV cache grows; an MXCSR guard
+  — the LM entry points set the default floating-point state (round to nearest, no FTZ/DAZ) and
+  restore the caller's, so a host library built with fast-math cannot break lossless decompression;
+  `hnz index` no longer loads the segment's text.
+- Tests: Rust 21 (GenCache bounds, admission timeouts and FIFO, planner, BM25 on disk, L2 index cap
+  and reopen, author list, FP guard…); Python 13 (P1) + 11 (P2: `BudgetError`, disk == RAM, memory
+  report, `BusyError`, persistent cache incl. reopening with a small budget, request limits,
+  k=500 with filters, ≤ 1.03 × `ram` with 8 clients at two budgets).
+- Note: the P1 test comparing the library with the CLI now tolerates a record that the CLI's disk
+  cache already holds in full (`partial=False`) where the library decoded a snippet — existing
+  behavior, exposed because the library no longer locks the CLI's cache file.
+- **P2 done.** Next: P3 (compact block: container, `hnz pack`, global index of rare terms).

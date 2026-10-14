@@ -228,15 +228,29 @@ pub struct Got {
 }
 
 impl Segment {
+    /// Everything in RAM (for the commands that walk the whole segment: verify, retier, rebm25…).
     pub fn open(dir: &Path) -> Result<Self> {
+        Self::open_with(dir, crate::blob::Residency::ALL)
+    }
+
+    pub fn open_with(dir: &Path, res: crate::blob::Residency) -> Result<Self> {
         let man = read_manifest(dir)?;
-        let meta = MetaStore::open(dir, man.n_docs)?;
+        let meta = MetaStore::open_with(dir, man.n_docs, res.meta)?;
         let text = if man.text_tier == "lm" {
-            TextSource::Lm(LmStore::open(dir)?)
+            TextSource::Lm(LmStore::open_with(dir, res.text)?)
         } else {
-            TextSource::Zstd(TextStore::open(dir, man.text_block, man.n_docs)?)
+            TextSource::Zstd(TextStore::open_with(dir, man.text_block, man.n_docs, res.text)?)
         };
         Ok(Self { dir: dir.to_path_buf(), man, meta, text })
+    }
+
+    /// Bytes it takes in RAM (metadata and text).
+    pub fn ram_bytes(&self) -> usize {
+        self.meta.ram_bytes()
+            + match &self.text {
+                TextSource::Lm(l) => l.ram_bytes(),
+                TextSource::Zstd(t) => t.ram_bytes(),
+            }
     }
 
     pub fn is_lm(&self) -> bool {
@@ -258,20 +272,21 @@ impl Segment {
             TextSource::Zstd(t) => t.get(doc)?,
             TextSource::Lm(l) => {
                 let c = codec.context("hace falta el modelo LM para este segmento")?;
-                c.decode_records(&[l.raw(doc)], true, None, false, l.rec_check())?.remove(0).0
+                let r = l.raw(doc)?;
+                c.decode_records(&[&r[..]], true, None, false, l.rec_check())?.remove(0).0
             }
         };
         Ok(join(&m, t, &self.meta.authors))
     }
 }
 
-pub fn join(m: &MetaRow, t: TextRec, authors: &[String]) -> Item {
+pub fn join(m: &MetaRow, t: TextRec, authors: &crate::meta::Authors) -> Item {
     Item {
         id: m.id,
         typ: m.typ,
         dead: m.dead,
         deleted: m.deleted,
-        by: authors[m.author as usize].clone(),
+        by: authors.get(m.author as usize).to_string(),
         time: m.time,
         text: t.text,
         parent: m.parent,

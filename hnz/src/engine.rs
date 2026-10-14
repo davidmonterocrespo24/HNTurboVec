@@ -2,10 +2,14 @@
 //! como rangos de docIDs, fusiona vectores + BM25 y arma los resultados con el contexto del hilo.
 //! Los resultados de segmentos del nivel LM se descomprimen TODOS en un mismo lote.
 
+use crate::blob::{Blob, Residency};
 use crate::bm25::{Bm25, TermPost};
+use crate::cache::GenCache;
 use crate::item::Item;
 use crate::lm::store::LmCodec;
+use crate::mem::{Budget, Charge, Class, MB};
 use crate::meta::{MetaRow, META_BLOCK};
+use crate::plan::Part;
 use crate::segment::{Segment, TextSource};
 use crate::textstore::TextRec;
 use crate::vecs::{QueryLut, VecIndex};
@@ -15,17 +19,46 @@ use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Tokens que se decodifican por resultado del nivel LM en modo fragmento.
 pub const SNIPPET_TOKENS: usize = 64;
 /// máximo de resultados por consulta (protege la memoria del servidor)
 pub const MAX_K: usize = 500;
+/// At most this many query terms count for BM25, the rarest ones (each term opens a cursor per
+/// segment; common terms add little to the score).
+pub const MAX_TERMS: usize = 64;
+
+/// Candidates of one search round in a segment with `n` documents in range: (kc = scored
+/// candidates, c1 = stage-1 vector candidates). `mult` widens the round (x4 each time).
+fn round_sizes(q: &Query, k: usize, n: usize, mult: usize) -> (usize, usize) {
+    let mut kc = (k * 20).max(200) * mult;
+    if !q.types.is_empty() {
+        kc *= 5; // stories ~14 % de los ítems
+    }
+    let kc = kc.min(n);
+    let c1 = q.vec_cand.unwrap_or((kc * 10).max(2000)).max(kc).min(n);
+    (kc, c1)
+}
+
+/// Working memory of one round in one segment: stage-1 Hamming pairs (with growth slack) and the
+/// scored list, plus BM25 heap, merged ids and scored hits of up to 2 x kc candidates.
+fn round_cost(kc: usize, c1: usize) -> u64 {
+    c1 as u64 * 24 + kc as u64 * 64
+}
 
 /// Un solo lote del LM a la vez en todo el proceso: su pool de hilos es global y dos lotes a la vez
 /// solo competirían por los mismos núcleos. Lo demás (metadatos, nivel zstd, cachés) va en paralelo.
 static LM_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-const CACHE_MAX: usize = 20_000;
+
+/// Bytes counted per cached record: strings + hash-table entry with growth slack.
+fn rec_weight(r: &TextRec) -> u64 {
+    256 + (r.title.len() + r.url.len() + r.text.len()) as u64
+}
+
+fn title_weight(t: &String) -> u64 {
+    160 + t.len() as u64
+}
 
 pub struct Seg {
     pub s: Segment,
@@ -33,20 +66,85 @@ pub struct Seg {
     pub vec: Option<VecIndex>,
 }
 
+impl Seg {
+    /// File behind a loadable part (None if the segment does not have it).
+    pub fn blob(&self, p: Part) -> Option<&Blob> {
+        match p {
+            Part::Vectors => self.vec.as_ref().map(|v| v.blob()),
+            Part::Meta => Some(self.s.meta.blob()),
+            Part::Postings => self.bm25.as_ref().map(|b| b.blob()),
+            Part::Text => Some(match &self.s.text {
+                TextSource::Lm(l) => l.blob(),
+                TextSource::Zstd(t) => t.blob(),
+            }),
+        }
+    }
+
+    fn blob_mut(&mut self, p: Part) -> Option<&mut Blob> {
+        match p {
+            Part::Vectors => self.vec.as_mut().map(|v| v.blob_mut()),
+            Part::Meta => Some(self.s.meta.blob_mut()),
+            Part::Postings => self.bm25.as_mut().map(|b| b.blob_mut()),
+            Part::Text => Some(match &mut self.s.text {
+                TextSource::Lm(l) => l.blob_mut(),
+                TextSource::Zstd(t) => t.blob_mut(),
+            }),
+        }
+    }
+
+    /// RAM used by this segment (fixed structures + loaded parts).
+    pub fn ram_bytes(&self) -> usize {
+        self.s.ram_bytes() + self.bm25.as_ref().map_or(0, |b| b.ram_bytes()) + self.vec.as_ref().map_or(0, |v| v.ram_bytes())
+    }
+
+    /// RAM of what is always loaded (block indexes, BM25 dictionary and norms, vector bitmap…).
+    pub fn fixed_bytes(&self) -> usize {
+        self.ram_bytes() - Part::ALL.iter().filter_map(|&p| self.blob(p)).map(|b| b.resident_bytes()).sum::<usize>()
+    }
+}
+
+/// How to open the engine.
+pub struct EngineOptions {
+    /// RAM budget that loaded indexes, models and caches are charged to
+    pub budget: Arc<Budget>,
+    /// which segment parts are loaded at open (the planner may load more afterwards)
+    pub residency: Residency,
+    /// persistent disk cache of decompressed LM records (file, max size); None = off
+    pub l2: Option<(PathBuf, u64)>,
+    /// RAM for the caches of decompressed text
+    pub cache_bytes: u64,
+    /// memory cap of the LM batch (u64::MAX = no cap)
+    pub lm_pool: u64,
+}
+
+impl EngineOptions {
+    /// CLI defaults: no budget, vectors in RAM and everything else read from disk, L2 cache at
+    /// `<archive>/_cache_l2.bin` (512 MB) and 256 MB of RAM caches.
+    pub fn cli(root: &Path) -> Self {
+        Self { budget: Budget::new(None), residency: Residency::DEFAULT, l2: Some((root.join("_cache_l2.bin"), 512 * MB)), cache_bytes: 256 * MB, lm_pool: u64::MAX }
+    }
+}
+
 pub struct Engine {
     pub segs: Vec<Seg>,
     pub total_docs: usize,
     /// modelos LM de los segmentos fríos (por nombre de fichero)
     pub lms: HashMap<String, LmCodec>,
-    /// caché L1 (RAM) de registros del nivel LM ya descomprimidos completos
-    cache: Mutex<HashMap<(usize, u32), TextRec>>,
+    /// RAM cache of fully decompressed LM-tier records
+    cache: Mutex<GenCache<(usize, u32), TextRec>>,
     /// caché L2 (disco) de registros del nivel LM ya descomprimidos
     pub l2: Option<crate::cache::L2>,
-    /// títulos de stories del nivel LM ya decodificados (contexto del hilo)
-    titles: Mutex<HashMap<(usize, u32), String>>,
+    /// already decoded titles of LM-tier stories (thread context)
+    titles: Mutex<GenCache<(usize, u32), String>>,
     seg_keys: Vec<u64>,
     /// por segmento, 1 byte por doc: tipo | dead<<3 | deleted<<4 (filtros sin descomprimir nada)
     flags: Vec<Vec<u8>>,
+    pub budget: Arc<Budget>,
+    /// memory cap of one LM batch (charged to the budget as working memory)
+    lm_pool: u64,
+    lm_charge: Charge,
+    index_charge: Charge,
+    model_charge: Charge,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,9 +241,15 @@ pub fn kind_name(t: u8) -> &'static str {
 }
 
 impl Engine {
-    /// Abre todos los segmentos de `root` (ignora construcciones a medias y restos de `retier`).
-    /// Carga cada modelo LM distinto que usen los segmentos del nivel frío.
+    /// Opens all segments in `root` (ignoring half-built ones and `retier` leftovers) and loads every
+    /// distinct LM model used by cold-tier segments. CLI defaults (`EngineOptions::cli`).
     pub fn open(root: &Path, models: &Path) -> Result<Self> {
+        Self::open_with(root, models, EngineOptions::cli(root))
+    }
+
+    /// Opens with explicit residency, caches and budget (the library plans them from `ram`).
+    pub fn open_with(root: &Path, models: &Path, opts: EngineOptions) -> Result<Self> {
+        let res = opts.residency;
         let dirs: Vec<PathBuf> = std::fs::read_dir(root)?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
@@ -153,9 +257,9 @@ impl Engine {
             .collect();
         let mut segs = Vec::new();
         for d in dirs {
-            let s = Segment::open(&d)?;
-            let bm25 = if d.join("bm25.fst").exists() { Some(Bm25::open(&d)?) } else { None };
-            let vec = if s.man.vec_bits > 0 && d.join("vec.bin").exists() { Some(VecIndex::open(&d, s.man.vec_bits, s.man.n_docs)?) } else { None };
+            let s = Segment::open_with(&d, res)?;
+            let bm25 = if d.join("bm25.fst").exists() { Some(Bm25::open_with(&d, res.postings)?) } else { None };
+            let vec = if s.man.vec_bits > 0 && d.join("vec.bin").exists() { Some(VecIndex::open_with(&d, s.man.vec_bits, s.man.n_docs, res.vectors)?) } else { None };
             segs.push(Seg { s, bm25, vec });
         }
         segs.sort_by_key(|x| x.s.man.id_min);
@@ -175,27 +279,34 @@ impl Engine {
                 );
             }
         }
+        // LM models: their RAM is measured while loading (at least the size of the file)
         let mut lms: HashMap<String, LmCodec> = HashMap::new();
+        let mut model_bytes = 0u64;
         for sg in &segs {
             if let (Some(f), TextSource::Lm(l)) = (&sg.s.man.lm_model, &sg.s.text) {
                 if !lms.contains_key(f) {
-                    let c = LmCodec::load(&models.join(f)).with_context(|| format!("modelo LM {f}"))?;
+                    let path = models.join(f);
+                    let (c, steady, _) = crate::mem::measure(|| LmCodec::load(&path));
+                    let c = c.with_context(|| format!("modelo LM {f}"))?;
+                    model_bytes += steady.max(std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0));
                     lms.insert(f.clone(), c);
                 }
                 l.check_model(&lms[f]).with_context(|| format!("segmento {}", sg.s.man.name))?;
             }
         }
         let total_docs = segs.iter().map(|x| x.s.man.n_docs).sum();
-        let l2 = if !lms.is_empty() {
-            match crate::cache::L2::open(&root.join("_cache_l2.bin"), 512 << 20) {
-                Ok(c) => Some(c),
+        let l2 = match (&opts.l2, lms.is_empty()) {
+            (Some((path, cap)), false) => match crate::cache::L2::open(path, *cap) {
+                Ok(c) => {
+                    c.set_charge(opts.budget.charge(Class::Cache, 0));
+                    Some(c)
+                }
                 Err(e) => {
                     eprintln!("aviso: caché L2 desactivada ({e})");
                     None
                 }
-            }
-        } else {
-            None
+            },
+            _ => None,
         };
         // clave de la L2: nombre + identificador de construcción + nº de docs (si el segmento se
         // reconstruye, sus entradas antiguas dejan de coincidir)
@@ -205,7 +316,146 @@ impl Engine {
             .collect();
         // columna de banderas en RAM (1 B/doc), construida en paralelo una vez al abrir
         let flags: Vec<Vec<u8>> = segs.iter().map(|sg| crate::meta::load_flags(&sg.s.dir, &sg.s.meta)).collect::<Result<_>>()?;
-        Ok(Self { segs, total_docs, lms, cache: Mutex::new(HashMap::new()), l2, titles: Mutex::new(HashMap::new()), seg_keys, flags })
+        let b = &opts.budget;
+        let index = segs.iter().map(|sg| sg.ram_bytes() as u64).sum::<u64>() + flags.iter().map(|f| f.capacity() as u64).sum::<u64>();
+        let (titles_cap, records_cap) = (opts.cache_bytes / 8, opts.cache_bytes - opts.cache_bytes / 8);
+        Ok(Self {
+            segs,
+            total_docs,
+            lms,
+            cache: Mutex::new(GenCache::new(records_cap, rec_weight, Some(b.charge(Class::Cache, 0)))),
+            l2,
+            titles: Mutex::new(GenCache::new(titles_cap, title_weight, Some(b.charge(Class::Cache, 0)))),
+            seg_keys,
+            flags,
+            lm_pool: opts.lm_pool,
+            lm_charge: b.charge(Class::Working, if opts.lm_pool == u64::MAX { 0 } else { opts.lm_pool }),
+            index_charge: b.charge(Class::Index, index),
+            model_charge: b.charge(Class::Model, model_bytes),
+            budget: opts.budget,
+        })
+    }
+
+    /// RAM of what is always loaded, in all segments (incl. the flag columns).
+    pub fn fixed_bytes(&self) -> u64 {
+        self.segs.iter().map(|sg| sg.fixed_bytes() as u64).sum::<u64>() + self.flags.iter().map(|f| f.capacity() as u64).sum::<u64>()
+    }
+
+    /// RAM of the LM models (measured when loading them).
+    pub fn model_bytes(&self) -> u64 {
+        self.model_charge.bytes()
+    }
+
+    /// Loadable parts: (segment, part, bytes in RAM, total bytes).
+    pub fn parts(&self) -> Vec<(usize, Part, u64, u64)> {
+        let mut v = Vec::new();
+        for (si, sg) in self.segs.iter().enumerate() {
+            for p in Part::ALL {
+                if let Some(b) = sg.blob(p) {
+                    v.push((si, p, b.resident_bytes() as u64, b.len() as u64));
+                }
+            }
+        }
+        v
+    }
+
+    /// Loads a segment part into RAM (charged to the budget). Returns the bytes loaded.
+    pub fn promote(&mut self, si: usize, p: Part) -> Result<u64> {
+        let n = match self.segs[si].blob_mut(p) {
+            Some(b) => b.make_resident()? as u64,
+            None => 0,
+        };
+        let total = self.index_charge.bytes() + n;
+        self.index_charge.resize(total);
+        Ok(n)
+    }
+
+    /// The LM batch never needs less than this (the longest record of any loaded model, plus
+    /// the batch's fixed sampling scratch).
+    pub fn lm_min(&self) -> u64 {
+        self.lms.values().map(|c| c.min_pool()).max().unwrap_or(0)
+    }
+
+    /// Attaches the persistent disk cache (its RAM index is charged to the budget).
+    pub fn set_l2(&mut self, l2: crate::cache::L2) {
+        if self.lms.is_empty() {
+            return; // nothing to cache: no LM-tier segments
+        }
+        l2.set_charge(self.budget.charge(Class::Cache, 0));
+        self.l2 = Some(l2);
+    }
+
+    pub fn lm_pool(&self) -> u64 {
+        self.lm_pool
+    }
+
+    /// Sets the memory cap of the LM batch (and its charge in the budget).
+    pub fn set_lm_pool(&mut self, bytes: u64) {
+        self.lm_pool = bytes;
+        self.lm_charge.resize(if bytes == u64::MAX { 0 } else { bytes });
+    }
+
+    /// Sets the RAM of the caches: 1/8 for the index of the disk cache (if there is one), and of
+    /// the rest, 1/8 for titles and 7/8 for records. Shrinking drops old entries.
+    pub fn set_cache_bytes(&self, bytes: u64) {
+        let l2 = match &self.l2 {
+            Some(c) => {
+                c.set_index_bytes(bytes / 8);
+                bytes / 8
+            }
+            None => 0,
+        };
+        let ram = bytes - l2;
+        self.titles.lock().unwrap_or_else(|e| e.into_inner()).set_cap(ram / 8);
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).set_cap(ram - ram / 8);
+    }
+
+    /// RAM given to the caches (as last set by `set_cache_bytes`).
+    pub fn cache_bytes(&self) -> u64 {
+        let l2 = self.l2.as_ref().map_or(0, |c| c.index_bytes_cap().min(u64::MAX / 4));
+        // one lock at a time (`texts_each` takes records then titles: never hold both here)
+        let records = self.cache.lock().unwrap_or_else(|e| e.into_inner()).cap();
+        let titles = self.titles.lock().unwrap_or_else(|e| e.into_inner()).cap();
+        records + titles + l2
+    }
+
+    /// Memory needed by the disk reads of the vector scan when some codes are not in RAM: one
+    /// read window per worker thread (0 if all vectors are loaded).
+    pub fn vec_read_bytes(&self) -> u64 {
+        let nb = self.segs.iter().filter_map(|sg| sg.vec.as_ref().filter(|v| !v.blob().is_resident())).map(|v| v.nbytes).max().unwrap_or(0);
+        (rayon::current_num_threads() * crate::vecs::DISK_READ_DOCS * nb) as u64
+    }
+
+    /// Memory breakdown of the engine (for `stats()["memory"]`).
+    pub fn memory_report(&self) -> serde_json::Value {
+        let mut parts = serde_json::Map::new();
+        for p in Part::ALL {
+            let (mut r, mut t, mut nr, mut n) = (0u64, 0u64, 0usize, 0usize);
+            for sg in &self.segs {
+                if let Some(b) = sg.blob(p) {
+                    n += 1;
+                    t += b.len() as u64;
+                    if b.is_resident() {
+                        nr += 1;
+                        r += b.len() as u64;
+                    }
+                }
+            }
+            parts.insert(p.name().into(), serde_json::json!({"resident_bytes": r, "total_bytes": t, "resident_segments": nr, "segments": n}));
+        }
+        let c = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        let t = self.titles.lock().unwrap_or_else(|e| e.into_inner());
+        serde_json::json!({
+            "parts": parts,
+            "fixed_bytes": self.fixed_bytes(),
+            "lm_models_bytes": self.model_bytes(),
+            "lm_pool": if self.lm_pool == u64::MAX { None } else { Some(self.lm_pool) },
+            "cache": {
+                "records": {"bytes": c.bytes(), "cap": c.cap(), "entries": c.len(), "hits": c.hits, "misses": c.misses},
+                "titles": {"bytes": t.bytes(), "cap": t.cap(), "entries": t.len(), "hits": t.hits, "misses": t.misses},
+                "l2_entries": self.l2.as_ref().map(|l| l.entries()),
+            },
+        })
     }
 
     /// Modelo LM de un segmento del nivel frío.
@@ -223,7 +473,7 @@ impl Engine {
             && match (&q.by, author) {
                 (None, _) => true,
                 (Some(_), Some(a)) => row.author == a,
-                (Some(by), None) => &self.segs[si].s.meta.authors[row.author as usize] == by,
+                (Some(by), None) => self.segs[si].s.meta.authors.get(row.author as usize) == by.as_str(),
             }
     }
 
@@ -244,6 +494,36 @@ impl Engine {
     /// Las fechas se comprueban exactamente en los bloques extremos del rango; en el interior se
     /// usa el orden temporal de los ids.
     pub fn search(&self, q: &Query, qvec: Option<&[f32]>) -> Vec<Hit> {
+        self.search_with(q, qvec, &|_| true)
+    }
+
+    /// Working memory a search declares up front: the first round of every segment it touches,
+    /// as many at once as there are worker threads (widening a round asks for more on the way).
+    pub fn search_cost(&self, q: &Query) -> u64 {
+        if q.text.trim().is_empty() {
+            return 0; // listing: k rows per segment
+        }
+        let k = q.k.clamp(1, MAX_K);
+        let mut costs: Vec<u64> = self
+            .segs
+            .iter()
+            .filter(|sg| {
+                let m = &sg.s.man;
+                m.n_docs > 0 && !q.from.is_some_and(|f| m.time_max < f) && !q.to.is_some_and(|t| m.time_min >= t)
+            })
+            .map(|sg| {
+                let (kc, c1) = round_sizes(q, k, sg.s.man.n_docs, 1);
+                round_cost(kc, c1)
+            })
+            .collect();
+        costs.sort_unstable_by(|a, b| b.cmp(a));
+        costs.truncate(rayon::current_num_threads());
+        costs.iter().sum()
+    }
+
+    /// Like `search`; before widening a segment's round (x4) it asks `grow` for the extra working
+    /// memory, and without it returns what it has (possibly fewer than k for very selective filters).
+    pub fn search_with(&self, q: &Query, qvec: Option<&[f32]>, grow: &(dyn Fn(u64) -> bool + Sync)) -> Vec<Hit> {
         let k = q.k.clamp(1, MAX_K);
         let mut terms = tokenize::terms(&q.text);
         terms.sort();
@@ -253,13 +533,17 @@ impl Engine {
         let use_vec = q.mode != Mode::Keyword && qvec.is_some() && has_text;
         // IDF global (df sumado en todos los segmentos)
         let n = self.total_docs as f32;
-        let idf: Vec<f32> = terms
-            .iter()
-            .map(|t| {
-                let df: u64 = self.segs.iter().filter_map(|s| s.bm25.as_ref()?.lookup(t).map(|x| x.1 as u64)).sum();
-                ((n - df as f32 + 0.5) / (df as f32 + 0.5) + 1.0).ln()
-            })
-            .collect();
+        let dfs: Vec<u64> = terms.iter().map(|t| self.segs.iter().filter_map(|s| s.bm25.as_ref()?.lookup(t).map(|x| x.1 as u64)).sum()).collect();
+        let mut idf: Vec<f32> = dfs.iter().map(|&df| ((n - df as f32 + 0.5) / (df as f32 + 0.5) + 1.0).ln()).collect();
+        // very long queries: only the MAX_TERMS rarest terms that appear somewhere count
+        if terms.len() > MAX_TERMS {
+            let mut ix: Vec<usize> = (0..terms.len()).filter(|&i| dfs[i] > 0).collect();
+            ix.sort_by(|&a, &b| idf[b].total_cmp(&idf[a]).then(a.cmp(&b)));
+            ix.truncate(MAX_TERMS);
+            ix.sort_unstable();
+            terms = ix.iter().map(|&i| terms[i].clone()).collect();
+            idf = ix.iter().map(|&i| idf[i]).collect();
+        }
         // sin texto: listado de lo más reciente; con texto pero sin señal utilizable (solo palabras
         // vacías en modo palabras, o sin vector de consulta): ningún resultado
         let listing = !has_text;
@@ -288,7 +572,7 @@ impl Engine {
                     return None;
                 }
                 let author = match &q.by {
-                    Some(by) => Some(sg.s.meta.authors.iter().position(|a| a == by)? as u32),
+                    Some(by) => Some(sg.s.meta.authors.position(by)? as u32),
                     None => None,
                 };
                 let (b0, b1) = (lo as usize / META_BLOCK, (hi as usize - 1) / META_BLOCK);
@@ -373,15 +657,10 @@ impl Engine {
                 };
                 let mut mult = 1;
                 loop {
-                    let mut kc = (k * 20).max(200) * mult;
-                    if !q.types.is_empty() {
-                        kc *= 5; // stories ~14 % de los ítems
-                    }
-                    let kc = kc.min((hi - lo) as usize);
+                    let (kc, c1) = round_sizes(q, k, (hi - lo) as usize, mult);
                     let mut raw: Vec<u32> = Vec::new();
                     let mut saturated = false;
                     if let (Some(v), Some(l)) = (&sg.vec, &lut) {
-                        let c1 = q.vec_cand.unwrap_or((kc * 10).max(2000)).max(kc).min((hi - lo) as usize);
                         let r = v.search(l, lo as usize, hi as usize, c1, kc);
                         saturated |= r.len() >= kc && kc < (hi - lo) as usize;
                         raw.extend(r.into_iter().map(|x| x.0));
@@ -406,6 +685,11 @@ impl Engine {
                         }
                     }
                     if out.len() >= k || !saturated || mult >= 16 {
+                        return Some(out);
+                    }
+                    // widening needs more working memory: ask first (never waits)
+                    let (kc4, c14) = round_sizes(q, k, (hi - lo) as usize, mult * 4);
+                    if !grow(round_cost(kc4, c14).saturating_sub(round_cost(kc, c1))) {
                         return Some(out);
                     }
                     mult *= 4;
@@ -441,26 +725,35 @@ impl Engine {
     /// haya que decodificar con el LM va en UN solo lote.
     pub fn texts_each(&self, wants: &[(usize, usize, Option<usize>, bool)]) -> Result<Vec<(TextRec, bool)>> {
         let mut out: Vec<Option<(TextRec, bool)>> = vec![None; wants.len()];
-        let mut pending: Vec<usize> = Vec::new();
+        // 1) RAM caches (under the locks, no I/O)
         {
-            let cache = self.cache.lock().unwrap();
-            let titles = self.titles.lock().unwrap();
+            let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            let mut titles = self.titles.lock().unwrap_or_else(|e| e.into_inner());
             for (i, &(si, doc, _, title_only)) in wants.iter().enumerate() {
-                match &self.segs[si].s.text {
-                    TextSource::Zstd(t) => out[i] = Some((t.get(doc)?, false)),
-                    TextSource::Lm(_) => {
-                        let key = (si, doc as u32);
-                        if let Some(r) = cache.get(&key) {
-                            out[i] = Some((r.clone(), false));
-                        } else if let Some(r) = self.l2.as_ref().and_then(|l2| l2.get(self.seg_keys[si], doc as u32)) {
-                            out[i] = Some((r, false));
-                        } else if let (true, Some(t)) = (title_only, titles.get(&key)) {
-                            out[i] = Some((TextRec { title: t.clone(), ..Default::default() }, true));
-                        } else {
-                            pending.push(i);
+                if let TextSource::Lm(_) = &self.segs[si].s.text {
+                    let key = (si, doc as u32);
+                    if let Some(r) = cache.get(&key) {
+                        out[i] = Some((r, false));
+                    } else if title_only {
+                        if let Some(t) = titles.get(&key) {
+                            out[i] = Some((TextRec { title: t, ..Default::default() }, true));
                         }
                     }
                 }
+            }
+        }
+        // 2) zstd tier and the L2 disk cache (disk reads, no locks held)
+        let mut pending: Vec<usize> = Vec::new();
+        for (i, &(si, doc, _, _)) in wants.iter().enumerate() {
+            if out[i].is_some() {
+                continue;
+            }
+            match &self.segs[si].s.text {
+                TextSource::Zstd(t) => out[i] = Some((t.get(doc)?, false)),
+                TextSource::Lm(_) => match self.l2.as_ref().and_then(|l2| l2.get(self.seg_keys[si], doc as u32)) {
+                    Some(r) => out[i] = Some((r, false)),
+                    None => pending.push(i),
+                },
             }
         }
         // agrupar lo pendiente por modelo LM (normalmente uno solo)
@@ -474,13 +767,14 @@ impl Engine {
         }
         for (f, pending) in groups {
             let codec = self.lms.get(&f).with_context(|| format!("falta el modelo LM {f}"))?;
-            let raws: Vec<&[u8]> = pending
+            let owned: Vec<std::borrow::Cow<[u8]>> = pending
                 .iter()
                 .map(|&i| match &self.segs[wants[i].0].s.text {
                     TextSource::Lm(l) => l.raw(wants[i].1),
                     _ => unreachable!(),
                 })
-                .collect();
+                .collect::<Result<_>>()?;
+            let raws: Vec<&[u8]> = owned.iter().map(|c| c.as_ref()).collect();
             let limits: Vec<Option<usize>> = pending.iter().map(|&i| wants[i].2).collect();
             let tonly: Vec<bool> = pending.iter().map(|&i| wants[i].3).collect();
             let checks: Vec<bool> = pending
@@ -490,28 +784,32 @@ impl Engine {
                     _ => false,
                 })
                 .collect();
+            // one batch at a time in the process, within the LM memory cap
             let dec = {
                 let _g = LM_GATE.lock().unwrap_or_else(|e| e.into_inner());
-                codec.decode_records_each(&raws, true, &limits, &tonly, &checks)?
+                codec.decode_records_pool(&raws, true, &limits, &tonly, &checks, self.lm_pool)?
             };
-            let mut cache = self.cache.lock().unwrap();
-            let mut titles = self.titles.lock().unwrap();
-            for (&i, (rec, partial)) in pending.iter().zip(dec) {
-                let key = (wants[i].0, wants[i].1 as u32);
-                if titles.len() >= CACHE_MAX {
-                    titles.clear();
-                }
-                titles.insert(key, rec.title.clone());
-                if !partial {
-                    if cache.len() >= CACHE_MAX {
-                        cache.clear();
+            drop(raws);
+            drop(owned);
+            {
+                let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+                let mut titles = self.titles.lock().unwrap_or_else(|e| e.into_inner());
+                for (&i, (rec, partial)) in pending.iter().zip(dec) {
+                    let key = (wants[i].0, wants[i].1 as u32);
+                    titles.put(key, rec.title.clone());
+                    if !partial {
+                        cache.put(key, rec.clone());
                     }
-                    cache.insert(key, rec.clone());
-                    if let Some(l2) = &self.l2 {
-                        l2.put(self.seg_keys[wants[i].0], wants[i].1 as u32, &rec);
+                    out[i] = Some((rec, partial));
+                }
+            }
+            // the disk cache is written without holding the RAM-cache locks
+            if let Some(l2) = &self.l2 {
+                for &i in &pending {
+                    if let Some((rec, false)) = &out[i] {
+                        l2.put(self.seg_keys[wants[i].0], wants[i].1 as u32, rec);
                     }
                 }
-                out[i] = Some((rec, partial));
             }
         }
         Ok(out.into_iter().map(|x| x.unwrap()).collect())
@@ -578,7 +876,7 @@ impl Engine {
                 rank: i + 1,
                 id: m.id,
                 kind: kind_name(m.typ),
-                by: self.segs[h.seg].s.meta.authors[m.author as usize].clone(),
+                by: self.segs[h.seg].s.meta.authors.get(m.author as usize).to_string(),
                 date: dates::fmt(m.time),
                 time: m.time,
                 points: m.score,

@@ -176,6 +176,17 @@ impl LmModel {
     }
 
     /// Bytes de un token (BPE a nivel de byte).
+    /// KV-cache bytes per position and sequence (keys + values of all layers, f32).
+    pub fn kv_bytes_per_token(&self) -> u64 {
+        (2 * self.h.hidden * self.h.layers * 4) as u64
+    }
+
+    /// Working memory of each active sequence in one `Batch::step` + sampling: logits and
+    /// cumulative frequencies (vocabulary x 4 B each) and the activations of one position.
+    pub fn step_bytes_per_seq(&self) -> u64 {
+        (2 * self.h.vocab * 4 + 16 * self.h.hidden * 4) as u64
+    }
+
     pub fn token_bytes(&self, id: u32) -> &[u8] {
         let i = id as usize;
         &self.vocab_bytes[self.vocab_off[i] as usize..self.vocab_off[i + 1] as usize]
@@ -434,8 +445,9 @@ impl LmModel {
 /// 1: puntuaciones de atención con `dot` por clave · 2: claves transpuestas, suma por dim en orden.
 pub const MATH_VERSION: u32 = 2;
 
-/// KV-cache de una secuencia. Claves TRANSPUESTAS por capa: [cabeza·dim][posición] (con
-/// capacidad que crece al doble), para puntuar muchas claves a la vez; valores [pos][hidden].
+/// KV cache of one sequence. Keys TRANSPOSED per layer: [head·dim][position] (capacity doubles as
+/// it grows, never past `limit` positions), to score many keys at once; values [pos][hidden] with
+/// the same capacity.
 pub struct KvCache {
     kt: Vec<Vec<f32>>,
     cap: Vec<usize>,
@@ -443,23 +455,32 @@ pub struct KvCache {
     pub v: Vec<Vec<f32>>,
     hd: usize,
     hs: usize,
+    limit: usize,
 }
 
 impl KvCache {
     pub fn new(layers: usize, hd: usize, hs: usize) -> Self {
-        Self { kt: vec![Vec::new(); layers], cap: vec![0; layers], len: vec![0; layers], v: vec![Vec::new(); layers], hd, hs }
+        Self::with_limit(layers, hd, hs, usize::MAX)
+    }
+
+    /// With at most `limit` positions: memory stays within `limit` x `kv_bytes_per_token` (plus,
+    /// while growing, the copy of one layer's keys). If exceeded, it grows anyway.
+    pub fn with_limit(layers: usize, hd: usize, hs: usize, limit: usize) -> Self {
+        Self { kt: vec![Vec::new(); layers], cap: vec![0; layers], len: vec![0; layers], v: vec![Vec::new(); layers], hd, hs, limit }
     }
 
     fn push(&mut self, l: usize, krow: &[f32], vrow: &[f32]) {
         let (hd, len) = (self.hd, self.len[l]);
         if len == self.cap[l] {
-            let nc = (self.cap[l] * 2).max(32);
+            let nc = (self.cap[l] * 2).max(32).min(self.limit).max(len + 1);
             let mut nk = vec![0f32; hd * nc];
             for r in 0..hd {
                 nk[r * nc..r * nc + len].copy_from_slice(&self.kt[l][r * self.cap[l]..r * self.cap[l] + len]);
             }
             self.kt[l] = nk;
             self.cap[l] = nc;
+            let have = self.v[l].len();
+            self.v[l].reserve_exact(nc * hd - have);
         }
         let c = self.cap[l];
         for (r, &x) in krow.iter().enumerate() {
@@ -491,8 +512,13 @@ impl<'m> Batch<'m> {
 
     /// Vacía el hueco `slot` (KV-cache y posición) para empezar otra secuencia en él.
     pub fn reset(&mut self, slot: usize) {
+        self.reset_limited(slot, usize::MAX);
+    }
+
+    /// Like `reset`, with the slot's KV cache limited to `limit` positions (0 = free its memory).
+    pub fn reset_limited(&mut self, slot: usize, limit: usize) {
         let (hd, hs) = (self.m.h.hidden, self.m.h.hidden / self.m.h.heads);
-        self.caches[slot] = KvCache::new(self.m.h.layers, hd, hs);
+        self.caches[slot] = KvCache::with_limit(self.m.h.layers, hd, hs, limit);
         self.pos[slot] = 0;
     }
 

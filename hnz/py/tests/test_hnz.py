@@ -1,7 +1,7 @@
-"""Pruebas de aceptación de la fase P1 (librería Python sobre el formato actual).
+"""P1 acceptance tests (Python library on the current format).
 
-Necesitan el archivo de muestra (out/: 2010-06, 2015-06, 2024-01), los modelos (models/), los
-Parquet originales (data/) y el binario hnz.exe. Desde la raíz del proyecto:
+They need the sample archive (out/: 2010-06, 2015-06, 2024-01), the models (models/), the original
+Parquet files (data/) and the hnz.exe binary. From the project root:
     .venv\\Scripts\\python -m pytest hnz/py/tests -q
 """
 import concurrent.futures as cf
@@ -42,15 +42,24 @@ def test_open_and_stats(hn):
     assert s['ram_budget'] == 4_000_000_000
 
 
+def same_text(a, b):
+    """Same text, except that a record already cached in full (e.g. in the CLI's disk cache) comes
+    back complete (`partial=False`) where the other side decoded only the 64-token snippet."""
+    if a['partial'] == b['partial']:
+        return a['text'] == b['text']
+    snip, whole = (a, b) if a['partial'] else (b, a)
+    return whole['text'].startswith(snip['text'].rstrip())
+
+
 @pytest.mark.parametrize('q', QUERIES[:3])
 def test_same_results_as_cli(hn, q):
-    """La librería devuelve exactamente lo mismo que `hnz search` (misma consulta, mismos filtros)."""
+    """The library returns exactly what `hnz search` returns (same query, same filters)."""
     for kw, args in (({}, []), ({'mode': 'keyword'}, ['--mode', 'keyword']),
                      ({'since': '2015', 'until': '2015', 'types': 'comment'}, ['--from', '2015', '--to', '2015', '--type', 'comment'])):
         py = hn.search(q, k=10, raw=True, **kw)['results']
         c = cli('-k', '10', *args, q)
         assert [r['id'] for r in py] == [r['id'] for r in c], (q, kw)
-        assert [r['text'] for r in py] == [r['text'] for r in c]
+        assert all(same_text(a, b) for a, b in zip(py, c)), (q, kw)
 
 
 def test_listing_without_text(hn):
@@ -60,7 +69,7 @@ def test_listing_without_text(hn):
 
 
 def test_get_is_lossless(hn):
-    """get() devuelve el texto, título, url y autor exactos del Parquet original (los 3 niveles)."""
+    """get() returns the exact text, title, url and author of the original Parquet (all 3 tiers)."""
     for month, year in (('2024-01', 2024), ('2015-06', 2015), ('2010-06', 2010)):
         t = pq.read_table(os.path.join(ROOT, 'data', str(year), f'{month}.parquet'),
                           columns=['id', 'by', 'title', 'url', 'text', 'deleted'])
@@ -76,8 +85,8 @@ def test_get_is_lossless(hn):
 
 
 def test_concurrent_queries_match_sequential(hn):
-    """8 hilos con 48 consultas mezcladas (híbridas, palabras, texto completo, get) = mismo resultado
-    que de una en una."""
+    """8 threads with 48 mixed queries (hybrid, keyword, full text, get) = the same results as one
+    at a time."""
     jobs = []
     for i, q in enumerate(QUERIES * 2):
         jobs.append(('search', q, {'k': 10}))
@@ -119,7 +128,7 @@ def test_closed_archive():
 
 
 def test_datetime_bounds_are_exact(hn):
-    """Un datetime es un instante exacto (UTC), no el día entero."""
+    """A datetime is an exact instant (UTC), not the whole day."""
     import datetime as dt
     it = hn.search(types='comment', since='2015-06-10', until='2015-06-10', k=1)[0]
     t = dt.datetime.fromtimestamp(it.time, dt.timezone.utc)
@@ -128,13 +137,13 @@ def test_datetime_bounds_are_exact(hn):
     after = hn.search(types='comment', since=t + dt.timedelta(seconds=1), until=t + dt.timedelta(hours=1), k=500)
     assert it.id not in [h.id for h in after] and all(h.time > it.time for h in after)
     naive = hn.search(types='comment', since=t.replace(tzinfo=None), until=t.replace(tzinfo=None), k=50)
-    assert [h.id for h in naive] == [h.id for h in same]          # sin zona horaria = UTC
+    assert [h.id for h in naive] == [h.id for h in same]          # no time zone = UTC
 
 
 def test_int_bounds_are_years(hn):
     assert len(hn.search(types='story', since=2015, until=2015, k=3)) == 3
     with pytest.raises(ValueError):
-        hn.search('x', since=1700000000)                           # una marca de tiempo no es un año
+        hn.search('x', since=1700000000)                           # a timestamp is not a year
     with pytest.raises(ValueError):
         hn.search('x', since='99999999999999999')
 
@@ -145,14 +154,14 @@ def test_open_empty_folder_fails(tmp_path):
 
 
 def test_lm_work_does_not_block_hot_tier(hn):
-    """Una consulta pesada del nivel LM (texto completo) no bloquea un get() del nivel zstd."""
+    """A heavy LM-tier query (full text) does not block a get() of the zstd tier."""
     import threading
     import time
     hot = hn.search(types='story', since='2024-01-20', k=1)[0].id
     t0 = time.perf_counter()
     th = threading.Thread(target=lambda: hn.search('the', k=100, since='2010', until='2010', text='full', mode='keyword'))
     th.start()
-    time.sleep(0.3)                                                # que el lote del LM ya esté en marcha
+    time.sleep(0.3)                                                # the LM batch is already running
     t1 = time.perf_counter()
     assert hn.get(hot) is not None
     dt_hot = time.perf_counter() - t1

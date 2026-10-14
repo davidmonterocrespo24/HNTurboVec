@@ -3,7 +3,7 @@
 
 use crate::varint::{get, put, unzz, zz};
 use anyhow::{Context, Result};
-use memmap2::Mmap;
+use crate::blob::Blob;
 use std::fs::File;
 use std::io::Write;
 use std::path::Path;
@@ -157,19 +157,63 @@ pub fn load_flags(dir: &Path, meta: &MetaStore) -> Result<Vec<u8>> {
     Ok(parts.concat())
 }
 
+/// Author names of a segment in one buffer plus offsets: two allocations, so its RAM is exact
+/// (a `Vec<String>` costs ~2x the counted bytes in slack and allocator overhead).
+pub struct Authors {
+    buf: String,
+    /// start of each name; the last entry is the end of the buffer + 1
+    off: Vec<u32>,
+}
+
+impl Authors {
+    /// From the names separated by '\n' (as in authors.zst).
+    pub fn from_text(mut buf: String) -> Self {
+        buf.shrink_to_fit();
+        let mut off = vec![0u32];
+        off.extend(buf.bytes().enumerate().filter(|&(_, b)| b == b'\n').map(|(i, _)| i as u32 + 1));
+        off.push(buf.len() as u32 + 1);
+        off.shrink_to_fit();
+        Self { buf, off }
+    }
+
+    pub fn len(&self) -> usize {
+        self.off.len() - 1
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn get(&self, i: usize) -> &str {
+        &self.buf[self.off[i] as usize..self.off[i + 1] as usize - 1]
+    }
+
+    pub fn position(&self, name: &str) -> Option<usize> {
+        (0..self.len()).find(|&i| self.get(i) == name)
+    }
+
+    pub fn ram_bytes(&self) -> usize {
+        self.buf.capacity() + self.off.capacity() * 4
+    }
+}
+
 pub struct MetaStore {
-    bin: Mmap,
+    bin: Blob,
     pub first_id: Vec<u32>,
     pub first_time: Vec<u32>,
     off: Vec<u64>,
     pub n_docs: usize,
-    pub authors: Vec<String>,
+    pub authors: Authors,
 }
 
 impl MetaStore {
     pub fn open(dir: &Path, n_docs: usize) -> Result<Self> {
-        let f = File::open(dir.join("meta.bin")).context("meta.bin")?;
-        let bin = unsafe { Mmap::map(&f)? };
+        Self::open_with(dir, n_docs, false)
+    }
+
+    /// `resident`: meta.bin in RAM; otherwise each block is read from disk when requested.
+    pub fn open_with(dir: &Path, n_docs: usize, resident: bool) -> Result<Self> {
+        let bin = Blob::open(&dir.join("meta.bin"), resident).context("meta.bin")?;
         let idx = std::fs::read(dir.join("meta.idx"))?;
         let nb = (idx.len() - 8) / 16;
         let mut first_id = Vec::with_capacity(nb);
@@ -183,7 +227,7 @@ impl MetaStore {
         }
         off.push(u64::from_le_bytes(idx[nb * 16..nb * 16 + 8].try_into().unwrap()));
         let a = zstd::stream::decode_all(&std::fs::read(dir.join("authors.zst"))?[..])?;
-        let authors = String::from_utf8(a)?.split('\n').map(|s| s.to_string()).collect();
+        let authors = Authors::from_text(String::from_utf8(a)?);
         Ok(Self { bin, first_id, first_time, off, n_docs, authors })
     }
 
@@ -191,9 +235,25 @@ impl MetaStore {
         self.first_id.len()
     }
 
+    /// Bytes it takes in RAM (block index, authors and, if resident, meta.bin).
+    pub fn ram_bytes(&self) -> usize {
+        self.bin.resident_bytes()
+            + (self.first_id.capacity() + self.first_time.capacity()) * 4
+            + self.off.capacity() * 8
+            + self.authors.ram_bytes()
+    }
+
+    pub fn blob(&self) -> &Blob {
+        &self.bin
+    }
+
+    pub fn blob_mut(&mut self) -> &mut Blob {
+        &mut self.bin
+    }
+
     pub fn block(&self, b: usize) -> Vec<MetaRow> {
-        let data = &self.bin[self.off[b] as usize..self.off[b + 1] as usize];
-        let raw = zstd::stream::decode_all(data).expect("meta zstd");
+        let data = self.bin.get(self.off[b] as usize, (self.off[b + 1] - self.off[b]) as usize).expect("leyendo meta.bin");
+        let raw = zstd::stream::decode_all(&data[..]).expect("meta zstd");
         let n = (self.n_docs - b * META_BLOCK).min(META_BLOCK);
         decode_block(&raw, n)
     }
@@ -247,5 +307,18 @@ mod tests {
             .collect();
         let b = encode_block(&rows);
         assert_eq!(decode_block(&b, rows.len()), rows);
+    }
+
+    #[test]
+    fn authors_like_split() {
+        for text in ["", "a", "a\nbc", "a\n", "\nx\n\nyz"] {
+            let a = Authors::from_text(text.to_string());
+            let v: Vec<&str> = text.split('\n').collect();
+            assert_eq!(a.len(), v.len(), "{text:?}");
+            for (i, s) in v.iter().enumerate() {
+                assert_eq!(a.get(i), *s);
+            }
+            assert_eq!(a.position("bc"), v.iter().position(|s| *s == "bc"));
+        }
     }
 }
