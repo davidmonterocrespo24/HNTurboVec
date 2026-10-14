@@ -54,6 +54,11 @@ def batches(data, batch_tokens, rng):
     return out
 
 
+DEV = torch.device('cpu')
+AMP = False   # fp16 mixto en la GPU (pesos y optimizador en float32). OJO: bf16 rompe pythia
+              # (pérdida 5,7 frente a 4,0 en fp32); fp16, su formato nativo, da lo mismo que fp32
+
+
 def tensors(data, idx, pad):
     L = max(len(data[i][0]) for i in idx)
     x = torch.full((len(idx), L), pad, dtype=torch.long)
@@ -62,14 +67,17 @@ def tensors(data, idx, pad):
         ids = data[i][0]
         x[r, :len(ids)] = torch.tensor(ids)
         m[r, :len(ids)] = 1
-    return x, m
+    return x.to(DEV), m.to(DEV)
 
 
-def nll_bits(model, x, m):
-    logits = model(input_ids=x, attention_mask=m).logits[:, :-1].float()
+def nll_bits(model, x, m, amp=None):
+    with torch.autocast(device_type=DEV.type, dtype=torch.float16, enabled=AMP if amp is None else amp):
+        logits = model(input_ids=x, attention_mask=m).logits[:, :-1]
     tgt, msk = x[:, 1:], m[:, 1:].bool()
-    lp = torch.log_softmax(logits, -1).gather(-1, tgt.unsqueeze(-1)).squeeze(-1)
-    return -(lp * msk).sum() / math.log(2), msk.sum()
+    # entropía cruzada fusionada en float32 solo sobre las posiciones reales (sin relleno): no se
+    # guarda una copia completa de log-probabilidades (vocabulario de 50k) para el gradiente
+    nll = torch.nn.functional.cross_entropy(logits[msk].float(), tgt[msk], reduction='sum')
+    return nll / math.log(2), msk.sum()
 
 
 @torch.no_grad()
@@ -78,9 +86,9 @@ def evaluate(model, sets, pad):
     res = {}
     for name, data in sets.items():
         bits = nbytes = 0.0
-        for idx in batches(data, 16384, random.Random(0)):
+        for idx in batches(data, 8192, random.Random(0)):
             x, m = tensors(data, idx, pad)
-            b, _ = nll_bits(model, x, m)
+            b, _ = nll_bits(model, x, m, amp=False)   # evaluación exacta en float32
             bits += float(b)
             nbytes += sum(data[i][1] for i in idx)
         res[name] = bits / nbytes
@@ -95,7 +103,7 @@ def main():
     ap.add_argument('--base', default='EleutherAI/pythia-70m')
     ap.add_argument('--out', default='models/lm-hn-70m')
     ap.add_argument('--steps', type=int, default=6000)
-    ap.add_argument('--batch-tokens', type=int, default=16384)
+    ap.add_argument('--batch-tokens', type=int, default=8192)
     ap.add_argument('--lr', type=float, default=1e-4)
     ap.add_argument('--warmup', type=int, default=200)
     ap.add_argument('--max-len', type=int, default=512)
@@ -103,13 +111,21 @@ def main():
     ap.add_argument('--eval-every', type=int, default=500)
     ap.add_argument('--eval-n', type=int, default=1000)
     ap.add_argument('--threads', type=int, default=16)
+    ap.add_argument('--device', default='auto', help='cpu, xpu (iGPU Intel) o auto')
+    ap.add_argument('--fp32', action='store_true', help='sin fp16 mixto en la GPU')
     ap.add_argument('--probe', type=int, default=0)
     a = ap.parse_args()
     torch.set_num_threads(a.threads)
+    global DEV, AMP
+    DEV = torch.device('xpu' if a.device == 'auto' and hasattr(torch, 'xpu') and torch.xpu.is_available() else
+                       ('cpu' if a.device == 'auto' else a.device))
+    AMP = DEV.type != 'cpu' and not a.fp32
+    log(f'dispositivo {DEV}' + (' (fp16 mixto)' if AMP else ''))
+    scaler = torch.amp.GradScaler(DEV.type, enabled=AMP)
     tok = AutoTokenizer.from_pretrained(a.base)
     ck = os.path.join(a.out, 'checkpoint')
     start = os.path.exists(os.path.join(ck, 'state.pt'))
-    model = AutoModelForCausalLM.from_pretrained(ck if start else a.base, dtype=torch.float32)
+    model = AutoModelForCausalLM.from_pretrained(ck if start else a.base, dtype=torch.float32).to(DEV)
     model.train()
     log(f'cargando datos de {a.data}')
     data = load(a.data, tok, a.max_len)
@@ -119,7 +135,7 @@ def main():
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, betas=(0.9, 0.95), weight_decay=0.01)
     step, rng = 0, random.Random(1234)
     if start:
-        st = torch.load(os.path.join(ck, 'state.pt'), weights_only=False)
+        st = torch.load(os.path.join(ck, 'state.pt'), weights_only=False, map_location=DEV)
         opt.load_state_dict(st['opt'])
         step, rng = st['step'], st['rng']
         log(f'reanudando en el paso {step}')
@@ -137,9 +153,11 @@ def main():
         for g in opt.param_groups:
             g['lr'] = sched(step)
         opt.zero_grad(set_to_none=True)
-        loss.backward()
+        scaler.scale(loss).backward()
+        scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        opt.step()
+        scaler.step(opt)
+        scaler.update()
         step += 1
         seen += int(m.sum())
         if step % 20 == 0 or a.probe:

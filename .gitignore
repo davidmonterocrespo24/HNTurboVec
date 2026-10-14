@@ -47,3 +47,6 @@ download_hn.err
 
 # Texto exportado para entrenar el LM de HN (hnz lmdump)
 data_lm/
+train_lm.log
+train_lm.err
+.venv-xpu/
