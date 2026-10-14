@@ -37,3 +37,13 @@ out/seg-2015-06/meta.flags.zst
 out/seg-2024-01/meta.flags.zst
 == listo 16:26 (falta: verify de 2015-06)
 -- verificación completa de 2015-06 (binario final), 19:52
+  verificados 20000/171636 (27 reg/s)
+  verificados 40000/171636 (28 reg/s)
+  verificados 60000/171636 (28 reg/s)
+  verificados 80000/171636 (28 reg/s)
+  verificados 100000/171636 (29 reg/s)
+  verificados 120000/171636 (29 reg/s)
+  verificados 140000/171636 (28 reg/s)
+  verificados 160000/171636 (29 reg/s)
+OK: 171636 registros idénticos al original (5971.1s)
+exit=0

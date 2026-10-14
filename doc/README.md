@@ -26,10 +26,11 @@ importa es el uso diario: **rápido, preciso y compacto**. Implementación en **
 - [x] LM compresor determinista propio (Pythia int8, AVX-VNNI, codificador aritmético) (E17, E20).
 - [x] Cachés L1/L2, `retier`, embedder de consultas int8, latencias medidas (E23, E24).
 - [x] Revisión adversarial (141 agentes): 60 hallazgos confirmados y corregidos (E25).
-- [x] 2ª y 3ª revisión (18 + 4 hallazgos corregidos); segmentos de muestra reconstruidos con el
-      binario final y verificados; mismo resultado byte a byte con dos binarios distintos (E26).
-- [x] Reranker cross-encoder (equivalente open source a Jev/System One) probado (E26): poca
-      ganancia para su coste en CPU → no se usa por defecto.
+- [x] 2ª, 3ª y 4ª revisión (18 + 4 + 18 hallazgos corregidos); segmentos de muestra reconstruidos con el
+      binario final y verificados al completo (637.046 registros idénticos al original); mismo
+      resultado byte a byte con dos binarios distintos (E26).
+- [x] Reranker cross-encoder (equivalente open source a Jev/System One) probado (E26): +6-10 % de
+      P@10 pero multiplica la latencia por 5-7 (necesita el texto completo) → no se usa por defecto.
 - [ ] Construcción completa de los 239 meses (`pipeline.py`; días de CPU/iGPU).
 
 ## Resultado con la muestra de 3 meses (637.046 ítems, E26)
@@ -38,9 +39,13 @@ importa es el uso diario: **rápido, preciso y compacto**. Implementación en **
 |---|---|---|
 | Tamaño por ítem (texto + metadatos + BM25 + vectores) | 267,6 B | 187-188 B |
 | Todo HN (~49,3 M; 2 años en caliente) | **≈ 10,0 GB** + modelos 0,38 GB (≈ 10,4 GB) | |
-| Búsqueda híbrida (embedding + búsqueda + texto, k=10) | 24-29 ms | 280-350 ms (fragmentos) |
-| Texto completo de 10 resultados fríos | — | 464 ms; 25 ms en caché RAM, 79 ms en caché disco |
+| Búsqueda híbrida k=10 (embedding + búsqueda + texto; mediana, caché vacía) | 26 ms | 280 ms (fragmentos de 64 tokens) |
+| Texto completo de 10 resultados fríos | — | 527 ms; 24 ms en caché RAM, 53 ms en caché disco |
 | Abrir el archivo | 180 ms | |
+
+En todo el archivo, la latencia depende de cuántos resultados salgan del nivel frío (~25 ms cada
+uno): 103 ms de mediana con consultas sobre 2024 (2 de 10 fríos) y 264 ms con consultas sobre 2010
+(8 de 10). Sin texto (listados con filtros): 4 ms.
 
 Calidad (P@10 híbrida, título → comentarios del hilo, todo el archivo): 0,278 / 0,208 / 0,249 con
 consultas de 2024 / 2010 / 2015. Con más meses esta cifra baja aunque la búsqueda no empeore: los

@@ -37,8 +37,8 @@ Detalle numérico en [BITACORA.md](BITACORA.md) (E00-E03, E09, E12, E15-E17, E20
 
 | Nivel | Uso típico | Formato | Texto B/ítem (medido) | Lectura de un top-10 |
 |---|---|---|---|---|
-| Caliente | años recientes | zstd-19 + dict, bloques de 16 | ~117 | ~6-11 ms (con búsqueda) |
-| Frío | años antiguos | LM pythia-70m + codificación aritmética | ~61-65 | ~0,3-0,45 s fragmentos; ~0,6 s completo (46 ms en caché) |
+| Caliente | años recientes | zstd-19 + dict, bloques de 16 | ~117 | ~2,5 ms (26 ms con embedding y búsqueda) |
+| Frío | años antiguos | LM pythia-70m + codificación aritmética | ~61-65 | ~0,26 s fragmentos; ~0,5 s completo (2 ms en caché RAM, 29 ms en disco) |
 
 El tamaño de bloque zstd es configurable (`--block`): bloques de 256 dan ~114 B con lecturas de
 ~0,2 ms (un posible nivel "templado"). Un segmento caliente se enfría con `hnz retier --tier lm`.

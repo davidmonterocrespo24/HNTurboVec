@@ -361,7 +361,7 @@ Notas de medición: las velocidades de E17 y E20 se midieron con muestras y carg
 (E17 con trabajos en paralelo); comparar solo dentro de cada experimento.
 
 
-### E26 — 2ª y 3ª revisión, segmentos finales, puntuación entre niveles y reranker
+### E26 — 2ª, 3ª y 4ª revisión, segmentos finales, puntuación entre niveles y reranker
 **Revisiones.** 2ª revisión de las correcciones de E25 (mismo método): 19 hallazgos, **18 confirmados**,
 1 refutado. 3ª revisión (un revisor sobre el commit resultante): **4 más**. Todo corregido:
 | Problema confirmado | Corrección |
@@ -383,32 +383,54 @@ Notas de medición: las velocidades de E17 y E20 se midieron con muestras y carg
 | `uv` no resolvía `torch==…+cpu` mezclando índices | `requirements-torch.txt` aparte |
 | La doc decía que el byte de comprobación protege fragmentos y títulos | aclarado: solo registros completos; los fragmentos, el id del modelo + `MATH_VERSION` |
 
+**4ª revisión** (workflow de 51 agentes: 4 revisores —pipeline, correcciones Rust, validez de los
+experimentos, documentación— y 2 verificadores por hallazgo + desempate): 20 hallazgos, **18
+confirmados**, 2 refutados. Correcciones:
+| Problema confirmado | Corrección |
+|---|---|
+| `pipeline.py` adoptaba embeddings sin registro con el tamaño del Parquet recién rebajado: vectores viejos para siempre | solo se adoptan si son posteriores al Parquet |
+| Un segmento sin `sources.json` se reconstruía con los Parquet locales que quedaran (perdía los meses archivados) | no se toca; registro provisional `seg-YYYY.sources.json` antes del build, que se adopta si el proceso muere justo después |
+| Una ejecución normal rebajaba los Parquet archivados y volvía a embeber (días de iGPU) años ya completos | año completo y al día con el dataset: no se baja ni se embebe nada |
+| Un fallo de red pasaba a modo sin conexión en silencio (límite caliente/frío según los Parquet locales) | se detiene; `--offline` explícito con el último año visto en línea (`out/pipeline_state.json`) |
+| `VecIndex::open` aceptaba un `vec.bin` de otro ancho si era múltiplo del código: pánico del servidor | tamaño exacto `n_docs × bytes` y `vec.has` suficiente |
+| `vec_cand = Some(0)` entraba en pánico; `--c-bm25 0` daba NaN; fechas imposibles (2015-13) se desbordaban | candidatos ≥ k; `c > 0`, `w ≥ 0`; fechas validadas |
+| Conclusión de mixbits exagerada (diferencias del orden del ruido) | bootstrap pareado y conclusión más prudente (abajo) |
+| Reranker: latencia sin la descarga de candidatos y ganancia sin prueba de ruido | latencia de extremo a extremo e IC 95 % (abajo) |
+| Latencias del servidor de una sola consulta y con caché caliente | medianas de 30 consultas distintas con el servidor recién arrancado y caché vacía (abajo) |
+| Docs: `python` sin activar el entorno; texto 116,8 B/doc (no 116,6); modelos 0,38 GB (no 0,35); 05 desactualizado; byte de comprobación presentado como garantía | corregidos |
+
 **Segmentos finales** (`results_build_v4.txt`, binario final):
 - 2024-01 (zstd): **382.681 registros idénticos** al original.
 - 2010-06 (LM) reconstruido con el binario final: **todos los ficheros idénticos byte a byte** al v3
   del binario anterior, ya verificado al completo (**82.729 registros idénticos**, 2.768 s) →
   determinismo también entre binarios distintos.
-- 2015-06 (LM): 171.636 ítems (5.246 deleted), 63,0 B/reg de texto LM; verificación completa: en curso.
-- Comprimir los dos meses LM a la vez: 63 + 58 reg/s (la mitad de hilos cada uno): igual que uno tras otro.
+- 2015-06 (LM): 171.636 ítems (5.246 deleted), 63,0 B/reg de texto LM; verificación completa: **171.636 registros idénticos** (5.971 s, 29 reg/s).
+- Los dos meses LM se comprimieron a la vez (la mitad de los hilos cada uno): 2010-06 en 1.325 s y
+  2015-06 en 2.079 s; uno tras otro (E24) habrían sido ~625 + ~1.370 s, así que en paralelo no se gana.
 
 **Medidas finales** (`results_final.txt`, CPU en reposo):
 - Tamaño (`hnz stats`): caliente **267,6 B/doc** (texto 116,8 · vectores 96,1 · BM25 49,2 · meta 5,5 · banderas 0,1);
   frío **187,0 / 188,2 B/doc** (texto LM 64,4 · vectores 64,1 · BM25 53,9 · meta 5,9). El BM25 frío
   crece ~5 B/doc al quitar la poda (E25). Proyección para todo HN: **≈ 10,0 GB** + 0,38 GB de modelos (≈ 10,4 GB en total).
 - Abrir el archivo: **180 ms** (antes ~950 ms construyendo las banderas al abrir).
-- Latencias con `bench_serve.py` (modelos cargados; k=10 salvo indicación):
-| Consulta | Total | Embedding | Búsqueda | Texto |
-|---|---|---|---|---|
-| caliente 2024, híbrida | 24,3 ms | 18,9 | 3,2 | 2,2 |
-| caliente 2024, palabras | 3,0 ms | — | 0,4 | 2,6 |
-| todo el archivo, híbrida | 29,1 ms | 23,2 | 3,5 | 2,4 |
-| todo el archivo, híbrida, k=100 (43 fríos) | 980 ms | 18,9 | 10,6 | 950 |
-| frío 2010 / 2015, híbrida, fragmentos | 347 / 284 ms | 22 | 2,5 | 323 / 259 |
-| tipo job + palabras (recorrido exacto) | 14,6 ms | — | 14,1 | 0,5 |
-| autor (by=pg), híbrida | 284 ms | 21,3 | 3,2 | 259 |
-| sin texto: stories más recientes de 2024 | 0,6 ms | — | 0,1 | 0,5 |
-| frío 2010, texto completo: 1ª vez / caché L1 / tras reiniciar (L2) | 464 / 25 / 79 ms | | | 438 / 2 / 50 |
-| `/item/<id>` frío largo, sin caché | 606 ms | | | |
+- Latencias del servidor (`bench_serve.py`): mediana y p90 de 30 consultas distintas por caso, con el
+  servidor recién arrancado y la caché L2 vacía (la 1ª versión de E26 medía una sola consulta con la
+  caché caliente: los "29 ms" de todo el archivo eran un acierto de caché):
+| Consulta (k=10 salvo indicación) | Mediana | p90 | Embedding | Búsqueda | Texto | Del nivel LM |
+|---|---|---|---|---|---|---|
+| caliente 2024, híbrida | 25,9 ms | 27,4 | 19,2 | 4,3 | 2,5 | 0 % |
+| caliente 2024, palabras | 3,1 ms | 5,1 | — | 0,6 | 2,4 | 0 % |
+| todo el archivo, híbrida (consultas de 2024) | 103 ms | 158 | 20,1 | 4,1 | 73,5 | 19 % |
+| todo el archivo, híbrida (consultas de 2010) | 264 ms | 311 | 21,7 | 3,9 | 239 | 80 % |
+| frío 2010 / 2015, híbrida, fragmentos | 280 / 284 ms | 321 / 310 | 20-24 | 2,8 | 256 / 257 | 100 % |
+| frío 2010, texto completo | 525 ms | 1.092 | 20,9 | 2,8 | 502 | 100 % |
+| todo el archivo, k=100, fragmentos | 1.306 ms | 1.846 | 24,3 | 10,0 | 1.271 | 60 % |
+| tipo job + palabras (recorrido exacto) | 189 ms | 332 | — | 13,8 | 176 | 77 % |
+| autor, híbrida | 217 ms | 306 | 20,0 | 13,9 | 184 | 73 % |
+| sin texto: lo más reciente con filtros | 4,0 ms | 6,0 | — | 0,4 | 1,7 | 0 % |
+| texto completo frío: 1ª vez / repetida (L1) / tras reiniciar (L2) | 527 / 24 / 53 ms | | | | 503 / 2 / 29 | |
+| `/item/<id>` frío completo, sin caché | 326 ms | 589 | | | | |
+  Lo que cuesta es el nivel LM: ~25 ms por resultado frío en un lote de 10 fragmentos.
 
 **Calidad: por qué baja P@10 y qué NO hay que corregir.**
 - `hnz eval` (consultas de 2024-01, todo el archivo): vector 0,255, híbrida 0,278 frente a 0,291 / 0,315
@@ -425,10 +447,13 @@ Notas de medición: las velocidades de E17 y E20 se midieron con muestras y carg
 | calibración por regresión (s768 ≈ 0,936·s512 + 0,019) | 0,268 | 0,177 | 0,210 | 0,218 |
 | calibración por momentos (s768 ≈ s512 − 0,006) | 0,265 | 0,183 | 0,221 | 0,223 |
 | sin renormalizar la consulta | 0,292 | 0,065 | 0,070 | 0,142 |
-  Lo que ya hacía hnz es lo mejor y queda a 0,003 de tenerlo todo a 768 bits: cada prefijo MRL se
-  entrena como un coseno propio. Las "calibraciones" solo mejoran las consultas de 2024 porque hunden
-  a los fríos. **Lección: no validar con un único conjunto de consultas cuyas respuestas están todas
-  en el mismo nivel.**
+  Con bootstrap pareado de consultas (IC 95 % de la diferencia de P@10 frente a lo que hace hnz):
+  todo a 768 bits +0,003 [−0,001, +0,007] en las 900 consultas (no significativo); regresión
+  −0,011 [−0,014, −0,008] y momentos −0,006 [−0,008, −0,004] (significativamente peores: ganan en las
+  consultas de 2024, +0,009 y +0,006, y pierden más en las de 2010 y 2015). Conclusión: ninguna
+  calibración lineal mejora el coseno renormalizado por prefijo MRL (cada prefijo se entrena como un
+  coseno propio), y tenerlo todo a 768 bits apenas cambiaría nada. **Lección: no validar con un
+  único conjunto de consultas cuyas respuestas están todas en el mismo nivel.**
 - Consultas sobre el nivel frío con el sistema real (`hnz eval`, todo el archivo): 2010-06 vector
   0,193, híbrida 0,208; 2015-06 vector 0,236, híbrida 0,249.
 - Esta métrica baja al crecer el archivo aunque la búsqueda no empeore: comparar versiones siempre
@@ -439,14 +464,19 @@ top-30 real de hnz pedido al servidor):
 - 1ª ejecución: P@10 0,444 (+59 %) → **falso**: el texto que veía el reranker incluía
   "re: <título del hilo>" y la consulta ES ese título (fuga de la etiqueta). Corregido: el reranker
   ve solo el propio documento, como los embeddings y BM25.
-- Resultado real (P@10; MRR en `results_final.txt`):
-| Consultas | hnz híbrida | MiniLM-L6 (80 MB) | MiniLM-L12 (120 MB) | fusión RRF hnz + L12 |
-|---|---|---|---|---|
-| 2024-01 (respuestas en caliente) | 0,279 | 0,294 | 0,299 | 0,302 (+8 %) |
-| 2015-06 (respuestas en frío) | 0,249 | 0,266 | 0,268 | 0,275 (+10 %) |
-- Coste: 0,4-0,8 s por consulta en CPU (8 hilos) frente a 25-30 ms de la búsqueda, y 80-120 MB más
-  de modelo. **Decisión: no por defecto** (+8-10 % de P@10 por 15-30 veces la latencia); como
-  mucho, un modo "preciso" opcional.
+- Resultado real con IC 95 % (bootstrap pareado; diferencia de P@10 frente a hnz) y latencia de extremo
+  a extremo (mediana; servidor recién arrancado y caché vacía):
+| Consultas | El reranker lee | hnz | MiniLM-L6 (80 MB) | MiniLM-L12 (120 MB) | RRF hnz + L12 | Latencia: hnz → con L6 / L12 |
+|---|---|---|---|---|---|---|
+| 2024-01 | texto completo | 0,279 | +0,015 [+0,004, +0,027] | +0,020 [+0,008, +0,033] | +0,023 [+0,015, +0,032] | 90 ms → 696 / 1.119 ms |
+| 2024-01 | fragmentos | 0,279 | +0,017 [+0,005, +0,029] | +0,023 [+0,010, +0,035] | +0,024 [+0,016, +0,033] | 91 ms → 595 / 956 ms |
+| 2015-06 | texto completo | 0,249 | +0,017 [+0,005, +0,030] | +0,019 [+0,006, +0,032] | +0,026 [+0,017, +0,035] | 249 ms → 1.212 / 1.616 ms |
+| 2015-06 | fragmentos | 0,249 | −0,011 [−0,025, +0,003] | −0,013 [−0,026, +0,001] | +0,001 [−0,007, +0,010] | 264 ms → 668 / 848 ms |
+- Lectura: con el texto completo el reranker mejora de forma significativa (+6-10 % relativo; mejor en
+  fusión RRF con el orden de hnz) pero multiplica la latencia por 5-7. Con los fragmentos de 64 tokens
+  (lo barato) no mejora en el nivel frío: el fragmento es demasiado corto para juzgar (en 2024 da igual
+  porque el nivel caliente devuelve el texto entero). **Decisión: no por defecto**; un modo "preciso"
+  opcional tendría que descomprimir el texto completo de los 30 candidatos.
 - Rerankers mayores (jina v1 tiny/turbo, bge-reranker-v2-m3 int8): la descarga falló por timeouts de red.
 
 **Incidencias:** el descargador `hf_xet` de huggingface_hub muere a mitad de descarga en esta

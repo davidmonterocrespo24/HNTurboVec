@@ -84,3 +84,72 @@ híbrida w=0.25 c=10                    0.247   0.521       5.3
   hnz híbrida (sin reranker)                   P@10 0.249  MRR 0.516
   ms-marco-MiniLM-L-6-v2                       P@10 0.266  MRR 0.529  | fusión RRF P@10 0.270  MRR 0.530 | 383 ms/cons. (8 hilos)
   ms-marco-MiniLM-L-12-v2                      P@10 0.268  MRR 0.531  | fusión RRF P@10 0.275  MRR 0.536 | 767 ms/cons. (8 hilos)
+
+######## 2ª parte (tras la 4ª revisión), binario del commit 575c150, 2026-10-13 21:32
+== control: hnz eval con SOLO el segmento 2024-01 (consultas de 2024-01)
+300 consultas embebidas en 19.4 ms/consulta
+configuración                            P@k     MRR  ms/cons.
+vector (2 etapas)                      0.291   0.572       5.0
+vector exacto (asimétrico total)       0.294   0.575      11.0
+palabras (BM25)                        0.227   0.505       1.9
+híbrida w=0.15 c=20                    0.314   0.589       5.4
+== latencias del servidor: 30 consultas distintas por caso, servidor recién arrancado y caché L2 vacía
+   (sustituye a la sección 'latencias del servidor' de arriba, que era una sola consulta con la caché caliente)
+servidor listo en 3.7 s (carga de segmentos + modelos); 30 consultas distintas por caso
+caliente (2024), híbrida, k=10                     total mediana    25.9 ms, p90    27.4 (embedding  19.2, búsqueda   4.3, texto     2.5) | pared    44.1 ms | 0% del nivel LM
+caliente (2024), palabras, k=10                    total mediana     3.1 ms, p90     5.1 (embedding   0.0, búsqueda   0.6, texto     2.4) | pared    15.8 ms | 0% del nivel LM
+todo el archivo, híbrida, k=10 (consultas 2024)    total mediana   102.8 ms, p90   158.1 (embedding  20.1, búsqueda   4.1, texto    73.5) | pared   120.5 ms | 19% del nivel LM
+todo el archivo, híbrida, k=10 (consultas 2010)    total mediana   264.4 ms, p90   311.2 (embedding  21.7, búsqueda   3.9, texto   238.8) | pared   278.3 ms | 80% del nivel LM
+frío (2010), híbrida, k=10, fragmentos             total mediana   279.9 ms, p90   321.0 (embedding  20.1, búsqueda   2.8, texto   255.5) | pared   294.5 ms | 100% del nivel LM
+frío (2015), híbrida, k=10, fragmentos             total mediana   284.1 ms, p90   309.7 (embedding  24.0, búsqueda   2.8, texto   257.0) | pared   298.5 ms | 100% del nivel LM
+frío (2010), híbrida, k=10, texto completo         total mediana   525.2 ms, p90  1092.2 (embedding  20.9, búsqueda   2.8, texto   502.4) | pared   537.2 ms | 100% del nivel LM
+todo el archivo, híbrida, k=100, fragmentos        total mediana  1305.9 ms, p90  1845.7 (embedding  24.3, búsqueda  10.0, texto  1271.4) | pared  1317.3 ms | 60% del nivel LM
+filtro tipo job + palabras (recorrido exacto)      total mediana   189.3 ms, p90   332.3 (embedding   0.0, búsqueda  13.8, texto   175.7) | pared   205.7 ms | 77% del nivel LM
+filtro autor, híbrida                              total mediana   216.8 ms, p90   306.3 (embedding  20.0, búsqueda  13.9, texto   184.0) | pared   224.1 ms | 73% del nivel LM
+sin texto: lo más reciente con filtros             total mediana     4.0 ms, p90     6.0 (embedding   0.0, búsqueda   0.4, texto     1.7) | pared    16.4 ms | 0% del nivel LM
+frío (2010), texto completo, 1ª vez                total mediana   527.3 ms, p90   829.2 (embedding  20.7, búsqueda   2.6, texto   503.0) | pared   544.9 ms | 100% del nivel LM
+  la misma consulta repetida (caché L1)            total mediana    24.4 ms, p90    25.4 (embedding  20.0, búsqueda   2.7, texto     1.8) | pared    39.8 ms | 100% del nivel LM
+  tras reiniciar en 2.9 s (caché L2 en disco)      total mediana    52.8 ms, p90    66.0 (embedding  19.6, búsqueda   2.7, texto    28.6) | pared    70.6 ms | 100% del nivel LM
+/item/<id> frío (completo, sin caché)              mediana   325.6 ms, p90   588.7 ms (7 ítems)
+== mixbits con bootstrap pareado: ver results_mixbits.txt
+todo a 768 bits (referencia)            P@10 0.265 MRR 0.538    P@10 0.197 MRR 0.462    P@10 0.234 MRR 0.503      P@10 0.232
+renormalizada (hnz antes de E26)        P@10 0.259 MRR 0.532    P@10 0.194 MRR 0.472    P@10 0.235 MRR 0.488      P@10 0.229
+OLS a·s+b                               P@10 0.268 MRR 0.551    P@10 0.177 MRR 0.450    P@10 0.210 MRR 0.457      P@10 0.218
+momentos a·s+b                          P@10 0.265 MRR 0.539    P@10 0.183 MRR 0.465    P@10 0.221 MRR 0.473      P@10 0.223
+sin renormalizar                        P@10 0.292 MRR 0.575    P@10 0.065 MRR 0.180    P@10 0.070 MRR 0.172      P@10 0.142
+
+diferencia de P@10 frente a "renormalizada (hnz antes de E26)" (IC 95 %, bootstrap pareado de consultas):
+variante                                     consultas 2024-01         consultas 2010-06         consultas 2015-06                   las 900
+todo a 768 bits (referencia)            +0.007 [+0.003,+0.011]    +0.003 [-0.003,+0.010]    -0.001 [-0.008,+0.007]    +0.003 [-0.001,+0.007]
+OLS a·s+b                               +0.009 [+0.006,+0.013]    -0.017 [-0.022,-0.012]    -0.025 [-0.031,-0.019]    -0.011 [-0.014,-0.008]
+momentos a·s+b                          +0.006 [+0.004,+0.009]    -0.011 [-0.015,-0.007]    -0.014 [-0.018,-0.010]    -0.006 [-0.008,-0.004]
+sin renormalizar                        +0.033 [+0.026,+0.040]    -0.129 [-0.143,-0.114]    -0.165 [-0.184,-0.147]    -0.087 [-0.097,-0.077]
+== reranker, consultas 2024-01, full=1
+300 consultas de eval/2024-01.jsonl; top-30 de hnz (híbrida, todo out/); el reranker lee el texto completo
+  consulta normal de hnz (k=10, fragmentos): mediana 90 ms, p90 178 ms
+  candidatos top-30 (completos): mediana 340 ms, p90 744 ms
+  hnz híbrida (sin reranker)       P@10 0.279  MRR 0.558
+  ms-marco-MiniLM-L-6-v2           P@10 0.294 (+0.015 [+0.004,+0.027])  MRR 0.564 | RRF P@10 0.298 (+0.019 [+0.010,+0.027])  MRR 0.571 | reranker 369 ms, total mediana 696 ms (8 hilos)
+  ms-marco-MiniLM-L-12-v2          P@10 0.299 (+0.020 [+0.008,+0.033])  MRR 0.547 | RRF P@10 0.302 (+0.023 [+0.015,+0.032])  MRR 0.567 | reranker 731 ms, total mediana 1119 ms (8 hilos)
+== reranker, consultas 2024-01, full=0
+300 consultas de eval/2024-01.jsonl; top-30 de hnz (híbrida, todo out/); el reranker lee título + fragmento (lo que devuelve hnz)
+  consulta normal de hnz (k=10, fragmentos): mediana 91 ms, p90 183 ms
+  candidatos top-30 (fragmentos): mediana 231 ms, p90 403 ms
+  hnz híbrida (sin reranker)       P@10 0.279  MRR 0.558
+  ms-marco-MiniLM-L-6-v2           P@10 0.296 (+0.017 [+0.005,+0.029])  MRR 0.566 | RRF P@10 0.298 (+0.019 [+0.011,+0.028])  MRR 0.575 | reranker 354 ms, total mediana 595 ms (8 hilos)
+  ms-marco-MiniLM-L-12-v2          P@10 0.302 (+0.023 [+0.010,+0.035])  MRR 0.551 | RRF P@10 0.303 (+0.024 [+0.016,+0.033])  MRR 0.569 | reranker 716 ms, total mediana 956 ms (8 hilos)
+== reranker, consultas 2015-06, full=1
+300 consultas de eval/2015-06.jsonl; top-30 de hnz (híbrida, todo out/); el reranker lee el texto completo
+  consulta normal de hnz (k=10, fragmentos): mediana 249 ms, p90 310 ms
+  candidatos top-30 (completos): mediana 866 ms, p90 1554 ms
+  hnz híbrida (sin reranker)       P@10 0.249  MRR 0.516
+  ms-marco-MiniLM-L-6-v2           P@10 0.266 (+0.017 [+0.005,+0.030])  MRR 0.529 | RRF P@10 0.270 (+0.021 [+0.013,+0.030])  MRR 0.530 | reranker 372 ms, total mediana 1212 ms (8 hilos)
+  ms-marco-MiniLM-L-12-v2          P@10 0.268 (+0.019 [+0.006,+0.032])  MRR 0.531 | RRF P@10 0.275 (+0.026 [+0.017,+0.035])  MRR 0.536 | reranker 749 ms, total mediana 1616 ms (8 hilos)
+== reranker, consultas 2015-06, full=0
+300 consultas de eval/2015-06.jsonl; top-30 de hnz (híbrida, todo out/); el reranker lee título + fragmento (lo que devuelve hnz)
+  consulta normal de hnz (k=10, fragmentos): mediana 264 ms, p90 359 ms
+  candidatos top-30 (fragmentos): mediana 442 ms, p90 629 ms
+  hnz híbrida (sin reranker)       P@10 0.249  MRR 0.516
+  ms-marco-MiniLM-L-6-v2           P@10 0.238 (-0.011 [-0.025,+0.003])  MRR 0.506 | RRF P@10 0.247 (-0.002 [-0.011,+0.006])  MRR 0.519 | reranker 189 ms, total mediana 668 ms (8 hilos)
+  ms-marco-MiniLM-L-12-v2          P@10 0.236 (-0.013 [-0.026,+0.001])  MRR 0.508 | RRF P@10 0.250 (+0.001 [-0.007,+0.010])  MRR 0.521 | reranker 364 ms, total mediana 848 ms (8 hilos)
+== listo 22:14

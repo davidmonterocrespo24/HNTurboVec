@@ -84,6 +84,7 @@ Latencias medidas: ver la tabla de [README.md](README.md) y E26 en la bitácora.
 ## Pendiente / mejoras
 - [ ] Construcción completa de los 239 meses (días de cómputo).
 - [ ] LM específico de HN (entrenado en GPU): mejor compresión con menos parámetros.
-- [x] Reranker cross-encoder (equivalente open source a Jev/System One), probado en E26: +5-10 % de
-      P@10 por 0,4-0,8 s más por consulta en CPU → no por defecto; quedan por probar los grandes.
+- [x] Reranker cross-encoder (equivalente open source a Jev/System One), probado en E26: +6-10 % de
+      P@10 (significativo) leyendo el texto completo de 30 candidatos, a 0,6-1,6 s por consulta en
+      CPU; con fragmentos no mejora en el nivel frío → no por defecto; quedan por probar los grandes.
 - [ ] Capa de etiquetas/grafo por temas (exploración, enrutado) — opcional (E08).
