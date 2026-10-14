@@ -130,15 +130,21 @@ impl QueryLut {
 }
 
 impl VecIndex {
-    pub fn open(dir: &Path, bits: usize) -> Result<Self> {
+    pub fn open(dir: &Path, bits: usize, n_docs: usize) -> Result<Self> {
         let codes = unsafe { Mmap::map(&File::open(dir.join("vec.bin")).context("vec.bin")?)? };
         let hb = std::fs::read(dir.join("vec.has"))?;
-        let has = hb.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+        let has: Vec<u64> = hb.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
         let nbytes = bits / 8;
-        if bits == 0 || bits % 64 != 0 || codes.len() % nbytes != 0 {
-            bail!("vec.bin ({} bytes) no cuadra con vec_bits = {bits} del manifiesto", codes.len());
+        // un vec.bin de otro ancho (p.ej. un `index` interrumpido antes de escribir el manifiesto)
+        // puede ser múltiplo del tamaño del código por casualidad: se exige el tamaño exacto
+        if bits == 0 || bits % 64 != 0 || codes.len() != n_docs * nbytes || hb.len() % 8 != 0 || has.len() * 64 < n_docs {
+            bail!(
+                "vec.bin ({} B) / vec.has ({} B) no cuadran con {n_docs} docs de {bits} bits del manifiesto: rehaga `hnz index`",
+                codes.len(),
+                hb.len()
+            );
         }
-        Ok(Self { n: codes.len() / nbytes, codes, has, nbytes })
+        Ok(Self { n: n_docs, codes, has, nbytes })
     }
 
     #[inline]
@@ -154,7 +160,7 @@ impl VecIndex {
     /// Top-k en [lo, hi): Hamming (256 bits) -> `cand` candidatos -> asimétrico.
     pub fn search(&self, q: &QueryLut, lo: usize, hi: usize, cand: usize, k: usize) -> Vec<(u32, f32)> {
         let hi = hi.min(self.n);
-        if lo >= hi {
+        if lo >= hi || cand == 0 || k == 0 {
             return Vec::new();
         }
         let cands: Vec<u32> = if hi - lo <= cand {

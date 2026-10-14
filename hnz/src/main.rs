@@ -219,6 +219,9 @@ enum Cmd {
 }
 
 fn make_query(text: &str, s: &SearchArgs) -> Result<Query> {
+    if !(s.c_bm25.is_finite() && s.c_bm25 > 0.0 && s.w_bm25.is_finite() && s.w_bm25 >= 0.0) {
+        bail!("--c-bm25 debe ser > 0 y --w-bm25 >= 0 (son {} y {})", s.c_bm25, s.w_bm25);
+    }
     let types = s
         .r#type
         .iter()

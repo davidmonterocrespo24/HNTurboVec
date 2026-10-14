@@ -8,13 +8,17 @@ y recuperación literal de los resultados. Diseño y mediciones en [`../doc/`](.
   compila con `target-cpu=x86-64-v3` (`hnz/.cargo/config.toml`). AVX-VNNI se usa si existe; el
   resultado del LM es idéntico con o sin él.
 - Windows: Rust `stable-x86_64-pc-windows-gnu` y GCC (WinLibs) en el PATH para compilar.
-- Entorno Python solo para preparar modelos y embeddings (torch CPU primero, desde su índice):
+- Entorno Python solo para preparar modelos y embeddings (torch CPU primero, desde su índice),
+  desde la raíz del proyecto:
   ```bash
   uv venv .venv --python 3.12
   uv pip install --python .venv -r requirements-torch.txt --index-url https://download.pytorch.org/whl/cpu
   uv pip install --python .venv -r requirements.txt
-  python prepare_models.py     # crea models/: EmbeddingGemma 2 (IR), tokenizador, LM .hnzlm
+  .venv\Scripts\activate       # PowerShell/cmd (en Git Bash: source .venv/Scripts/activate)
+  python prepare_models.py     # crea models/: EmbeddingGemma 2 (IR), tokenizadores, LM .hnzlm
   ```
+  Los comandos `python …` de este documento suponen el entorno activado (o usar
+  `.venv\Scripts\python` en su lugar).
 - En ejecución, el embedding de consultas usa `openvino_c.dll` (del paquete Python `openvino`, o de
   una instalación de OpenVINO): opción `--ov-libs` o variable `HNZ_OV_LIBS`.
 
@@ -27,8 +31,11 @@ Todo HN, por años y reanudable: `python pipeline.py --years 2006-2026` (ver su 
 ejecutarlo baja los meses que han cambiado en el dataset (el mes en curso se publica a medias),
 recalcula sus embeddings y reconstruye solo los años afectados; un segmento nunca se reconstruye
 solo por cambiar de nivel: `--retier` enfría a LM los años que ya no son calientes (con
-`--delete-old`, verificando todo antes de borrar el original). Sin conexión usa los Parquet locales,
-y si se borraron Parquet ya archivados no reconstruye el año (perdería datos).
+`--delete-old`, verificando todo antes de borrar el original). Un año ya construido e indexado y al
+día con el dataset no vuelve a bajar ni a embeber nada, así que sus Parquet y embeddings se pueden
+borrar (salvo los del año en curso); si faltan Parquet ya archivados no reconstruye el año
+(perdería datos), y no toca segmentos construidos a mano (sin `sources.json`). Si el dataset no
+responde se detiene; `--offline` trabaja solo con los Parquet locales.
 A mano, por segmentos:
 ```bash
 hnz build --out out/seg-2024-01 --tier zstd data/2024/2024-01.parquet                 # caliente

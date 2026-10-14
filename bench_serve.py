@@ -1,13 +1,23 @@
 """Latencias reales del servidor hnz (modelos cargados una vez, como en uso diario).
-Uso: python bench_serve.py   (con out/ construido y hnz compilado en hnz/target/release)"""
-import json, subprocess, sys, time, urllib.parse, urllib.request, os
+
+Cada caso se mide con el servidor recién arrancado (caché L1 vacía), sin caché L2 en disco y con N
+consultas DISTINTAS (títulos de eval/*.jsonl): se da la mediana y el p90 (una sola consulta con la
+caché caliente no es representativa, E26). Después, los escenarios de caché a propósito: el mismo
+texto completo la 1ª vez, repetido (L1) y tras reiniciar el servidor (L2 en disco).
+Uso: python bench_serve.py [--n 30]   (con out/ construido y hnz compilado en hnz/target/release)
+"""
+import argparse, json, os, subprocess, time, urllib.parse, urllib.request
+import numpy as np
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-HNZ = os.path.join(ROOT, 'hnz', 'target', 'release', 'hnz.exe')
+HNZ = os.path.join(ROOT, 'hnz', 'target', 'release', 'hnz.exe' if os.name == 'nt' else 'hnz')
 PORT = 8099
+L2 = os.path.join(ROOT, 'out', '_cache_l2.bin')
 
 
-def start():
+def start(clear_l2=True):
+    if clear_l2 and os.path.exists(L2):
+        os.remove(L2)
     p = subprocess.Popen([HNZ, 'serve', '--root', 'out', '--port', str(PORT)], cwd=ROOT,
                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     t0 = time.time()
@@ -21,6 +31,11 @@ def start():
             time.sleep(0.2)
 
 
+def stop(p):
+    p.terminate()
+    p.wait()
+
+
 def q(params):
     url = f'http://127.0.0.1:{PORT}/search?' + urllib.parse.urlencode(params)
     t0 = time.time()
@@ -28,10 +43,7 @@ def q(params):
     wall = (time.time() - t0) * 1000
     if 'error' in r:
         raise SystemExit(r['error'])
-    tiers = {}
-    for x in r['results']:
-        tiers[x['tier']] = tiers.get(x['tier'], 0) + 1
-    return r['ms'], wall, tiers, r['results']
+    return r['ms'], wall, r['results']
 
 
 def item(i):
@@ -40,43 +52,84 @@ def item(i):
     return r.get('ms'), (time.time() - t0) * 1000
 
 
-def show(label, ms, wall, tiers):
-    print(f'{label:<58} total {ms["total"]:7.1f} ms (embedding {ms["embedding"]:5.1f}, búsqueda {ms["search"]:5.1f}, '
-          f'descompresión {ms["fetch"]:7.1f}) | pared {wall:7.1f} ms | {tiers}', flush=True)
+def titles(m):
+    return [json.loads(l)['q'] for l in open(os.path.join(ROOT, 'eval', f'{m}.jsonl'), encoding='utf-8-sig') if l.strip()]
 
 
-p, t_start = start()
-print(f'servidor listo en {t_start:.1f} s (carga de segmentos + modelos)')
-Q1 = 'how do I deal with burnout as a software engineer'
-Q2 = 'is the iPad going to kill netbooks'
-Q3 = 'rust async runtime'
-q({'q': 'warmup', 'k': 3})
-for label, params in [
-    ('caliente (2024), híbrida, k=10', {'q': Q1, 'k': 10, 'from': '2024', 'to': '2024'}),
-    ('caliente (2024), palabras, k=10', {'q': Q3, 'k': 10, 'from': '2024', 'to': '2024', 'mode': 'keyword'}),
-    ('frío (2010), híbrida, k=10, fragmentos', {'q': Q2, 'k': 10, 'from': '2010', 'to': '2010'}),
-    ('frío (2015), híbrida, k=10, fragmentos', {'q': Q1, 'k': 10, 'from': '2015', 'to': '2015'}),
-    ('todo el archivo, híbrida, k=10, fragmentos', {'q': Q1, 'k': 10}),
-    ('todo el archivo, híbrida, k=100, fragmentos', {'q': Q1, 'k': 100}),
-    ('filtro tipo job + palabras (recorrido exacto)', {'q': Q3, 'k': 10, 'type': 'job', 'mode': 'keyword'}),
-    ('filtro autor (by=pg), híbrida', {'q': 'startups', 'k': 10, 'by': 'pg'}),
-    ('filtro tipo story 2015, híbrida', {'q': Q1, 'k': 10, 'type': 'story', 'from': '2015', 'to': '2015'}),
-    ('sin texto: stories más recientes de 2024', {'q': '', 'k': 10, 'type': 'story', 'from': '2024'}),
-    ('frío (2010), k=10, TEXTO COMPLETO (1ª vez)', {'q': Q2, 'k': 10, 'from': '2010', 'to': '2010', 'full': 1}),
-    ('frío (2010), k=10, texto completo, repetida (caché L1)', {'q': Q2, 'k': 10, 'from': '2010', 'to': '2010', 'full': 1}),
-]:
-    ms, wall, tiers, res = q(params)
-    show(label, ms, wall, tiers)
-cold_ids = [x['id'] for x in res if x['tier'] == 'lm']
-p.terminate(); p.wait()
-p, t_start = start()
-print(f'(servidor reiniciado en {t_start:.1f} s: la caché L1 se vacía, la L2 en disco persiste)')
-ms, wall, tiers, _ = q({'q': Q2, 'k': 10, 'from': '2010', 'to': '2010', 'full': 1})
-show('frío (2010), k=10, texto completo, tras reinicio (caché L2)', ms, wall, tiers)
-# un ítem frío no cacheado, completo, bajo demanda (/item)
-ms2, wall2, tiers2, res2 = q({'q': Q1, 'k': 20, 'from': '2015', 'to': '2015'})
-fresh = [x for x in res2 if x['tier'] == 'lm' and x['partial']]
-if fresh:
-    m, w = item(fresh[-1]['id'])
-    print(f'{"/item/<id> de un registro frío (completo, sin caché)":<58} {m:7.1f} ms en servidor | pared {w:7.1f} ms')
-p.terminate(); p.wait()
+def row(label, ms, wall, lm_frac):
+    tot = [x['total'] for x in ms]
+    med = lambda k: np.median([x[k] for x in ms])
+    print(f'{label:<50} total mediana {np.median(tot):7.1f} ms, p90 {np.percentile(tot, 90):7.1f} '
+          f'(embedding {med("embedding"):5.1f}, búsqueda {med("search"):5.1f}, texto {med("fetch"):7.1f}) '
+          f'| pared {np.median(wall):7.1f} ms | {lm_frac:.0%} del nivel LM', flush=True)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--n', type=int, default=30)
+    a = ap.parse_args()
+    T = {m: titles(m) for m in ('2024-01', '2010-06', '2015-06')}
+    words = ['rust', 'python', 'remote', 'engineer', 'startup', 'data', 'security', 'golang', 'design', 'growth']
+    cases = [
+        ('caliente (2024), híbrida, k=10', [dict(q=t, k=10, **{'from': '2024', 'to': '2024'}) for t in T['2024-01']]),
+        ('caliente (2024), palabras, k=10', [dict(q=t, k=10, mode='keyword', **{'from': '2024', 'to': '2024'}) for t in T['2024-01']]),
+        ('todo el archivo, híbrida, k=10 (consultas 2024)', [dict(q=t, k=10) for t in T['2024-01']]),
+        ('todo el archivo, híbrida, k=10 (consultas 2010)', [dict(q=t, k=10) for t in T['2010-06']]),
+        ('frío (2010), híbrida, k=10, fragmentos', [dict(q=t, k=10, **{'from': '2010', 'to': '2010'}) for t in T['2010-06']]),
+        ('frío (2015), híbrida, k=10, fragmentos', [dict(q=t, k=10, **{'from': '2015', 'to': '2015'}) for t in T['2015-06']]),
+        ('frío (2010), híbrida, k=10, texto completo', [dict(q=t, k=10, full=1, **{'from': '2010', 'to': '2010'}) for t in T['2010-06']]),
+        ('todo el archivo, híbrida, k=100, fragmentos', [dict(q=t, k=100) for t in T['2015-06']]),
+        ('filtro tipo job + palabras (recorrido exacto)', [dict(q=w, k=10, type='job', mode='keyword') for w in words]),
+        ('filtro autor, híbrida', [dict(q=t, k=10, by=b) for t, b in zip(T['2015-06'], ['pg', 'tptacek', 'patio11', 'jacquesm', 'dang'] * 10)]),
+        ('sin texto: lo más reciente con filtros', [dict(q='', k=10, type=ty, **{'from': y}) for ty in ('story', 'comment', 'job') for y in ('2010', '2015', '2024')]),
+    ]
+    p, t_start = start()
+    print(f'servidor listo en {t_start:.1f} s (carga de segmentos + modelos); {a.n} consultas distintas por caso')
+    stop(p)
+    for label, params in cases:
+        p, _ = start()
+        try:
+            q({'q': 'warmup', 'k': 3, 'mode': 'keyword'})
+            ms, wall, lm, n = [], [], 0, 0
+            for prm in params[:a.n]:
+                m, w, res = q(prm)
+                ms.append(m); wall.append(w)
+                lm += sum(r['tier'] == 'lm' for r in res); n += len(res)
+            row(label, ms, wall, lm / max(n, 1))
+        finally:
+            stop(p)
+    # escenarios de caché, a propósito: las mismas consultas con texto completo
+    prm = [dict(q=t, k=10, full=1, **{'from': '2010', 'to': '2010'}) for t in T['2010-06'][100:100 + min(a.n, 20)]]
+    p, _ = start()
+    try:
+        first = [q(x) for x in prm]
+        again = [q(x) for x in prm]
+    finally:
+        stop(p)
+    p, t_restart = start(clear_l2=False)
+    try:
+        after = [q(x) for x in prm]
+    finally:
+        stop(p)
+    row('frío (2010), texto completo, 1ª vez', [x[0] for x in first], [x[1] for x in first], 1)
+    row('  la misma consulta repetida (caché L1)', [x[0] for x in again], [x[1] for x in again], 1)
+    row(f'  tras reiniciar en {t_restart:.1f} s (caché L2 en disco)', [x[0] for x in after], [x[1] for x in after], 1)
+    # /item/<id> de registros fríos no cacheados (completos, bajo demanda)
+    p, _ = start()
+    try:
+        ids = []
+        for t in T['2015-06'][200:200 + 10]:
+            _, _, res = q(dict(q=t, k=5, **{'from': '2015', 'to': '2015'}))
+            ids += [r['id'] for r in res if r['tier'] == 'lm' and r['partial']][:1]
+    finally:
+        stop(p)
+    p, _ = start()   # caché vacía: esos registros solo se habían leído como fragmento
+    try:
+        w = [item(i)[1] for i in ids]
+        print(f'{"/item/<id> frío (completo, sin caché)":<50} mediana {np.median(w):7.1f} ms, p90 {np.percentile(w, 90):7.1f} ms ({len(w)} ítems)')
+    finally:
+        stop(p)
+
+
+if __name__ == '__main__':
+    main()

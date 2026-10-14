@@ -25,29 +25,31 @@ Estado: **implementado y verificado sobre 3 meses de muestra** (2010-06 y 2015-0
 | `manifest.json` | rango de ids/fechas, nivel, modelo LM, `build_id` | — | — |
 | `meta.bin/.idx`, `authors.zst` | id/time/parent/tipo/dead/deleted/score/descendants/autor/poll/parts, bloques de 1024, varint delta + zstd | 5,5 | 5,7 |
 | `meta.flags.zst` | 1 B/doc (tipo, dead, deleted) para filtrar sin descomprimir; se carga en RAM al abrir | 0,10 | 0,16 |
-| `text.bin/.idx/.dict` (**nivel zstd**) | bloques de 16, columnar, HTML→forma compacta reversible (2 dialectos, enlaces truncados), zstd-19 + diccionario | 116,6 | — |
+| `text.bin/.idx/.dict` (**nivel zstd**) | bloques de 16, columnar, HTML→forma compacta reversible (2 dialectos, enlaces truncados), zstd-19 + diccionario | 116,8 | — |
 | `lm.bin/.idx/.json` (**nivel LM**) | por registro: cabecera varint + byte de comprobación + flujo aritmético; grupos de 32 | — | 64,4 |
 | `bm25.fst/.post/.norms/.json` | FST de términos (df=1 inline), postings en bloques de 128 con BitPacker4x, normas 1 B, MaxScore; sin poda (E25) | 49,2 | 53,9 |
 | `vec.bin/.has` | signo de las dims de EmbeddingGemma 2: 768 bits (caliente) / 512 bits (frío, E19) | 96,1 | 64,1 |
 | **Total** (`hnz stats`, E26) | | **267,6** | **188,2** |
 
 Proyección para ~49,3 M ítems con los 2 últimos años en caliente (~9 M) y el resto en frío:
-≈ 9 M × 267,6 B + 40,3 M × 188 B ≈ **10,0 GB**, más los modelos (~0,35 GB).
+≈ 9 M × 267,6 B + 40,3 M × 188 B ≈ **10,0 GB**, más los modelos en ejecución (0,38 GB: embedder int8, LM y tokenizadores) → **≈ 10,4 GB** en total.
 
 ## Consulta
 ```
 consulta (texto, k ≤ 500, desde/hasta, tipo, autor)
-  ├─ embedding: EmbeddingGemma 2 (IR OpenVINO int8, CPU) desde Rust ................ ~25-40 ms
+  ├─ sin texto: listado de lo más reciente que cumple los filtros (sin embedding)
+  ├─ embedding: EmbeddingGemma 2 (IR OpenVINO int8, CPU) desde Rust ................ ~20-25 ms
   ├─ por segmento que solapa las fechas (rayon):
   │    · con autor o tipos raros (job/poll): recorrido exacto de metadatos + puntuación
-  │    · si no: vectores (Hamming 256 bits → asimétrico) + BM25 (MaxScore con IDF global),
-  │      filtrados al generar candidatos; si no llegan a k se repite con 4x candidatos
-  ├─ fusión → top-k ........................................................ ~5-15 ms
+  │    · si no: vectores (Hamming 256 bits → asimétrico) + BM25 (MaxScore con IDF global);
+  │      filtros con la columna de banderas en RAM, en orden de puntuación; si el segmento no
+  │      llega a k y su lista de candidatos se recortó, se repite solo él con ×4 y luego ×16
+  │    · solo docs con señal: algún término (palabras), vector (vectorial), una de las dos (híbrida)
+  ├─ fusión → top-k ........................................................ ~3-10 ms
   └─ recuperar: zstd (µs) | nivel LM: resultados + títulos del hilo en UN lote (KV-cache,
      pool de hilos propio); fragmento de 64 tokens del cuerpo por defecto, completo bajo demanda
 ```
-Latencias medidas (E24): caliente ~50 ms; frío con fragmentos ~0,3-0,45 s; frío con texto completo
-~0,6 s la 1ª vez, ~46 ms repetida (L1), ~83 ms tras reiniciar (L2).
+Latencias medidas: ver la tabla de [README.md](README.md) y E26 en la bitácora.
 
 ## Caché por capas
 - **L1 RAM**: registros del nivel LM ya descomprimidos (20.000) y títulos de stories.
@@ -82,5 +84,6 @@ Latencias medidas (E24): caliente ~50 ms; frío con fragmentos ~0,3-0,45 s; frí
 ## Pendiente / mejoras
 - [ ] Construcción completa de los 239 meses (días de cómputo).
 - [ ] LM específico de HN (entrenado en GPU): mejor compresión con menos parámetros.
-- [ ] Reranker cross-encoder (equivalente open source a Jev/System One): prueba interrumpida.
+- [x] Reranker cross-encoder (equivalente open source a Jev/System One), probado en E26: +5-10 % de
+      P@10 por 0,4-0,8 s más por consulta en CPU → no por defecto; quedan por probar los grandes.
 - [ ] Capa de etiquetas/grafo por temas (exploración, enrutado) — opcional (E08).

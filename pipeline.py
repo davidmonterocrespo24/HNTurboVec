@@ -9,18 +9,25 @@ Pasos por año (se salta lo que ya está hecho):
      (se reconstruye si cambian los meses o su contenido; nunca solo por el nivel: un segmento ya
      construido se enfría con `hnz retier`, o con --retier aquí)
   4. índice vectorial del año: 768 bits en zstd, 512 en LM (E19)
+Un año ya construido e indexado con los mismos meses y tamaños que el dataset no vuelve a bajar
+ni a embeber nada: sus Parquet y embeddings se pueden borrar para ahorrar espacio (salvo los del
+año en curso, que se reconstruye entero cuando el dataset añade un mes). Los segmentos sin
+sources.json (construidos a mano con `hnz build`) no se tocan.
 
-Ejemplos:
+Ejemplos (con el entorno .venv activado, o con .venv\\Scripts\\python en vez de python):
   python pipeline.py --years 2006-2026                       # todo HN (caliente = últimos 2 años)
   python pipeline.py --years 2024 --steps download,embed     # solo preparar 2024
   python pipeline.py --years 2006-2015 --all-zstd            # rápido (horas); enfriar luego con --retier
   python pipeline.py --years 2006-2024 --steps build --retier   # enfriar a LM los años fríos ya construidos
+  python pipeline.py --years 2026 --offline                  # sin conexión: solo Parquet locales
 
 La compresión LM de todo HN tarda días en CPU: una estrategia práctica es construir todo con
 --all-zstd y enfriar después los años viejos con --retier (o `hnz retier --tier lm`), que
 conserva el original como <seg>.old salvo con --delete-old (verifica todo antes de borrarlo).
-Sin conexión se trabaja con los Parquet locales. Los segmentos de un mismo out/ no pueden
-solaparse: no mezcle segmentos mensuales (seg-YYYY-MM) y anuales (seg-YYYY) del mismo periodo.
+Si el dataset no responde, el pipeline se detiene (no pasa a modo sin conexión en silencio); con
+--offline el límite caliente/frío sale del último año visto en línea (out/pipeline_state.json).
+Los segmentos de un mismo out/ no pueden solaparse: no mezcle segmentos mensuales (seg-YYYY-MM) y
+anuales (seg-YYYY) del mismo periodo.
 """
 import argparse, glob, json, os, re, subprocess, sys, time
 import numpy as np
@@ -48,20 +55,24 @@ def years_arg(s):
 
 _listing = None
 _online = True
+STATE = os.path.join(ROOT, 'out', 'pipeline_state.json')   # último año visto en el dataset
 
 
 def listing():
     """Ficheros mensuales del dataset: {año: {ruta relativa: tamaño}} (solo YYYY/YYYY-MM.parquet).
-    Sin conexión (o con HF_HUB_OFFLINE=1), los Parquet locales."""
-    global _listing, _online
+    Con --offline (o HF_HUB_OFFLINE=1), los Parquet locales. Un fallo de red NO pasa a modo sin
+    conexión en silencio: el límite caliente/frío y las descargas dependen del listado real."""
+    global _listing
     if _listing is None:
-        try:
-            from huggingface_hub import HfApi
-            tree = HfApi().list_repo_tree(REPO, path_in_repo='data', repo_type='dataset', recursive=True)
-            files = [(f.path, f.size) for f in tree if getattr(f, 'size', None) is not None]
-        except Exception as e:
-            _online = False
-            log(f'(sin acceso al dataset: {type(e).__name__}; se usan solo los Parquet locales)')
+        if _online:
+            try:
+                from huggingface_hub import HfApi
+                tree = HfApi().list_repo_tree(REPO, path_in_repo='data', repo_type='dataset', recursive=True)
+                files = [(f.path, f.size) for f in tree if getattr(f, 'size', None) is not None]
+            except Exception as e:
+                raise SystemExit(f'no se pudo listar el dataset {REPO} ({type(e).__name__}: {str(e)[:200]}): '
+                                 'reintente, o use --offline para trabajar solo con los Parquet locales')
+        else:
             files = [(os.path.relpath(p, ROOT).replace(os.sep, '/'), os.path.getsize(p))
                      for p in glob.glob(os.path.join(ROOT, 'data', '*', '*.parquet'))]
         _listing = {}
@@ -69,7 +80,27 @@ def listing():
             m = MONTH_RE.match(f)
             if m:
                 _listing.setdefault(int(m.group(1)), {})[f] = size
+        if _online and _listing:
+            os.makedirs(os.path.dirname(STATE), exist_ok=True)
+            json.dump({'dataset_max_year': max(_listing)}, open(STATE, 'w', encoding='utf-8'))
     return _listing
+
+
+def year_done(year):
+    """¿seg-YYYY ya está construido e indexado con los mismos meses y tamaños que el dataset?
+    Entonces no hay que bajar ni embeber nada (sus Parquet y embeddings pueden estar borrados)."""
+    seg = os.path.join(ROOT, 'out', f'seg-{year}')
+    man, side = os.path.join(seg, 'manifest.json'), os.path.join(seg, 'sources.json')
+    if not (os.path.exists(man) and os.path.exists(side)):
+        return False
+    if json.load(open(man, encoding='utf-8')).get('vec_bits', 0) == 0:
+        return False
+    built = json.load(open(side, encoding='utf-8')).get('sizes') or {}
+    avail = {os.path.basename(f): s for f, s in listing().get(year, {}).items()}
+    if _online:
+        return built == avail
+    # sin conexión solo se ven los Parquet locales: hecho si ninguno es nuevo o distinto
+    return all(built.get(n) == s for n, s in avail.items())
 
 
 def download(year):
@@ -104,7 +135,10 @@ def emb_fresh(p):
     if not (os.path.exists(e) and os.path.exists(i)):
         return False
     if not os.path.exists(side):
-        # embeddings de antes del registro: se adoptan con el tamaño actual del Parquet
+        # embeddings sin registro (embed_month.py a mano o pipeline anterior): se adoptan solo si
+        # son posteriores al Parquet; uno recién rebajado es más nuevo que ellos -> se recalculan
+        if os.path.getmtime(i) < os.path.getmtime(p):
+            return False
         json.dump({'parquet_size': os.path.getsize(p)}, open(side, 'w', encoding='utf-8'))
         return True
     return json.load(open(side, encoding='utf-8')).get('parquet_size') == os.path.getsize(p)
@@ -137,9 +171,20 @@ def seg_tier(seg):
 
 def build(year, tier, a):
     seg = os.path.join(ROOT, 'out', f'seg-{year}')
-    exists = os.path.exists(os.path.join(seg, 'manifest.json'))
+    man = os.path.join(seg, 'manifest.json')
+    exists = os.path.exists(man)
     side = os.path.join(seg, 'sources.json')
+    # registro provisional, escrito ANTES de `hnz build` (que sustituye la carpeta entera)
+    pending = seg + '.sources.json'
+    if exists and not os.path.exists(side) and os.path.exists(pending) and os.path.getmtime(man) >= os.path.getmtime(pending):
+        # el build terminó pero el proceso murió antes de mover el registro: se adopta
+        os.replace(pending, side)
     prev = json.load(open(side, encoding='utf-8')) if exists and os.path.exists(side) else None
+    if exists and prev is None:
+        # construido fuera del pipeline (hnz build a mano): no se sabe qué meses contiene y
+        # reconstruirlo con los Parquet locales podría perder datos
+        log(f'  {os.path.basename(seg)} no tiene sources.json (no lo construyó pipeline.py): no se toca')
+        return None
     ps = months(year)
     src = [os.path.basename(p) for p in ps]
     sizes = {os.path.basename(p): os.path.getsize(p) for p in ps}
@@ -152,16 +197,15 @@ def build(year, tier, a):
         if prev.get('months') == src and prev.get('sizes') == sizes:
             return retier(seg, tier, a)
         log(f'  los meses de {year} o su contenido han cambiado: se reconstruye')
-    elif exists and not ps:
-        return retier(seg, tier, a)
     if not ps:
         log(f'  (sin Parquet para {year}; no se construye)')
         return None
     check_no_monthly_overlap(year)
     log(f'  segmento {year} nivel {tier} ({len(ps)} meses)')
+    json.dump({'months': src, 'sizes': sizes, 'tier': tier}, open(pending, 'w', encoding='utf-8'))
     cmd = [HNZ, 'build', '--out', seg, '--tier', tier] + (['--lm', a.lm] if tier == 'lm' else []) + ps
     subprocess.run(cmd, check=True, cwd=ROOT)
-    json.dump({'months': src, 'sizes': sizes, 'tier': tier}, open(side, 'w', encoding='utf-8'))
+    os.replace(pending, side)
     return seg
 
 
@@ -185,10 +229,10 @@ def index(seg, a):
     if man.get('vec_bits', 0) == bits or (man.get('vec_bits', 0) > 0 and not a.reindex):
         return
     side = os.path.join(seg, 'sources.json')
-    if os.path.exists(side):
-        names = [x.replace('.parquet', '') for x in json.load(open(side, encoding='utf-8'))['months']]
-    else:
-        names = [os.path.basename(p).replace('.parquet', '') for p in months(int(os.path.basename(seg)[4:8]))]
+    if not os.path.exists(side):
+        log(f'  ({os.path.basename(seg)} sin sources.json: no se sabe qué embeddings le corresponden; no se indexa)')
+        return
+    names = [x.replace('.parquet', '') for x in json.load(open(side, encoding='utf-8'))['months']]
     if not names:
         log(f'  (sin meses conocidos para {os.path.basename(seg)}: no se indexa)')
         return
@@ -235,34 +279,49 @@ def main():
     ap.add_argument('--delete-old', action='store_true', help='con --retier: verificar todo y borrar el original')
     ap.add_argument('--reindex', action='store_true', help='rehacer los vectores si tienen otros bits que los del nivel')
     ap.add_argument('--steps', default='download,embed,build,index')
+    ap.add_argument('--offline', action='store_true', help='sin conexión: solo los Parquet locales (también con HF_HUB_OFFLINE=1)')
     ap.add_argument('--device', default='GPU')
     ap.add_argument('--lm', default=os.path.join('models', 'lm-pythia-70m.hnzlm'))
     a = ap.parse_args()
     steps = set(a.steps.split(','))
+    global _online
+    _online = not (a.offline or os.environ.get('HF_HUB_OFFLINE', '').lower() in ('1', 'true', 'yes', 'on'))
+    if not _online:
+        log('sin conexión: solo se usan los Parquet locales')
     # el límite caliente/frío se fija respecto al año más reciente del DATASET (no del tramo pedido),
-    # para que ejecutar por tramos dé el mismo resultado
+    # para que ejecutar por tramos dé el mismo resultado; sin conexión, el último año visto en línea
     if a.all_zstd:
         hot_from = min(a.years)
         log('todo en nivel zstd')
     else:
         if a.hot_from is not None:
             hot_from = a.hot_from
-        elif listing():
+        elif _online and listing():
             hot_from = max(listing()) - a.hot_years + 1
+        elif not _online and os.path.exists(STATE):
+            hot_from = json.load(open(STATE, encoding='utf-8'))['dataset_max_year'] - a.hot_years + 1
         else:
-            raise SystemExit('no hay Parquet locales ni acceso al dataset: indique --hot-from')
+            raise SystemExit('no se sabe cuál es el año más reciente del dataset: indique --hot-from')
         log(f'nivel zstd para años >= {hot_from}; nivel LM para el resto')
     for y in a.years:
         tier = 'zstd' if y >= hot_from else 'lm'
         log(f'== {y} (nivel {tier})')
-        if 'download' in steps:
+        if ('download' in steps or 'embed' in steps) and year_done(y):
+            # ya construido e indexado y al día: no rebajar Parquet ni recalcular embeddings
+            # que se hayan borrado para ahorrar espacio
+            log(f'  seg-{y} completo y al día con el dataset: no se baja ni se embebe nada')
+            steps_y = steps - {'download', 'embed'}
+        else:
+            steps_y = steps
+        if 'download' in steps_y:
             download(y)
-        if 'embed' in steps:
+        if 'embed' in steps_y:
             embed(y, a.device)
         seg = os.path.join(ROOT, 'out', f'seg-{y}')
-        if 'build' in steps:
+        if 'build' in steps_y:
             seg = build(y, tier, a)
-        if seg and 'index' in steps and os.path.exists(os.path.join(seg, 'manifest.json')):
+        if seg and 'index' in steps_y and os.path.exists(os.path.join(seg, 'manifest.json')) \
+                and os.path.exists(os.path.join(seg, 'sources.json')):
             index(seg, a)
     log('listo')
 

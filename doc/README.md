@@ -37,7 +37,7 @@ importa es el uso diario: **rápido, preciso y compacto**. Implementación en **
 | | Caliente (zstd) | Frío (LM) |
 |---|---|---|
 | Tamaño por ítem (texto + metadatos + BM25 + vectores) | 267,6 B | 187-188 B |
-| Todo HN (~49,3 M; 2 años en caliente) | **≈ 10,0 GB** + modelos 0,35 GB | |
+| Todo HN (~49,3 M; 2 años en caliente) | **≈ 10,0 GB** + modelos 0,38 GB (≈ 10,4 GB) | |
 | Búsqueda híbrida (embedding + búsqueda + texto, k=10) | 24-29 ms | 280-350 ms (fragmentos) |
 | Texto completo de 10 resultados fríos | — | 464 ms; 25 ms en caché RAM, 79 ms en caché disco |
 | Abrir el archivo | 180 ms | |
@@ -49,7 +49,7 @@ hilos parecidos de otros años cuentan como fallos (E26).
 ## Entorno
 
 - Python: `.venv` creado con `uv` (Python 3.12) e instalado desde [`../requirements-torch.txt`](../requirements-torch.txt) (torch CPU, índice de PyTorch) y [`../requirements.txt`](../requirements.txt)
-  (versiones fijadas). Modelos: `python prepare_models.py`.
+  (versiones fijadas). Modelos: `.venv\Scripts\python prepare_models.py` (o con el entorno activado; ver `hnz/README.md`).
 - Datos: dataset `open-index/hacker-news` de Hugging Face: **239 Parquet mensuales** (2006-10 →
   2026-08) más ficheros horarios de los últimos días (`today/…`) y estadísticas (628 ficheros en total).
   Muestras descargadas: 2010-06, 2015-06 y 2024-01.

@@ -392,9 +392,9 @@ Notas de medición: las velocidades de E17 y E20 se midieron con muestras y carg
 - Comprimir los dos meses LM a la vez: 63 + 58 reg/s (la mitad de hilos cada uno): igual que uno tras otro.
 
 **Medidas finales** (`results_final.txt`, CPU en reposo):
-- Tamaño (`hnz stats`): caliente **267,6 B/doc** (texto 116,6 · vectores 96,1 · BM25 49,2 · meta 5,6);
+- Tamaño (`hnz stats`): caliente **267,6 B/doc** (texto 116,8 · vectores 96,1 · BM25 49,2 · meta 5,5 · banderas 0,1);
   frío **187,0 / 188,2 B/doc** (texto LM 64,4 · vectores 64,1 · BM25 53,9 · meta 5,9). El BM25 frío
-  crece ~5 B/doc al quitar la poda (E25). Proyección para todo HN: **≈ 10,0 GB** + 0,35 GB de modelos.
+  crece ~5 B/doc al quitar la poda (E25). Proyección para todo HN: **≈ 10,0 GB** + 0,38 GB de modelos (≈ 10,4 GB en total).
 - Abrir el archivo: **180 ms** (antes ~950 ms construyendo las banderas al abrir).
 - Latencias con `bench_serve.py` (modelos cargados; k=10 salvo indicación):
 | Consulta | Total | Embedding | Búsqueda | Texto |

@@ -97,20 +97,28 @@ def evaluate(qs, mats):
     order = list(mats)
     allroot = np.concatenate([data[m][2] for m in order])
     allid = np.concatenate([data[m][1] for m in order])
-    p10 = mrr = 0.0
+    p10, rr = np.zeros(len(qs)), np.zeros(len(qs))
     for qi, q in enumerate(qs):
         s = np.concatenate([mats[m][qi] for m in order])
         s = np.where(allid == q['story'], -9.0, s)
         top = np.argpartition(-s, 10)[:10]
         top = top[np.argsort(-s[top])]
         rel = allroot[top] == q['story']
-        p10 += rel.sum() / 10
-        mrr += next((1 / (i + 1) for i, r in enumerate(rel) if r), 0)
-    return p10 / len(qs), mrr / len(qs)
+        p10[qi] = rel.sum() / 10
+        rr[qi] = next((1 / (i + 1) for i, r in enumerate(rel) if r), 0)
+    return p10, rr   # por consulta (para comparaciones pareadas)
+
+
+def boot_ci(d, B=4000, seed=0):
+    """IC 95 % de la media de una diferencia pareada por consulta (bootstrap de consultas)."""
+    rng = np.random.default_rng(seed)
+    means = d[rng.integers(0, len(d), (B, len(d)))].mean(axis=1)
+    return np.percentile(means, 2.5), np.percentile(means, 97.5)
 
 
 print()
 print(f'{"variante (frío a 512 bits)":<36}' + ''.join(f'{"consultas " + m:>24}' for m in MONTHS) + f'{"media":>16}')
+per = {}   # (variante, conjunto) -> P@10 por consulta
 for name, f in VARIANTS.items():
     row, ps = [], []
     for em, (qs, Q) in evals.items():
@@ -118,7 +126,25 @@ for name, f in VARIANTS.items():
         for m in MONTHS:
             if m != HOT:
                 mats[m] = f(Q, data[m])
-        p, mr = evaluate(qs, mats)
-        row.append(f'P@10 {p:.3f} MRR {mr:.3f}')
-        ps.append(p)
+        p, rr = evaluate(qs, mats)
+        per[name, em] = p
+        row.append(f'P@10 {p.mean():.3f} MRR {rr.mean():.3f}')
+        ps.append(p.mean())
     print(f'{name:<36}' + ''.join(f'{r:>24}' for r in row) + f'{"P@10 " + format(np.mean(ps), ".3f"):>16}', flush=True)
+
+# diferencias pareadas frente a la puntuación de hnz (renormalizada), con IC 95 % por bootstrap
+BASE = 'renormalizada (hnz antes de E26)'
+print(f'\ndiferencia de P@10 frente a "{BASE}" (IC 95 %, bootstrap pareado de consultas):')
+print(f'{"variante":<36}' + ''.join(f'{"consultas " + m:>26}' for m in MONTHS) + f'{"las 900":>26}')
+for name in VARIANTS:
+    if name == BASE:
+        continue
+    cells, alld = [], []
+    for em in MONTHS:
+        d = per[name, em] - per[BASE, em]
+        alld.append(d)
+        lo, hi = boot_ci(d)
+        cells.append(f'{d.mean():+.3f} [{lo:+.3f},{hi:+.3f}]')
+    d = np.concatenate(alld)
+    lo, hi = boot_ci(d)
+    print(f'{name:<36}' + ''.join(f'{c:>26}' for c in cells) + f'{d.mean():+.3f} [{lo:+.3f},{hi:+.3f}]'.rjust(26), flush=True)

@@ -27,9 +27,16 @@ pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// periodo SIGUIENTE (para rangos inclusivos: --to 2015 incluye todo 2015).
 pub fn parse(s: &str, end: bool) -> Option<i64> {
     let p: Vec<&str> = s.trim().split('-').collect();
+    if p.len() > 3 {
+        return None;
+    }
     let y: i64 = p.first()?.parse().ok()?;
     let m: u32 = p.get(1).map_or(Some(1), |x| x.parse().ok())?;
     let d: u32 = p.get(2).map_or(Some(1), |x| x.parse().ok())?;
+    // fechas imposibles (2015-13, 2015-00, 2015-02-30) son un error, no se desbordan
+    if !(1..=12).contains(&m) || d < 1 || d > days_in_month(y, m) {
+        return None;
+    }
     let days = if !end {
         days_from_civil(y, m, d)
     } else {
@@ -46,6 +53,11 @@ pub fn parse(s: &str, end: bool) -> Option<i64> {
         }
     };
     Some(days * 86400)
+}
+
+pub fn days_in_month(y: i64, m: u32) -> u32 {
+    let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    (days_from_civil(ny, nm, 1) - days_from_civil(y, m, 1)) as u32
 }
 
 pub fn fmt(t: i64) -> String {
@@ -68,5 +80,15 @@ mod tests {
         assert_eq!(parse("2023", true), Some(1704067200));
         assert_eq!(parse("2023-12", true), Some(1704067200));
         assert_eq!(parse("2023-12-31", true), Some(1704067200));
+        // fechas imposibles: error en vez de desbordarse
+        assert_eq!(parse("2015-13", true), None);
+        assert_eq!(parse("2015-00", false), None);
+        assert_eq!(parse("2015-02-30", true), None);
+        assert_eq!(parse("2015-02-29", false), None);
+        assert!(parse("2016-02-29", false).is_some());
+        assert_eq!(parse("2015-06-31", false), None);
+        assert_eq!(parse("2015-06-01-05", false), None);
+        assert_eq!(days_in_month(2024, 2), 29);
+        assert_eq!(days_in_month(2023, 12), 31);
     }
 }

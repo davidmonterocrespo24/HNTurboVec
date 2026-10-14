@@ -151,7 +151,7 @@ impl Engine {
         for d in dirs {
             let s = Segment::open(&d)?;
             let bm25 = if d.join("bm25.fst").exists() { Some(Bm25::open(&d)?) } else { None };
-            let vec = if s.man.vec_bits > 0 && d.join("vec.bin").exists() { Some(VecIndex::open(&d, s.man.vec_bits)?) } else { None };
+            let vec = if s.man.vec_bits > 0 && d.join("vec.bin").exists() { Some(VecIndex::open(&d, s.man.vec_bits, s.man.n_docs)?) } else { None };
             segs.push(Seg { s, bm25, vec });
         }
         segs.sort_by_key(|x| x.s.man.id_min);
@@ -377,7 +377,7 @@ impl Engine {
                     let mut raw: Vec<u32> = Vec::new();
                     let mut saturated = false;
                     if let (Some(v), Some(l)) = (&sg.vec, &lut) {
-                        let c1 = q.vec_cand.unwrap_or((kc * 10).max(2000)).min((hi - lo) as usize);
+                        let c1 = q.vec_cand.unwrap_or((kc * 10).max(2000)).max(kc).min((hi - lo) as usize);
                         let r = v.search(l, lo as usize, hi as usize, c1, kc);
                         saturated |= r.len() >= kc && kc < (hi - lo) as usize;
                         raw.extend(r.into_iter().map(|x| x.0));
