@@ -15,6 +15,7 @@ importa es el uso diario: **rápido, preciso y compacto**. Implementación en **
 | [03-etiquetas-jerarquia.md](03-etiquetas-jerarquia.md) | Idea de ~1000 etiquetas + grafo de niveles: compresión, enrutado, jerarquía. |
 | [04-investigacion-arxiv.md](04-investigacion-arxiv.md) | Papers revisados (prioridad Google/Microsoft), qué sirve y qué no. |
 | [05-arquitectura.md](05-arquitectura.md) | El sistema construido en Rust: formato, consulta, cachés, robustez, tamaños. |
+| [06-libreria.md](06-libreria.md) | Diseño de la librería para backends (Python, presupuesto de RAM, bloque compacto); pendiente de aprobación. |
 
 ## Estado actual
 
