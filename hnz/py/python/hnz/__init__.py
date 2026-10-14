@@ -23,6 +23,8 @@ from typing import Iterable, Iterator, Literal, Optional, Sequence, Union
 from . import _hnz
 
 __version__: str = _hnz.__version__
+terms = _hnz.terms                  # tokenizador del BM25 del motor: terms("Rust's async") -> ['rusts', 'async']
+index_text = _hnz.index_text        # texto que se indexa de un ítem: index_text(title, url, html)
 MAX_K: int = _hnz.MAX_K
 KINDS = ('story', 'comment', 'job', 'poll', 'pollopt')
 DateLike = Union[str, int, _dt.date, _dt.datetime]
@@ -247,4 +249,4 @@ def open(path: Union[str, os.PathLike], *, ram: Union[int, str, None] = '2GB',
     return Archive(_hnz.open(path, json.dumps(opts)), path, opts['ram'])
 
 
-__all__ = ['open', 'Archive', 'SearchResult', 'Hit', 'Item', 'KINDS', 'MAX_K', '__version__']
+__all__ = ['open', 'Archive', 'SearchResult', 'Hit', 'Item', 'KINDS', 'MAX_K', 'terms', 'index_text', '__version__']

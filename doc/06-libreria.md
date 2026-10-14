@@ -1,7 +1,7 @@
 # Librería `hnz` para backends: diseño (2026-10-14)
 
-**Estado:** **P1 hecha** (`import hnz` sobre el formato actual, revisada: E30). P0 en curso (E30a y E30b
-medidos). Aprobado seguir con P2 al terminar P0.
+**Estado:** **P0 y P1 hechas** (E30: `import hnz` sobre el formato actual, revisada; mediciones E30a-d:
+consulta compacta −3 % de P@10 frente a hoy, 1ª etapa a 49 M documentos en ~40-53 ms). Siguiente: P2.
 
 **Decisiones tomadas (2026-10-14):** servidor posiblemente **sin iGPU** (todo debe ir bien solo con
 CPU); **vectores binarios de 256 bits** y reordenación de **100 candidatos** re-embebiendo los 128

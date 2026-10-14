@@ -649,4 +649,22 @@ frecuentes se buscan entre los candidatos semánticos.
   - Resultado: selección **37 ms** (frente a 545 ms con 20.000 candidatos); búsqueda completa (etapa 1
     + puntuación asimétrica del top-100) **~53 ms con 8 hilos y ~40 ms con 16** sobre los 49,7 M
     documentos, con 2.000 o con 20.000 candidatos. Mejora también el perfil rápido actual.
+- **E30c — la consulta compacta completa y el ajuste de la fusión** (`experimentos/bench_fusion.py` →
+  `resultados/results_e30c.txt`; tokenizador del motor expuesto a Python como `hnz.terms` /
+  `hnz.index_text`): candidatos = top-100 por vectores de 256 bits + top-20 del índice de términos
+  raros (df ≤ 0,02 %, sin frecuencia); reordenación = coseno del embedding del prefijo de 128 tokens +
+  w·b/(b+c), con b = BM25 de **todas** las palabras de la consulta sobre el texto del prefijo (IDF
+  global, norma del documento completo). 900 consultas; P@10 / MRR:
+| | 2024 | 2010 | 2015 | media P@10 |
+|---|---|---|---|---|
+| Hoy (índice y texto completos, `hnz eval`, 3 meses) | 0,278 / 0,557 | 0,208 / 0,482 | 0,249 / 0,516 | **0,245** |
+| **Compacta, mejor fusión (w = 0,15, c = 40)** | 0,280 / 0,566 | 0,192 / 0,466 | 0,242 / 0,492 | **0,238** |
+| Compacta sin BM25 al reordenar (w = 0) | 0,264 / 0,538 | 0,183 / 0,449 | 0,226 / 0,475 | 0,225 |
+  La fusión es plana entre w = 0,10 y 0,20 (0,232-0,238). **El perfil compacto pierde ~3 % de P@10 de
+  media** (2024 igual, 2015 −3 %, 2010 −8 %): dentro de lo previsto en el diseño (−3 % a +1 %).
+  Mandos para recuperar calidad en P4: más candidatos por palabras (K_b) o por vectores, o tf en el
+  índice de términos raros.
+- **E30e (tamaño del índice global de términos raros):** se mide de verdad al construirlo en P3; con
+  el umbral global de 0,02 % (proporcional al del mes, E27b) se estiman ~0,4-0,5 GB para todo HN.
+- **P0 terminada.**
 

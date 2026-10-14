@@ -55,9 +55,23 @@ fn open(py: Python<'_>, path: String, options: &str) -> PyResult<Archive> {
     Ok(Archive { inner: Arc::new(a) })
 }
 
+/// Términos que indexa y busca el BM25 de hnz (el mismo tokenizador del motor).
+#[pyfunction]
+fn terms(text: &str) -> Vec<String> {
+    hnz::tokenize::terms(text)
+}
+
+/// Texto que el motor indexa para un ítem: título + dominio de la url + texto plano del HTML.
+#[pyfunction]
+fn index_text(title: &str, url: &str, html: &str) -> String {
+    hnz::segment::index_text(title, url, html)
+}
+
 #[pymodule]
 fn _hnz(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(open, m)?)?;
+    m.add_function(wrap_pyfunction!(terms, m)?)?;
+    m.add_function(wrap_pyfunction!(index_text, m)?)?;
     m.add_class::<Archive>()?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("MAX_K", hnz::engine::MAX_K)?;
