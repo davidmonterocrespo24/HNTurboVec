@@ -44,3 +44,6 @@ Thumbs.db
 # Registros de la descarga del dataset
 download_hn.log
 download_hn.err
+
+# Texto exportado para entrenar el LM de HN (hnz lmdump)
+data_lm/

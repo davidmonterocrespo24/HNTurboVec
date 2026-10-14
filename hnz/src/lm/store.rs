@@ -153,6 +153,12 @@ pub fn from_lm(s: &str) -> Option<String> {
     Some(out)
 }
 
+/// Texto exacto que codifica el LM para un registro (None si va con zstd de reserva). Sirve para
+/// entrenar o evaluar modelos con la misma representación que usa el nivel frío.
+pub fn lm_text(title: &str, url: &str, text: &str) -> Option<String> {
+    lm_string(title, url, text).map(|(s, _)| s)
+}
+
 /// Cadena que ve el LM + banderas. None si el registro no es apto (se guardará con zstd).
 fn lm_string(title: &str, url: &str, text: &str) -> Option<(String, u64)> {
     if title.contains('\n') || url.contains('\n') {

@@ -174,6 +174,15 @@ enum Cmd {
         m: ModelArgs,
     },
     /// Prueba del nivel frío sobre un segmento zstd: comprime y descomprime (en lote) una muestra
+    /// Exporta a JSONL el texto de cada ítem tal como lo ve el LM (para entrenar/evaluar un LM de HN)
+    Lmdump {
+        #[arg(long)]
+        out: PathBuf,
+        /// tomar 1 de cada N ítems (muestreo uniforme por id)
+        #[arg(long, default_value_t = 1)]
+        every: usize,
+        parquet: Vec<PathBuf>,
+    },
     Lmtest {
         #[arg(long)]
         seg: PathBuf,
@@ -780,6 +789,26 @@ fn main() -> Result<()> {
         }
         Cmd::Eval { root, file, k, m } => cmd_eval(&root, &file, k, &m)?,
         Cmd::Lmtest { seg, lm, n, batch } => cmd_lmtest(&seg, &lm, n, batch)?,
+        Cmd::Lmdump { out, every, parquet } => {
+            use std::io::Write;
+            let mut w = std::io::BufWriter::new(std::fs::File::create(&out).with_context(|| format!("{}", out.display()))?);
+            let (mut n, mut skipped) = (0usize, 0usize);
+            for p in &parquet {
+                let (items, _) = segment::load_items(std::slice::from_ref(p))?;
+                for it in items.iter().filter(|it| !it.deleted && it.id as usize % every.max(1) == 0) {
+                    match hnz::lm::store::lm_text(&it.title, &it.url, &it.text) {
+                        Some(s) if !s.trim().is_empty() => {
+                            serde_json::to_writer(&mut w, &serde_json::json!({"id": it.id, "s": s}))?;
+                            w.write_all(b"\n")?;
+                            n += 1;
+                        }
+                        _ => skipped += 1,
+                    }
+                }
+            }
+            w.flush()?;
+            eprintln!("{n} registros escritos en {} ({skipped} omitidos: vacíos o con zstd de reserva)", out.display());
+        }
         Cmd::Get { root, m, id } => {
             let eng = Engine::open(&root, &m.models)?;
             match eng.get(id)? {
