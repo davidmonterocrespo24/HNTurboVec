@@ -709,7 +709,7 @@ Full description and API: [07-ram.md](07-ram.md). Everything hnz holds in the pr
 | None | everything | +728 MiB | 1,254 MiB |
 
   **Acceptance (P2): 8 clients for 30 minutes at the minimum budget** — first build (minimum 963
-  MiB): 29,088 operations, 0 errors, peak 0.84 × `ram`; final build: running at the time of this commit (result in the next one).
+  MiB): 29,088 operations, 0 errors, peak 0.84 × `ram`; final build: 28,024 operations, 0 errors, peak **0.81 × `ram`** (736 MiB).
 - **Regression:** the new CLI against the previous binary (mmap, HEAD 3f2888a): `hnz eval` identical
   on the 3 months and **83 searches identical** (ids, text, HTML, scores, thread titles), before and
   after the review fixes. In the library, everything-on-disk with the minimum LM pool gives exactly

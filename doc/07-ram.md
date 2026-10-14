@@ -97,7 +97,7 @@ before opening, as reported by Windows, 90 s per budget:
 | None | everything | +728 MiB | — | 1,254 MiB |
 
 30 minutes with 8 clients at the minimum budget (acceptance criterion of P2): first run (before the
-review fixes, minimum 963 MiB) 29,088 operations, 0 errors, peak **0.84 × `ram`**; final run: running at the time of this commit.
+review fixes, minimum 963 MiB) 29,088 operations, 0 errors, peak **0.84 × `ram`**; final run: 28,024 operations, 0 errors, peak **0.81 × `ram`** (736 MiB).
 
 The embedder loads at its steady size (+447 MiB): its tokenizer is parsed before OpenVINO compiles
 the model. Parsed afterwards (the first version), the parse transient landed on top of the
