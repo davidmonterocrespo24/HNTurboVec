@@ -81,9 +81,36 @@ Latencias medidas: ver la tabla de [README.md](README.md) y E26 en la bitácora.
 | EmbeddingGemma 2 IR fp16 por buckets | solo construcción (iGPU) | 4 × 542 MB (no hace falta para consultar) |
 | pythia-70m `.hnzlm` int8 + tokenizer | (des)compresión del nivel frío | 72 MB + 3,5 MB |
 
+## Perfil compacto: plan medido, aún NO implementado (E27-E29)
+Objetivo pedido: 4-5 GB para todo HN aceptando hasta 10 s por consulta (con descompresión). Idea:
+gastar el tiempo en reordenar, no en guardar: un índice mínimo da 100-200 candidatos y se re-puntúan
+con su propio texto descomprimido (re-embeber + BM25 exacto). Decisión del 2026-10-14: documentarlo
+y no implementarlo por ahora.
+
+| Componente (todo HN) | Hoy | Compacto | Cómo | ¿Medido? |
+|---|---|---|---|---|
+| Texto | 3,65 GB | **2,84 GB** | todo en el nivel LM con el LM entrenado con HN (`models/lm-hn-70m.hnzlm`, −9,2 %) | sí (E29) |
+| Vectores | 3,45 GB | **1,18-1,58 GB** | binario de 192-256 bits + reordenar el top-100/200 re-embebiendo el texto descomprimido | sí, simulado (E27a) |
+| Palabras | 2,61 GB | **0,55-0,65 GB** | solo términos raros (df ≤ 0,02 %) + BM25 al vuelo de los frecuentes sobre los candidatos | tamaño y calidad híbrida sí (E27b); BM25 al vuelo no |
+| Metadatos | 0,29 GB | 0,28 GB | igual | sí |
+| Modelos | 0,38 GB | 0,25-0,38 GB | embedder int4 (opcional) | no |
+| **Total** | **10,4 GB** | **5,74 GB** sin pérdida · **5,24 GB** (−1 %) · **~4,96 GB** con mejoras de formato | | |
+
+- Consulta prevista: índice mínimo → vista rápida (~0,4 s); descomprimir los primeros 128 tokens de
+  ~100 candidatos (~3 s) y re-embeberlos en la iGPU; BM25 exacto; texto completo del top-10 → ~4 s de
+  mediana (estimación, sin implementar).
+- Por implementar: etapa de reordenación en el motor; índice de términos raros + BM25 al vuelo;
+  perfil elegible en `build`/`pipeline.py`; cabeceras de registro más cortas; vocabulario compartido
+  por año; embedder int4; reconstruir todo HN (~5 días de iGPU + CPU, reanudable).
+- Descartado (E28): códigos PQ de 16-18 B (peores candidatos que el binario) y el título del hilo como
+  contexto del LM (no ahorra).
+- Opcional: entrenar el LM de HN con más datos (5 % de HN, ~7 h en la iGPU; el de 1 % aún mejoraba).
+- El LM forma parte del archivo (como un diccionario): hay que guardar una copia del `.hnzlm` exacto.
+
 ## Pendiente / mejoras
-- [ ] Construcción completa de los 239 meses (días de cómputo).
-- [ ] LM específico de HN (entrenado en GPU): mejor compresión con menos parámetros.
+- [ ] Construcción completa de los 239 meses (días de cómputo); el dataset ya está descargado (`download_hn.py`).
+- [x] LM específico de HN: entrenado en la iGPU en 93 min, −9 % de texto con el mismo coste (E29).
+- [ ] Perfil compacto (~5 GB, consultas de ~4 s): plan arriba.
 - [x] Reranker cross-encoder (equivalente open source a Jev/System One), probado en E26: +6-10 % de
       P@10 (significativo) leyendo el texto completo de 30 candidatos, a 0,6-1,6 s por consulta en
       CPU; con fragmentos no mejora en el nivel frío → no por defecto; quedan por probar los grandes.

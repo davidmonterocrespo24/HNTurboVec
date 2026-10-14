@@ -31,6 +31,11 @@ importa es el uso diario: **rápido, preciso y compacto**. Implementación en **
       resultado byte a byte con dos binarios distintos (E26).
 - [x] Reranker cross-encoder (equivalente open source a Jev/System One) probado (E26): +6-10 % de
       P@10 pero multiplica la latencia por 5-7 (necesita el texto completo) → no se usa por defecto.
+- [x] Todo el dataset descargado (`download_hn.py`: 239 meses, 12,42 GB, SHA-256 comprobados).
+- [x] LM entrenado con HN en la iGPU: −9 % de texto con el mismo coste (E29).
+- [x] Plan de **perfil compacto** medido (E27-E29): **~5 GB** para todo HN (5,74 sin pérdida, 5,24
+      con −1 %) con consultas de ~4 s; documentado en [05-arquitectura.md](05-arquitectura.md), sin
+      implementar por ahora.
 - [ ] Construcción completa de los 239 meses (`pipeline.py`; días de CPU/iGPU).
 
 ## Resultado con la muestra de 3 meses (637.046 ítems, E26)
