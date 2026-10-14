@@ -607,3 +607,18 @@ frecuentes se buscan entre los candidatos semánticos.
     mezcladas en 8 hilos = el mismo resultado que de una en una; errores de argumentos → `ValueError`.
   - Latencia desde Python: **33 ms** de mediana (2024, caliente; la capa de Python añade ~0,2 ms);
     **45 consultas/s** con 8 hilos (el embedder, de una consulta en una, es el cuello de botella).
+- **Revisión adversarial de P1** (workflow de 28 agentes: concurrencia y FFI, API de Python,
+  empaquetado; 2 verificadores por hallazgo): 11 hallazgos, **9 confirmados** (6 problemas
+  distintos), 2 refutados. Corregidos, con una prueba cada uno (13 pruebas en total, todas bien):
+  - el cerrojo del LM envolvía todo `fetch`/`get`: una consulta pesada del nivel LM bloqueaba a todas
+    las demás → ahora es un cerrojo global solo alrededor de la descompresión (un `get()` del nivel
+    zstd responde en < 0,5 s mientras corre un lote del LM);
+  - `stats()` esperaba con el GIL tomado mientras se cargaba el embedder → sin GIL y sin bloquear;
+    el embedder se carga una vez (OnceLock) y un fallo no se reintenta en cada consulta (30 s);
+  - `ov_libs` no mandaba (el buscador de openvino-rs mira antes INTEL_OPENVINO_DIR y otras variables)
+    y el PATH crecía en cada carga → `openvino_c.dll` se carga por ruta completa una vez por proceso;
+  - un `datetime` en since/until perdía la hora y la zona → ahora es el instante exacto en UTC;
+  - un entero se tomaba como año sin comprobar (una marca de tiempo daba resultados vacíos o sin
+    filtrar) → solo años 1970-2100; el motor rechaza años fuera de 1-9999;
+  - abrir una carpeta sin segmentos "funcionaba" con un archivo vacío → error claro.
+

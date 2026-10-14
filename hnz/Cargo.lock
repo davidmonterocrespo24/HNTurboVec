@@ -800,6 +800,7 @@ dependencies = [
  "half",
  "memmap2",
  "openvino",
+ "openvino-sys",
  "parquet",
  "rayon",
  "serde",

@@ -114,12 +114,30 @@ def _size(ram: Union[int, str, None]) -> Optional[int]:
     return int(float(m.group(1)) * (1024 if m.group(3) else 1000) ** exp)
 
 
-def _date(d: Optional[DateLike]) -> Optional[str]:
+def _bound(d: Optional[DateLike], name: str) -> tuple[Optional[str], Optional[int]]:
+    """Límite de fechas -> (texto para el motor, o instante exacto en segundos epoch UTC).
+
+    - str: "2015", "2015-06", "2015-06-01" (el motor lo valida); date: ese día entero.
+    - datetime: el instante exacto (si no lleva zona horaria, se toma como UTC, que es la de HN).
+    - int: un año (1970-2100); para un instante concreto use datetime.
+    """
     if d is None:
-        return None
-    if isinstance(d, (_dt.date, _dt.datetime)):
-        return d.strftime('%Y-%m-%d')
-    return str(d)
+        return None, None
+    if isinstance(d, _dt.datetime):
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=_dt.timezone.utc)
+        return None, int(d.timestamp() // 1)
+    if isinstance(d, _dt.date):
+        return d.strftime('%Y-%m-%d'), None
+    if isinstance(d, bool):
+        raise ValueError(f'{name} inválido: {d!r}')
+    if isinstance(d, int):
+        if not 1970 <= d <= 2100:
+            raise ValueError(f'{name}={d}: un entero se interpreta como año (1970-2100); para un instante use datetime')
+        return str(d), None
+    if isinstance(d, str):
+        return d, None
+    raise ValueError(f'{name} inválido: {d!r} (str "2015-06", int año, date o datetime)')
 
 
 def _ov_libs() -> Optional[str]:
@@ -148,7 +166,8 @@ class Archive:
                author: Optional[str] = None, mode: Literal['hybrid', 'vector', 'keyword'] = 'hybrid',
                text: Literal['snippet', 'full'] = 'snippet', include_dead: bool = False, raw: bool = False,
                w_bm25: float = 0.15, c_bm25: float = 20.0) -> Union[SearchResult, dict]:
-        """Busca en todo HN (o en el rango [since, until], ambos inclusive: "2015", "2015-06", fechas).
+        """Busca en todo HN (o en el rango [since, until], ambos inclusive: "2015", "2015-06", date, o un
+        datetime para un instante exacto en UTC).
 
         - Sin `query`: lo más reciente que cumple los filtros.
         - `types`: "story", "comment", "job", "poll", "pollopt" (uno o varios).
@@ -159,7 +178,10 @@ class Archive:
             types = [types]
         if text not in ('snippet', 'full'):
             raise ValueError('text debe ser "snippet" o "full"')
-        req = {'query': query or '', 'k': int(k), 'since': _date(since), 'until': _date(until),
+        since_s, since_ts = _bound(since, 'since')
+        until_s, until_ts = _bound(until, 'until')
+        req = {'query': query or '', 'k': int(k), 'since': since_s, 'until': until_s,
+               'since_ts': since_ts, 'until_ts': until_ts,
                'types': list(types or []), 'author': author, 'mode': mode, 'full': text == 'full',
                'include_dead': bool(include_dead), 'w_bm25': float(w_bm25), 'c_bm25': float(c_bm25)}
         d = json.loads(self._live().search_json(json.dumps(req)))

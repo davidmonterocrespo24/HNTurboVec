@@ -361,7 +361,7 @@ fn cmd_eval(root: &Path, file: &Path, k: usize, m: &ModelArgs) -> Result<()> {
     let raw = std::fs::read(file)?;
     // tolerar BOM UTF-8 (PowerShell) y rechazar UTF-16 con un mensaje claro
     if raw.starts_with(&[0xFF, 0xFE]) || raw.starts_with(&[0xFE, 0xFF]) {
-        bail!("{} está en UTF-16: genérelo con make_eval.py --out (UTF-8)", file.display());
+        bail!("{} está en UTF-16: genérelo con experimentos/make_eval.py --out (UTF-8)", file.display());
     }
     let text = String::from_utf8(raw)?;
     let qs: Vec<(String, u32)> = text

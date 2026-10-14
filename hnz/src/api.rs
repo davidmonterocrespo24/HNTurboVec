@@ -3,8 +3,8 @@
 //!
 //! - El embedder de consultas (OpenVINO) vive en un hilo propio: sus objetos no se pueden compartir
 //!   entre hilos y así no hace falta `unsafe`; las consultas le piden el vector por un canal.
-//! - El LM descomprime de una consulta en una: su pool de hilos es global (fase P1; el planificador
-//!   con prioridades llega con el perfil compacto).
+//! - El LM descomprime un lote a la vez en todo el proceso (cerrojo dentro de `Engine`, solo al
+//!   descomprimir): las consultas del nivel zstd o en caché no esperan a las del nivel LM.
 use crate::dates;
 use crate::embed::Embedder;
 use crate::engine::{Engine, Mode, Query, ResultItem, MAX_K};
@@ -13,8 +13,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::Mutex;
-use std::time::Instant;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 // el motor se comparte entre hilos: si algún día deja de ser Send + Sync, que falle al compilar
 const _: fn() = || {
@@ -44,6 +44,9 @@ pub struct SearchRequest {
     pub k: usize,
     pub since: Option<String>,
     pub until: Option<String>,
+    /// límites exactos en segundos epoch UTC (ambos inclusive); excluyen a since/until
+    pub since_ts: Option<i64>,
+    pub until_ts: Option<i64>,
     /// story, comment, job, poll, pollopt (vacío = todos)
     pub types: Vec<String>,
     pub author: Option<String>,
@@ -63,6 +66,8 @@ impl Default for SearchRequest {
             k: 10,
             since: None,
             until: None,
+            since_ts: None,
+            until_ts: None,
             types: Vec::new(),
             author: None,
             mode: "hybrid".into(),
@@ -132,11 +137,22 @@ pub fn make_query(r: &SearchRequest) -> Result<Query> {
             None => Ok(None),
         }
     };
+    if (r.since.is_some() && r.since_ts.is_some()) || (r.until.is_some() && r.until_ts.is_some()) {
+        return Err(bad("indique since o since_ts (y until o until_ts), no ambos".into()));
+    }
+    let from = match r.since_ts {
+        Some(t) => Some(t),
+        None => date(&r.since, false, "since")?,
+    };
+    let to = match r.until_ts {
+        Some(t) => Some(t.checked_add(1).ok_or_else(|| bad("until_ts fuera de rango".into()))?),
+        None => date(&r.until, true, "until")?,
+    };
     Ok(Query {
         text: r.query.clone(),
         k: r.k,
-        from: date(&r.since, false, "since")?,
-        to: date(&r.until, true, "until")?,
+        from,
+        to,
         mode,
         types,
         by: r.author.clone(),
@@ -156,11 +172,15 @@ pub struct Archive {
     models: PathBuf,
     ov_libs: Option<PathBuf>,
     ram: Option<u64>,
-    /// canal al hilo del embedder (se crea al primer uso)
-    emb: Mutex<Option<mpsc::Sender<(String, EmbedReply)>>>,
-    /// el LM descomprime de una consulta en una (pool global; fase P1)
-    lm: Mutex<()>,
+    /// canal al hilo del embedder (se crea al primer uso; leerlo no bloquea nunca)
+    emb: OnceLock<mpsc::Sender<(String, EmbedReply)>>,
+    /// serializa los intentos de cargar el embedder y recuerda el último fallo (para no reintentar
+    /// la carga en cada consulta)
+    emb_init: Mutex<Option<(Instant, String)>>,
 }
+
+/// Tras un fallo al cargar el embedder, no se reintenta hasta pasado este tiempo.
+const EMB_RETRY: Duration = Duration::from_secs(30);
 
 fn default_models(root: &Path) -> Result<PathBuf> {
     for c in [root.join("models"), root.parent().map(|p| p.join("models")).unwrap_or_default()] {
@@ -173,13 +193,34 @@ fn default_models(root: &Path) -> Result<PathBuf> {
 
 impl Archive {
     pub fn open(root: &Path, opts: OpenOptions) -> Result<Self> {
+        // primero, que la carpeta tenga segmentos (es el error más probable: carpeta equivocada)
+        let has_segments = std::fs::read_dir(root)
+            .with_context(|| format!("no se puede leer {}", root.display()))?
+            .filter_map(|e| e.ok())
+            .any(|e| e.path().join("manifest.json").exists());
+        if !has_segments {
+            let hint = if root.join("manifest.json").exists() {
+                " (esa carpeta ES un segmento: indique la carpeta que contiene los segmentos)"
+            } else {
+                ""
+            };
+            bail!("no hay segmentos (carpetas con manifest.json) en {}{hint}", root.display());
+        }
         let models = match opts.models {
             Some(m) => m,
             None => default_models(root)?,
         };
         let eng = Engine::open(root, &models).with_context(|| format!("abriendo {}", root.display()))?;
+        if eng.segs.is_empty() {
+            let hint = if root.join("manifest.json").exists() {
+                " (esa carpeta ES un segmento: indique la carpeta que contiene los segmentos)"
+            } else {
+                ""
+            };
+            bail!("no hay segmentos (carpetas con manifest.json) en {}{hint}", root.display());
+        }
         let ov_libs = opts.ov_libs.or_else(|| std::env::var_os("HNZ_OV_LIBS").map(PathBuf::from));
-        let a = Archive { eng, root: root.to_path_buf(), models, ov_libs, ram: opts.ram, emb: Mutex::new(None), lm: Mutex::new(()) };
+        let a = Archive { eng, root: root.to_path_buf(), models, ov_libs, ram: opts.ram, emb: OnceLock::new(), emb_init: Mutex::new(None) };
         if opts.preload {
             a.embed("warm up")?;
         }
@@ -187,10 +228,32 @@ impl Archive {
     }
 
     fn embedder(&self) -> Result<mpsc::Sender<(String, EmbedReply)>> {
-        let mut g = self.emb.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(tx) = g.as_ref() {
+        if let Some(tx) = self.emb.get() {
             return Ok(tx.clone());
         }
+        let mut last = self.emb_init.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(tx) = self.emb.get() {
+            return Ok(tx.clone()); // otro hilo lo cargó mientras esperábamos
+        }
+        if let Some((t, msg)) = last.as_ref() {
+            if t.elapsed() < EMB_RETRY {
+                bail!("el embedder no se pudo cargar hace {:.0} s: {msg}", t.elapsed().as_secs_f64());
+            }
+        }
+        match self.spawn_embedder() {
+            Ok(tx) => {
+                let _ = self.emb.set(tx.clone());
+                *last = None;
+                Ok(tx)
+            }
+            Err(e) => {
+                *last = Some((Instant::now(), format!("{e:#}")));
+                Err(e)
+            }
+        }
+    }
+
+    fn spawn_embedder(&self) -> Result<mpsc::Sender<(String, EmbedReply)>> {
         let libs = self.ov_libs.clone().context("falta la carpeta de OpenVINO (ov_libs o la variable HNZ_OV_LIBS)")?;
         let models = self.models.clone();
         let (tx, rx) = mpsc::channel::<(String, EmbedReply)>();
@@ -212,7 +275,6 @@ impl Archive {
             }
         })?;
         ready_rx.recv().map_err(|_| anyhow!("el hilo del embedder terminó al arrancar"))??;
-        *g = Some(tx.clone());
         Ok(tx)
     }
 
@@ -230,10 +292,7 @@ impl Archive {
         let t_emb = t0.elapsed();
         let hits = self.eng.search(&q, qv.as_deref());
         let t_s = t0.elapsed();
-        let results = {
-            let _g = self.lm.lock().unwrap_or_else(|e| e.into_inner());
-            self.eng.fetch(&hits, req.full)?
-        };
+        let results = self.eng.fetch(&hits, req.full)?;
         let t_all = t0.elapsed();
         let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
         Ok(SearchResponse {
@@ -246,10 +305,7 @@ impl Archive {
 
     /// Un ítem completo por id de HN (texto literal: `html` es el HTML original de HN).
     pub fn get(&self, id: u32) -> Result<Option<serde_json::Value>> {
-        let it = {
-            let _g = self.lm.lock().unwrap_or_else(|e| e.into_inner());
-            self.eng.get(id)?
-        };
+        let it = self.eng.get(id)?;
         Ok(match it {
             Some(it) => {
                 let mut v = serde_json::to_value(&it)?;
@@ -279,7 +335,7 @@ impl Archive {
             "docs": self.eng.total_docs,
             "segments": segs,
             "ram_budget": self.ram,
-            "embedder_loaded": self.emb.lock().map(|g| g.is_some()).unwrap_or(false),
+            "embedder_loaded": self.emb.get().is_some(),
         })
     }
 }

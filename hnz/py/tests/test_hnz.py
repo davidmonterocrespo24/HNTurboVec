@@ -116,3 +116,46 @@ def test_closed_archive():
     assert a.closed
     with pytest.raises(RuntimeError):
         a.search('x')
+
+
+def test_datetime_bounds_are_exact(hn):
+    """Un datetime es un instante exacto (UTC), no el día entero."""
+    import datetime as dt
+    it = hn.search(types='comment', since='2015-06-10', until='2015-06-10', k=1)[0]
+    t = dt.datetime.fromtimestamp(it.time, dt.timezone.utc)
+    same = hn.search(types='comment', since=t, until=t, k=50)
+    assert it.id in [h.id for h in same] and all(h.time == it.time for h in same)
+    after = hn.search(types='comment', since=t + dt.timedelta(seconds=1), until=t + dt.timedelta(hours=1), k=500)
+    assert it.id not in [h.id for h in after] and all(h.time > it.time for h in after)
+    naive = hn.search(types='comment', since=t.replace(tzinfo=None), until=t.replace(tzinfo=None), k=50)
+    assert [h.id for h in naive] == [h.id for h in same]          # sin zona horaria = UTC
+
+
+def test_int_bounds_are_years(hn):
+    assert len(hn.search(types='story', since=2015, until=2015, k=3)) == 3
+    with pytest.raises(ValueError):
+        hn.search('x', since=1700000000)                           # una marca de tiempo no es un año
+    with pytest.raises(ValueError):
+        hn.search('x', since='99999999999999999')
+
+
+def test_open_empty_folder_fails(tmp_path):
+    with pytest.raises(RuntimeError, match='no hay segmentos'):
+        hnz.open(tmp_path)
+
+
+def test_lm_work_does_not_block_hot_tier(hn):
+    """Una consulta pesada del nivel LM (texto completo) no bloquea un get() del nivel zstd."""
+    import threading
+    import time
+    hot = hn.search(types='story', since='2024-01-20', k=1)[0].id
+    t0 = time.perf_counter()
+    th = threading.Thread(target=lambda: hn.search('the', k=100, since='2010', until='2010', text='full', mode='keyword'))
+    th.start()
+    time.sleep(0.3)                                                # que el lote del LM ya esté en marcha
+    t1 = time.perf_counter()
+    assert hn.get(hot) is not None
+    dt_hot = time.perf_counter() - t1
+    th.join()
+    dt_lm = time.perf_counter() - t0
+    assert dt_hot < 0.5 and dt_lm > 2 * dt_hot, (dt_hot, dt_lm)

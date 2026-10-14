@@ -21,6 +21,10 @@ use std::sync::Mutex;
 pub const SNIPPET_TOKENS: usize = 64;
 /// máximo de resultados por consulta (protege la memoria del servidor)
 pub const MAX_K: usize = 500;
+
+/// Un solo lote del LM a la vez en todo el proceso: su pool de hilos es global y dos lotes a la vez
+/// solo competirían por los mismos núcleos. Lo demás (metadatos, nivel zstd, cachés) va en paralelo.
+static LM_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const CACHE_MAX: usize = 20_000;
 
 pub struct Seg {
@@ -486,7 +490,10 @@ impl Engine {
                     _ => false,
                 })
                 .collect();
-            let dec = codec.decode_records_each(&raws, true, &limits, &tonly, &checks)?;
+            let dec = {
+                let _g = LM_GATE.lock().unwrap_or_else(|e| e.into_inner());
+                codec.decode_records_each(&raws, true, &limits, &tonly, &checks)?
+            };
             let mut cache = self.cache.lock().unwrap();
             let mut titles = self.titles.lock().unwrap();
             for (&i, (rec, partial)) in pending.iter().zip(dec) {

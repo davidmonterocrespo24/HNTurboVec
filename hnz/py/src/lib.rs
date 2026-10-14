@@ -41,8 +41,9 @@ impl Archive {
         py.detach(move || inner.embed(&text)).map_err(to_py)
     }
 
-    fn stats_json(&self) -> String {
-        self.inner.stats().to_string()
+    fn stats_json(&self, py: Python<'_>) -> String {
+        let inner = self.inner.clone();
+        py.detach(move || inner.stats().to_string())
     }
 }
 

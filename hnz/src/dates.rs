@@ -31,6 +31,9 @@ pub fn parse(s: &str, end: bool) -> Option<i64> {
         return None;
     }
     let y: i64 = p.first()?.parse().ok()?;
+    if !(1..=9999).contains(&y) {
+        return None;
+    }
     let m: u32 = p.get(1).map_or(Some(1), |x| x.parse().ok())?;
     let d: u32 = p.get(2).map_or(Some(1), |x| x.parse().ok())?;
     // fechas imposibles (2015-13, 2015-00, 2015-02-30) son un error, no se desbordan
@@ -88,6 +91,9 @@ mod tests {
         assert!(parse("2016-02-29", false).is_some());
         assert_eq!(parse("2015-06-31", false), None);
         assert_eq!(parse("2015-06-01-05", false), None);
+        assert_eq!(parse("1700000000", false), None);
+        assert_eq!(parse("99999999999999999", true), None);
+        assert_eq!(parse("0", false), None);
         assert_eq!(days_in_month(2024, 2), 29);
         assert_eq!(days_in_month(2023, 12), 31);
     }
