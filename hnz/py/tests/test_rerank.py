@@ -39,7 +39,8 @@ def ids_scores(r):
 
 def test_rerank_on_by_default(hn):
     r = hn.search(QUERIES[1], k=10, raw=True)
-    assert 'rerank' in r and r['rerank']['candidates'] >= 100 and r['rerank']['embedded'] == 50
+    # the top 50 by the cheap score are re-embedded, plus a few speculative ones (overlap)
+    assert 'rerank' in r and r['rerank']['candidates'] >= 100 and r['rerank']['embedded'] >= 50
     assert len(r['results']) == 10
     p3 = hn.search(QUERIES[1], k=10, raw=True, rerank=False)
     assert 'rerank' not in p3 and len(p3['results']) == 10

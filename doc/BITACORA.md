@@ -1078,3 +1078,9 @@ the multi-day all-HN runs (P5) start after P3.
     with the stored codes; a mean above 32 flips (E33a: healthy 2.35 on average, at most 9; a broken
     chain ~128) fails the load with `IncompatibleBlockError`. Reported as `check_flips`.
   - Python: `SearchResult.rerank` and `.warning`; tests for both features. Rust: 32 tests pass.
+  - `test_rerank.py` without the memory soak (run next to the kv eval, so slow): **9 passed** in
+    3.5 min (rerank on by default, the self-check's `check_flips`, keyword search with frequent
+    words, deterministic cold/warm, identical results on disk and in RAM at the floor + 64 MiB,
+    8 concurrent reranks = sequential, results reusing the prefixes, the deadline's two degraded
+    paths, filters). One assertion was out of date: since the overlap, `embedded` counts the
+    speculative embeddings too (64 for a query that needs 50), so the test now asks for >= 50.
