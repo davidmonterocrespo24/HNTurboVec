@@ -56,8 +56,8 @@ matters is daily use: **fast, accurate and compact**. Implementation in **Rust**
       memory <= 1.03 x `ram` with 8 concurrent clients ([07-ram.md](07-ram.md)).
 - [x] **Compact block** (P3, E32): one read-only file `hn.hnzb` + the embedder IR, documents in
       (time, id) order, global word index of rare terms, integrity levels and canaries,
-      `hnz pack` / `verify-block` / `inspect`; sample block verified 100 % against its sources;
-      projection to all of HN: **5.32 GB** ([08-block.md](08-block.md)).
+      `hnz pack` / `verify-block` / `inspect`, document prompts defined in Rust (v2); sample block
+      verified 100 % against its sources; projection to all of HN: **5.32 GB** ([08-block.md](08-block.md)).
 - [ ] P4: reranking by re-embedding the candidates' prefix and frequent words scored over the
       vector candidates (E30a, E30c).
 - [ ] Full build of the 239 months (P5; days of CPU/iGPU).

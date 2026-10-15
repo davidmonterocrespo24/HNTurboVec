@@ -301,18 +301,20 @@ HN), plus a few 4 MiB hash buffers.
 | `lex/norms` | 462,229 | 0.7 |
 | `meta/kids` | 139,564 | 0.2 |
 | others (`text/gsum`, `meta/flags`, `text/idx`, `vec/has`, `text/prefix_fallback`, `meta/index`, `meta/kids.idx`, `meta/late`) | 236,897 | 0.4 |
-| **container** | **146,930,254** | |
+| **container** | **146,930,253** | |
 | `embed.bin` + `embed.xml` | 275,962,545 | (fixed) |
 
-Built in 60 s; the same inputs give the same bytes (1 or 16 threads). **Projection to all of HN**
+Vectors from prompt v2 (`hnz prompts` + `scripts/embed_prompts.py` on the iGPU: 611,626 prompts at
+182-215 docs/s, 52 min). Built in 50 s; the same inputs give the same bytes (1 or 16 threads).
+`verify-block --level deep`: 0 differences. **Projection to all of HN**
 (`hnz inspect --project 49324111 --lex work/lex-all/lex.json`, with the exact all-HN word index:
 365 MB): **5.32 GB, 107.8 B/doc** (with the current LM; the LM retrained on 5 % of HN may lower
 the text part).
 
-Quality on the block (300 queries per month, `hnz eval`, P@10): vector 0.208 / 0.147 / 0.185
-(2024 / 2010 / 2015; mean 0.180, as E30a's 0.181 for 256-bit prefix codes); words alone 0.119 /
+Quality on the block (300 queries per month, `hnz eval`, P@10): vector 0.214 / 0.148 / 0.186
+(2024 / 2010 / 2015; mean 0.183; with the E30a prompts, 0.208 / 0.147 / 0.185); words alone 0.119 /
 0.056 / 0.080 (only rare terms have postings; P4 scores the frequent ones over the semantic
-candidates); hybrid w = 0.15, c = 20: 0.241 / 0.169 / 0.217. The P4 reranking (E30c) is not in
+candidates); hybrid w = 0.15, c = 20: 0.246 / 0.168 / 0.220. The P4 reranking (E30c) is not in
 P3.
 
 ## Known limits of v1

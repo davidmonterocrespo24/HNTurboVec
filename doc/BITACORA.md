@@ -879,3 +879,26 @@ the multi-day all-HN runs (P5) start after P3.
     documents have a vector, access classes, deep's checks and memory, sample numbers).
   Regression: Rust 29 tests; the old archive gives the same eval figures and searches as the P2
   binary; the block's eval figures do not change.
+- **Sample block with prompt v2** (the P3 block from now on): the 611,626 v2 prompts embedded on the
+  iGPU at 182-215 docs/s (52 min; cosine with the E30a vectors: mean 0.997, median 1.000, 0.7-1.1 %
+  below 0.95); packed in 50 s; `verify-block --level deep`: 0 differences. Quality (`hnz eval`,
+  P@10 2024 / 2010 / 2015): vector 0.214 / 0.148 / 0.186 (mean 0.183, +0.003 over the E30a
+  prompts), hybrid 0.246 / 0.168 / 0.220. Python: 55 tests pass (old archive and block).
+  **P3 done.** Pending as an improvement: the LM retrained on 5 % of HN (stopped at step 8,500
+  of 25,000 by the system for low memory while the tests ran; resumed from its checkpoint).
+
+### E33 — P4 (reranking), in progress
+- **E30f — reranking without re-embedding every candidate** (`experimentos/bench_rerank_cpu.py` →
+  `resultados/results_e30f.txt`; same corpus, candidates and BM25-over-prefix as E30c; 900 queries):
+  on a CPU-only server re-embedding ~115 prefixes costs ~3-4 s (E30b), so cheaper rerankings:
+| Reranking | 2024 | 2010 | 2015 | mean P@10 | prefixes re-embedded |
+|---|---|---|---|---|---|
+| E30c: all candidates re-embedded (cosine + 0.15 b/(b+40)) | 0.280 | 0.192 | 0.243 | **0.238** | ~115 |
+| none: 256-bit asymmetric score + 0.3 b/(b+20) | 0.251 | 0.174 | 0.222 | 0.216 | 0 |
+| stage-1 order only | 0.209 | 0.148 | 0.185 | 0.181 | 0 |
+| cascade: the cheap score, then re-embed its top 20 | 0.271 | 0.184 | 0.238 | 0.231 | 20 |
+| cascade, top 30 | 0.280 | 0.186 | 0.242 | **0.236** | 30 |
+| cascade, top 50 | 0.280 | 0.191 | 0.242 | **0.238** | 50 |
+  **Re-embedding only the top 50 of the cheap score gives the same quality as re-embedding all
+  ~115** (top 30: −0.002): ~1.3-1.8 s of CPU embedding instead of ~3-4 s. The cheap score still
+  needs every candidate's prefix decoded (for its BM25).
