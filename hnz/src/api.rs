@@ -248,6 +248,8 @@ struct EmbMem {
     peak: u64,
     /// the embedder can embed document prompts (an IR with dynamic shapes)
     docs: bool,
+    /// document prompts embedded at the same time (CPU streams)
+    streams: usize,
 }
 
 /// Un archivo hnz abierto.
@@ -508,7 +510,7 @@ impl Archive {
             });
             let mut emb = match r {
                 Ok(e) => {
-                    let _ = ready_tx.send(Ok(EmbMem { steady, peak, docs: e.can_embed_docs() }));
+                    let _ = ready_tx.send(Ok(EmbMem { steady, peak, docs: e.can_embed_docs(), streams: e.doc_parallelism() }));
                     e
                 }
                 Err(e) => {
@@ -516,9 +518,11 @@ impl Archive {
                     return;
                 }
             };
-            // queries go first: a document job advances one document at a time between them; the
-            // thread ends when the archive is closed (all senders dropped) and nothing is pending
+            // queries go first: between them, documents advance one round at a time (one document
+            // per CPU stream, the oldest jobs first); the thread ends when the archive is closed
+            // (all senders dropped) and nothing is pending
             type DocJob = (Vec<String>, Vec<Vec<f32>>, mpsc::Sender<Result<Vec<Vec<f32>>>>);
+            let par = emb.doc_parallelism();
             let mut docs: std::collections::VecDeque<DocJob> = std::collections::VecDeque::new();
             loop {
                 let first = if docs.is_empty() {
@@ -537,19 +541,36 @@ impl Archive {
                         EmbedJob::Docs(p, reply) => docs.push_back((p, Vec::new(), reply)),
                     }
                 }
-                let Some(job) = docs.front_mut() else { continue };
-                if job.1.len() < job.0.len() {
-                    let end = (job.1.len() + 4).min(job.0.len());
-                    match emb.embed_docs(&job.0[job.1.len()..end]) {
-                        Ok(v) => job.1.extend(v),
-                        Err(e) => {
-                            let (_, _, reply) = docs.pop_front().unwrap();
-                            let _ = reply.send(Err(e));
-                            continue;
+                if docs.is_empty() {
+                    continue;
+                }
+                let mut round: Vec<String> = Vec::with_capacity(par);
+                let mut owners: Vec<usize> = Vec::with_capacity(par);
+                for (ji, job) in docs.iter().enumerate() {
+                    let room = par - round.len();
+                    if room == 0 {
+                        break;
+                    }
+                    let (from, to) = (job.1.len(), (job.1.len() + room).min(job.0.len()));
+                    round.extend(job.0[from..to].iter().cloned());
+                    owners.extend(std::iter::repeat_n(ji, to - from));
+                }
+                match emb.embed_docs(&round) {
+                    Ok(v) => {
+                        for (ji, x) in owners.into_iter().zip(v) {
+                            docs[ji].1.push(x);
                         }
                     }
+                    Err(e) => {
+                        // every job with a document in the failed round fails
+                        for _ in 0..owners.last().map_or(0, |&j| j + 1) {
+                            let (_, _, reply) = docs.pop_front().unwrap();
+                            let _ = reply.send(Err(anyhow!("{e:#}")));
+                        }
+                        continue;
+                    }
                 }
-                if job.1.len() == job.0.len() {
+                while docs.front().is_some_and(|j| j.1.len() == j.0.len()) {
                     let (_, out, reply) = docs.pop_front().unwrap();
                     let _ = reply.send(Ok(out));
                 }
@@ -701,5 +722,9 @@ impl Archive {
 impl crate::rerank::DocEmbed for Archive {
     fn embed(&self, docs: &[(u32, String)]) -> Result<Vec<Vec<f32>>> {
         self.embed_docs(docs.iter().map(|d| d.1.clone()).collect())
+    }
+
+    fn batch(&self) -> usize {
+        self.emb_mem.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(1, |m| m.streams)
     }
 }

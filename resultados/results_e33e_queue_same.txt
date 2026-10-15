@@ -1,0 +1,22 @@
+same  embedded/tail old ('77', '481') new ('77', '538')  Show HN: Annie – An Uncensored AI Girlfriend
+same  embedded/tail old ('63', '650') new ('60', '612')  A periodic table of visualization methods (2007)
+same  embedded/tail old ('60', '530') new ('58', '434')  Book of Kells (2018)
+same  embedded/tail old ('78', '675') new ('76', '614')  Ask HN: How to be productive without making lists?
+same  embedded/tail old ('59', '255') new ('58', '273')  Chemists tie a trefoil knot using only 54 atoms
+same  embedded/tail old ('71', '596') new ('69', '538')  Why are 1,500 Americans still dying from Covid eve
+same  embedded/tail old ('70', '571') new ('62', '412')  Fix date-handling bug when today’s date is later t
+same  embedded/tail old ('88', '764') new ('78', '465')  AMD Radeon RX 7600 XT Linux Performance
+same  embedded/tail old ('78', '605') new ('69', '529')  What the 2010 Mac has in common with the 1984 Appl
+same  embedded/tail old ('62', '221') new ('62', '249')  Stanford's Javascript Crypto Library
+same  embedded/tail old ('55', '253') new ('55', '246')  The Perils of Positive Thinking
+same  embedded/tail old ('82', '1639') new ('70', '1134')  Ask HN: I really want to start a startup but I don
+same  embedded/tail old ('63', '823') new ('62', '720')  How to hire a programmer to make your ideas happen
+same  embedded/tail old ('70', '189') new ('68', '138')  Platforms are for Suckers: Why you shouldn't build
+same  embedded/tail old ('63', '481') new ('63', '428')  How long has Mahalo been using keyword domains lik
+same  embedded/tail old ('68', '637') new ('65', '486')  Apple Goes Semi-Pro (Part One)
+same  embedded/tail old ('65', '590') new ('63', '478')  How the Unicode Committee Broke the Apostrophe
+same  embedded/tail old ('63', '144') new ('63', '82')  Ex-BlackBerry Co-CEO Talks Publicly
+same  embedded/tail old ('67', '145') new ('66', '119')  A venture capital firm says it invests in people “
+same  embedded/tail old ('70', '384') new ('65', '319')  Losing 80% of mobile users is normal
+same  embedded/tail old ('70', '649') new ('64', '384')  Even with a VPN, open Wi-Fi exposes users
+21/21 identical

@@ -504,6 +504,9 @@ fn cmd_eval_rerank(root: &Path, file: &Path, k: usize, m: &ModelArgs, emb: Optio
         ("híbrida, cascada 50 (P4)".into(), base.clone(), d.clone()),
         ("híbrida, todos re-embebidos (E30c)".into(), base.clone(), RerankCfg { embed_top: None, ..d.clone() }),
         ("híbrida, cascada 30".into(), base.clone(), RerankCfg { embed_top: Some(30), ..d.clone() }),
+        // fewer vector candidates: fewer prefixes to decode (E33b's rule for slow CPUs)
+        ("híbrida, kv 80, cascada 50".into(), base.clone(), RerankCfg { kv: 80, ..d.clone() }),
+        ("híbrida, kv 60, cascada 40".into(), base.clone(), RerankCfg { kv: 60, embed_top: Some(40), ..d.clone() }),
         ("híbrida, solo R0 (sin re-embeber)".into(), base.clone(), RerankCfg { embed_top: Some(0), ..d.clone() }),
         ("vector, re-embebidos".into(), Query { mode: Mode::Vector, ..base.clone() }, d.clone()),
         ("palabras (frecuentes entre candidatos)".into(), Query { mode: Mode::Keyword, ..base.clone() }, d.clone()),

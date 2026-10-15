@@ -94,6 +94,15 @@ impl Embedder {
         if streams > 1 {
             core.set_property(&DeviceType::CPU, &RwPropertyKey::NumStreams, &streams.to_string()).map_err(ov)?;
         }
+        // CPU threads and core type of the embedder (HNZ_EMBED_THREADS, HNZ_EMBED_CORES =
+        // ANY_CORE / PCORE_ONLY / ECORE_ONLY; default: OpenVINO's choice): while a reranked query
+        // decodes, the embedder shares the CPU with the LM
+        if let Some(t) = std::env::var("HNZ_EMBED_THREADS").ok().and_then(|x| x.parse::<usize>().ok()).filter(|&t| t > 0) {
+            core.set_property(&DeviceType::CPU, &RwPropertyKey::Other("INFERENCE_NUM_THREADS".into()), &t.to_string()).map_err(ov)?;
+        }
+        if let Ok(c) = std::env::var("HNZ_EMBED_CORES") {
+            core.set_property(&DeviceType::CPU, &RwPropertyKey::Other("SCHEDULING_CORE_TYPE".into()), &c).map_err(ov)?;
+        }
         let model = core.read_model_from_file(&xml.to_string_lossy(), &bin.to_string_lossy()).map_err(ov)?;
         let dynamic = model.is_dynamic();
         let mut compiled = core.compile_model(&model, DeviceType::CPU).map_err(ov)?;
@@ -105,6 +114,11 @@ impl Embedder {
     /// The IR takes any shape: it can embed document prompts (P4).
     pub fn can_embed_docs(&self) -> bool {
         self.dynamic
+    }
+
+    /// Document prompts `embed_docs` embeds at the same time (one per CPU stream).
+    pub fn doc_parallelism(&self) -> usize {
+        1 + self.doc_reqs.len()
     }
 
     /// The normalized vector (768-dim) of a document prompt (`crate::prompt::doc_prompt`), at

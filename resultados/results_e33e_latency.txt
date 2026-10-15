@@ -1,0 +1,7 @@
+20 queries, cold, C:\Desarrollo\Odoo\AI\HNTurboVec\work\p3\hn-sample-v3.hnz
+streams LM thr search p50     p90  stage1  decode embed tail  fetch  tokens
+      1      8       4647    5741       5    3608        866     53    6348
+      2      8       4989    6771       5    3801        752     58    6348
+      4      8       5075    7240       5    4140        512     59    6348
+      4     12       5282    7044       5    3987        574     59    6348
+      8      8       6376    7638       5    4344        743     57    6348

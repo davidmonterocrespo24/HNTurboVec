@@ -48,6 +48,11 @@ impl Default for RerankCfg {
 pub trait DocEmbed: Sync {
     /// `docs`: (HN id, prompt) of each document.
     fn embed(&self, docs: &[(u32, String)]) -> Result<Vec<Vec<f32>>>;
+    /// How many documents to hand over at a time: the embedder's parallelism (smaller hand-overs
+    /// keep the reranker's priorities fresh).
+    fn batch(&self) -> usize {
+        8
+    }
 }
 
 /// Stored document vectors used in place of re-embedding (evaluation without OpenVINO): the
@@ -97,6 +102,10 @@ impl DocEmbed for std::sync::Mutex<crate::embed::Embedder> {
         let mut e = self.lock().unwrap_or_else(|p| p.into_inner());
         e.embed_docs(&docs.iter().map(|d| d.1.clone()).collect::<Vec<_>>())
     }
+
+    fn batch(&self) -> usize {
+        self.lock().unwrap_or_else(|p| p.into_inner()).doc_parallelism()
+    }
 }
 
 /// The decoded prefix of a candidate (results reuse it: snippet, or the whole record).
@@ -136,6 +145,65 @@ struct Feat {
     b: f32,
     r0: f32,
     prompt: Option<String>,
+}
+
+/// Candidates waiting to be re-embedded: the decoding loop adds them, the embedding worker takes
+/// the best R0 first and drops those that can no longer be among the `n_e` best.
+struct EmbedQueue {
+    /// (candidate, R0, HN id, prompt)
+    pending: Vec<(usize, f32, u32, String)>,
+    /// the `n_e`-th best lower bound of R0: a pending candidate below it is out for good
+    theta: f32,
+    /// nothing more will be added
+    done: bool,
+}
+
+type SharedQueue = (std::sync::Mutex<EmbedQueue>, std::sync::Condvar);
+
+fn lock_queue(q: &SharedQueue) -> std::sync::MutexGuard<'_, EmbedQueue> {
+    q.0.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Ends the embedding worker when the search returns early (an error): what is pending is dropped.
+struct StopWorker<'a>(&'a SharedQueue);
+
+impl Drop for StopWorker<'_> {
+    fn drop(&mut self) {
+        let mut g = lock_queue(self.0);
+        if !g.done {
+            g.pending.clear();
+            g.done = true;
+        }
+        self.0 .1.notify_one();
+    }
+}
+
+/// The embedding worker of one reranked search: up to `emb.batch()` pending candidates at a time,
+/// the best R0 first, until nothing more will come and nothing is pending.
+fn embed_worker(q: &SharedQueue, emb: &dyn DocEmbed) -> Result<Vec<(usize, Vec<f32>)>> {
+    let batch = emb.batch().max(1);
+    let mut out = Vec::new();
+    loop {
+        let take: Vec<(usize, f32, u32, String)> = {
+            let mut g = lock_queue(q);
+            loop {
+                let theta = g.theta;
+                g.pending.retain(|p| p.1 >= theta);
+                if !g.pending.is_empty() || g.done {
+                    break;
+                }
+                g = q.1.wait(g).unwrap_or_else(|e| e.into_inner());
+            }
+            if g.pending.is_empty() {
+                return Ok(out);
+            }
+            g.pending.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+            let n = g.pending.len().min(batch);
+            g.pending.drain(..n).collect()
+        };
+        let (cis, docs): (Vec<usize>, Vec<(u32, String)>) = take.into_iter().map(|(ci, _, id, p)| (ci, (id, p))).unzip();
+        out.extend(cis.into_iter().zip(emb.embed(&docs)?));
+    }
 }
 
 fn ms(t: Instant) -> f64 {
@@ -254,44 +322,33 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
         Mode::Keyword => 0,
     };
     let ids: Vec<u32> = cands.iter().map(|c| sg.s.meta.try_row(c.doc as usize).map(|r| r.id)).collect::<Result<_>>()?;
+    let queue: SharedQueue = (std::sync::Mutex::new(EmbedQueue { pending: Vec::new(), theta: f32::NEG_INFINITY, done: false }), std::sync::Condvar::new());
     let embedded: HashMap<usize, Vec<f32>> = std::thread::scope(|sc| -> Result<HashMap<usize, Vec<f32>>> {
-        // the embedding worker: candidates as they are sent, a few at a time
-        let (tx, rx) = std::sync::mpsc::channel::<(usize, (u32, String))>();
-        let worker = (n_e > 0).then(|| {
-            sc.spawn(move || -> Result<Vec<(usize, Vec<f32>)>> {
-                let mut out = Vec::new();
-                while let Ok(first) = rx.recv() {
-                    let mut buf = vec![first];
-                    while buf.len() < 8 {
-                        match rx.try_recv() {
-                            Ok(x) => buf.push(x),
-                            Err(_) => break,
-                        }
-                    }
-                    let vecs = emb.embed(&buf.iter().map(|b| b.1.clone()).collect::<Vec<_>>())?;
-                    out.extend(buf.into_iter().map(|b| b.0).zip(vecs));
-                }
-                Ok(out)
-            })
-        });
+        let worker = (n_e > 0).then(|| sc.spawn(|| embed_worker(&queue, emb)));
+        let _stop = StopWorker(&queue);
         let mut sent = vec![false; n];
-        // send every decoded candidate whose R0 is among the n_e best lower bounds
+        // queue every decoded candidate whose R0 is among the n_e best lower bounds; the bound
+        // only rises, so the worker drops the queued ones that fall below it
         let speculate = |feats: &[Option<Feat>], sent: &mut [bool]| {
             if n_e == 0 {
                 return;
             }
             let mut lb: Vec<f32> = (0..n).map(|i| feats[i].as_ref().map_or(cands[i].s1, |f| f.r0)).collect();
             let theta = *lb.select_nth_unstable_by(n_e - 1, |a, b| b.total_cmp(a)).1;
+            let mut g = lock_queue(&queue);
+            g.theta = theta;
             for i in 0..n {
                 if let (false, Some(f)) = (sent[i], &feats[i]) {
                     if f.r0 >= theta {
                         if let Some(p) = &f.prompt {
-                            let _ = tx.send((i, (ids[i], p.clone())));
+                            g.pending.push((i, f.r0, ids[i], p.clone()));
                         }
                         sent[i] = true;
                     }
                 }
             }
+            drop(g);
+            queue.1.notify_one();
         };
         speculate(&feats, &mut sent);
         if !jobs.is_empty() {
@@ -317,21 +374,32 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
         }
         report.ms_decode = ms(t1);
         let t_tail = Instant::now();
-        // the final choice: the top n_e by R0, embedding those not sent yet
+        // the final choice: the top n_e by R0; the queued ones outside it are dropped, those
+        // inside it not queued yet are added
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by(|&a, &b| {
             let (fa, fb) = (feats[a].as_ref().unwrap(), feats[b].as_ref().unwrap());
             fb.r0.total_cmp(&fa.r0).then(fb.doc.cmp(&fa.doc))
         });
-        for &i in &order[..n_e] {
-            if !sent[i] {
-                if let Some(p) = &feats[i].as_ref().unwrap().prompt {
-                    let _ = tx.send((i, (ids[i], p.clone())));
-                }
-                sent[i] = true;
+        {
+            let mut top = vec![false; n];
+            for &i in &order[..n_e] {
+                top[i] = true;
             }
+            let mut g = lock_queue(&queue);
+            g.pending.retain(|p| top[p.0]);
+            for &i in &order[..n_e] {
+                if !sent[i] {
+                    let f = feats[i].as_ref().unwrap();
+                    if let Some(p) = &f.prompt {
+                        g.pending.push((i, f.r0, ids[i], p.clone()));
+                    }
+                    sent[i] = true;
+                }
+            }
+            g.done = true;
         }
-        drop(tx);
+        queue.1.notify_one();
         let got = match worker {
             Some(w) => w.join().map_err(|_| anyhow::anyhow!("fallo interno al embeber documentos"))??,
             None => Vec::new(),
@@ -380,4 +448,62 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
     }
     hits.truncate(k);
     Ok(Outcome { hits, prefixes, report, warning })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Condvar, Mutex};
+
+    /// Records the ids it is asked to embed; each vector is [id].
+    struct Rec(Mutex<Vec<u32>>);
+
+    impl DocEmbed for Rec {
+        fn embed(&self, docs: &[(u32, String)]) -> Result<Vec<Vec<f32>>> {
+            self.0.lock().unwrap().extend(docs.iter().map(|d| d.0));
+            Ok(docs.iter().map(|d| vec![d.0 as f32]).collect())
+        }
+
+        fn batch(&self) -> usize {
+            1
+        }
+    }
+
+    fn queue() -> SharedQueue {
+        (Mutex::new(EmbedQueue { pending: Vec::new(), theta: f32::NEG_INFINITY, done: false }), Condvar::new())
+    }
+
+    #[test]
+    fn worker_takes_the_best_first_and_drops_the_hopeless() {
+        let q = queue();
+        {
+            let mut g = lock_queue(&q);
+            for (ci, r0) in [(0usize, 0.5f32), (1, 0.9), (2, 0.1), (3, 0.7), (4, 0.4)] {
+                g.pending.push((ci, r0, 100 + ci as u32, String::new()));
+            }
+            // candidate 2 can no longer be among the best; 4 is exactly at the bound and stays
+            g.theta = 0.4;
+            g.done = true;
+        }
+        let emb = Rec(Mutex::new(Vec::new()));
+        let got = embed_worker(&q, &emb).unwrap();
+        assert_eq!(*emb.0.lock().unwrap(), vec![101, 103, 100, 104]);
+        assert_eq!(got.iter().map(|g| (g.0, g.1[0])).collect::<Vec<_>>(), vec![(1, 101.0), (3, 103.0), (0, 100.0), (4, 104.0)]);
+    }
+
+    #[test]
+    fn worker_waits_for_work_and_ends_when_stopped() {
+        let q = queue();
+        let emb = Rec(Mutex::new(Vec::new()));
+        std::thread::scope(|sc| {
+            let w = sc.spawn(|| embed_worker(&q, &emb));
+            lock_queue(&q).pending.push((0, 1.0, 7, String::new()));
+            q.1.notify_one();
+            // an early return: the guard ends the worker (what is still pending is dropped)
+            drop(StopWorker(&q));
+            let got = w.join().unwrap().unwrap();
+            assert!(got.len() <= 1);
+        });
+        assert!(lock_queue(&q).done);
+    }
 }

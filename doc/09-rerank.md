@@ -1,7 +1,7 @@
 # Reranking (P4): a compact block's candidates reordered by their prefix
 
-**Status:** implemented on 2026-10-15 (log entry E33 in [BITACORA.md](BITACORA.md)); quality
-measured; latency and memory measurements on a free machine pending. Design: a panel of three
+**Status:** implemented on 2026-10-15 (log entry E33 in [BITACORA.md](BITACORA.md)); quality and
+cold latency measured; the memory run with concurrent clients pending. Design: a panel of three
 architects and a judge (E33); the measurements it rests on: E30a (prefix embeddings), E30c
 (fusion), E30f (cascade).
 
@@ -38,8 +38,11 @@ Other modes:
 
 Decoding and re-embedding **overlap**: each candidate's features are computed as soon as its
 prefix is decoded, and a candidate whose R0 is already among the 50 best lower bounds (R0 when
-known, `s1` while it is still being decoded) is embedded at once. The final choice uses every R0,
-so results never depend on timing (a few speculative embeddings may be wasted).
+known, `s1` while it is still being decoded) is queued for embedding at once. The embedding worker
+takes the queued candidates with the best R0 first and drops those whose R0 has fallen below the
+50th best lower bound (that bound only rises, so they can no longer make the top 50). The final
+choice uses every R0, so results never depend on timing; a few speculative embeddings may still
+be wasted (those already embedded when they drop out).
 
 ## Determinism
 
@@ -58,7 +61,11 @@ identical with 1 or 4 embedding streams and with or without the overlap (checked
   `rerank: {candidates, decoded, tokens, embedded, ms_stage1, ms_decode, ms_embed}` and, in keyword
   mode with frequent words, `warning`. CLI: `hnz search --rerank`, `hnz eval --rerank`.
 - `HNZ_EMBED_STREAMS` (default 1): documents embedded at the same time; the embedder's memory
-  reservation grows by 64 MiB per stream.
+  reservation grows by 64 MiB per stream. More than 1 was slower on the measured laptop (below).
+- `HNZ_EMBED_THREADS`, `HNZ_EMBED_CORES` (`ANY_CORE`, `PCORE_ONLY`, `ECORE_ONLY`): the embedder's
+  CPU threads and core type (default: OpenVINO's choice). OpenVINO's results may change slightly
+  with the number of threads, so set them the same way on every machine that must agree bit for
+  bit.
 
 ## Quality (E33e, 300 queries per month, P@10)
 
@@ -72,12 +79,30 @@ identical with 1 or 4 embedding streams and with or without the overlap (checked
 | **P4, keyword with frequent words** | **0.229** | **0.152** | **0.187** | **0.189** |
 
 Quality gate (user's decision): mean >= 0.235 and every month >= today − 0.02: **met** (with the
-stored document vectors standing in for re-embedding; the run with the real CPU re-embedding is in
-the log).
+stored document vectors standing in for re-embedding). With the real CPU re-embedding (E33e step
+3): 2024-01 0.281 (stored vectors: 0.282), 2010-06 0.194 (0.193); keyword search identical.
 
 ## Latency (cold, sample block)
 
-To be measured on a free machine (`experimentos/bench_p4_latency.py`). With the CPU shared with
-the LM training (16-thread Core Ultra 7 265H): ~100-120 prefixes (~6,000-9,000 LM tokens) decoded
-in 4-6 s, the re-embedding of 50 prompts hidden under the decoding; 5-9 s per cold query. Target:
-~4 s with >= 16 threads or an iGPU (user's decision).
+Measured with `experimentos/bench_p4_latency.py` (E33e step 4, `resultados/results_e33e_latency.txt`):
+20 eval queries, each in a new `hnz search --rerank` process (hnz's caches empty, the OS file cache
+warm, model loading not counted), k = 10, on a Core Ultra 7 265H laptop (6 P + 8 E + 2 LP-E cores,
+16 threads) with nothing else running:
+
+| Embedding streams | LM threads | search p50 | p90 | decoding | wait after decoding |
+|---|---|---|---|---|---|
+| **1 (default)** | **8 (default)** | **4,647 ms** | **5,741 ms** | 3,608 ms | 866 ms |
+| 2 | 8 | 4,989 | 6,771 | 3,801 | 752 |
+| 4 | 8 | 5,075 | 7,240 | 4,140 | 512 |
+| 4 | 12 | 5,282 | 7,044 | 3,987 | 574 |
+| 8 | 8 | 6,376 | 7,638 | 4,344 | 743 |
+
+- **Decoding is ~78 % of a cold query:** ~100 prefixes, ~6,350 LM tokens, ~1,760 tokens/s with 8
+  threads. Stage 1 takes 5 ms; fetching 10 results 53-59 ms (they reuse the decoded prefixes).
+- More embedding streams shorten the wait at the end but take CPU from the LM, which then decodes
+  more slowly; 12 LM threads are no faster than 8 on this hybrid CPU (its E-cores hold back every
+  step). The defaults are the best setting here.
+- The embedding queue with priorities (above) cut the wait after decoding from a median of 571 ms
+  to 434 ms on 21 queries, with identical results.
+- **Target:** ~4 s needs >= 16 fast threads or an iGPU (user's decision); this 16-thread hybrid
+  laptop gives p50 4.6 s, p90 5.7 s. A repeated query reuses the cached prefixes.

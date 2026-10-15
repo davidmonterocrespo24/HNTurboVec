@@ -962,3 +962,75 @@ the multi-day all-HN runs (P5) start after P3.
   reranker reproduces the Python simulations (E30c 0.238, E30f cascade 0.238). Keyword search
   more than doubles (frequent words are now found). A cold query decoded ~96 prefixes (~6,000
   tokens) in ~3.3-3.5 s here, with the CPU shared with the LM training.
+- **P4 step 4 — decoding and re-embedding overlap; several embedding streams** (`rerank.rs`,
+  `embed.rs`): each candidate's features (b, R0, document prompt) are computed when its prefix
+  arrives, and a candidate whose R0 is already among the 50 best lower bounds (`s1` for those still
+  decoding, since b >= 0) is embedded at once while the LM decodes the rest; the final top 50 is
+  chosen from every R0, so results never depend on timing. Each document prompt is embedded alone
+  at its canonical shape `[1, tokens rounded up to 16]` with the precision pinned to f32;
+  `HNZ_EMBED_STREAMS` (default 1) embeds that many documents at the same time on as many CPU
+  streams. Checked: results identical byte for byte with and without the overlap and with 1 or 4
+  streams. First timings, with the CPU shared with the LM training: 50 documents embedded in 3.1 s
+  with 1 stream and 1.9 s with 4; with the overlap, the wait after the last prefix fell to ~0.3 ms;
+  a cold reranked query took 6-9 s.
+- **Embedder memory with document requests:** each stream keeps its own activations; with 4 streams
+  the measured peak was 782 MB against 544 MB reserved. The reservation now adds
+  `DOC_REQUEST_BYTES` = 64 MiB per stream (a 256-token prompt's activations, with margin).
+- **Incident (2026-10-15 ~14:00):** the system stopped the resumed LM training (step 16,980 of
+  25,000; last checkpoint ~16,500, 13:49) and the real-embedding eval (E33e step 3) for low
+  memory: the training holds ~21 GB of private memory, and the eval with its embedder 2-3 GB more,
+  on this 31 GB laptop. The training stays stopped until the user asks; heavy jobs run alone.
+- **E33e step 3 — real CPU re-embedding** (`hnz eval --rerank --emb ov --quick`: the block's dynamic
+  int8 IR on the CPU instead of the stored vectors; 300 queries per month → `work/p3/e33e_ov.log`),
+  P@10 / MRR:
+| Month | cascade 50, re-embedded on the CPU | cascade 50, stored vectors (step 1) | keyword |
+|---|---|---|---|
+| 2024-01 | 0.281 / 0.574 | 0.282 / 0.573 | 0.229 (the same) |
+| 2010-06 | 0.194 / 0.466 | 0.193 / 0.465 | 0.152 (the same) |
+| 2015-06 | (run stopped; repeated below) | 0.241 / 0.493 | 0.187 |
+  Within the plan's ±0.003 per month: re-embedding on the CPU with the int8 dynamic IR gives the
+  quality of the fp16 vectors computed on the iGPU at pack time.
+- **E33e step 4 — cold latency on a free machine** (`experimentos/bench_p4_latency.py` →
+  `resultados/results_e33e_latency.txt`): 20 eval queries, each in a new `hnz search --rerank`
+  process (hnz's caches empty, the OS file cache warm, model loading not counted), k = 10, sample
+  block v3, Core Ultra 7 265H (6 P + 8 E + 2 LP-E cores, 16 threads), nothing else running:
+| Embedding streams | LM threads | search p50 | p90 | decoding | wait after decoding |
+|---|---|---|---|---|---|
+| **1** | **8** | **4,647 ms** | **5,741 ms** | 3,608 ms | 866 ms |
+| 2 | 8 | 4,989 | 6,771 | 3,801 | 752 |
+| 4 | 8 | 5,075 | 7,240 | 4,140 | 512 |
+| 4 | 12 | 5,282 | 7,044 | 3,987 | 574 |
+| 8 | 8 | 6,376 | 7,638 | 4,344 | 743 |
+  Stage 1 takes 5 ms and fetching the 10 results 53-59 ms (they come from the decoded prefixes);
+  each query decodes ~6,350 LM tokens (~100 prefixes): **decoding is ~78 % of a cold query**
+  (~1,760 tokens/s). More embedding streams shorten the wait at the end but slow the decoding more
+  (they take CPU from the LM), and 12 LM threads are no faster than 8 on this hybrid CPU (the slow
+  E-cores hold back every step, as in E20). **1 stream and 8 LM threads (the defaults) are the best
+  here: p50 4.6 s, p90 5.7 s**, above the ~4 s target (the user's decision: >= 16 threads or an
+  iGPU for ~4 s).
+- **Embedding queue with priorities** (`rerank.rs`, `api.rs`): the worker no longer takes the
+  candidates in arrival order. It takes the queued ones with the best R0 first, one round at a time
+  (`DocEmbed::batch` = the embedder's streams), and drops those whose R0 has fallen below the 50th
+  best lower bound (that bound only rises, so they can no longer make the top 50). In the library,
+  the embedder's thread fills each round with documents of several concurrent searches, oldest
+  first. Two Rust tests cover the queue (31 tests pass). Against the previous binary on 21 queries
+  (`resultados/results_e33e_queue_same.txt`): **identical results (21/21)**; documents embedded per
+  query 68.7 → 65.4 (50 are needed); wait after decoding median 571 → 434 ms (mean 537 → 438).
+  Most of the waste remains: the embedder keeps up with the decoding, so a candidate is usually
+  embedded before it drops out.
+- **The LM retrained on 5 % of HN** (P3 decision: adopt it only if it saves >= 2 % of text);
+  bits/byte in float32 over 1,000 unseen records per month (`logs/train_lm5.log`):
+| Step (of 25,000) | 2024-01 | 2015-06 | 2010-06 |
+|---|---|---|---|
+| 2,500 | 1.3761 | 1.3493 | 1.4061 |
+| 5,000 | 1.3665 | 1.3397 | 1.3968 |
+| 7,500 | 1.3488 | 1.3253 | 1.3806 |
+| 10,000 | 1.3373 | 1.3126 | 1.3709 |
+| 12,500 | 1.3286 | 1.3028 | 1.3608 |
+| 15,000 | 1.3213 | 1.2986 | 1.3543 |
+| E29's LM (1 % of HN, 5,000 steps; the one in use) | 1.2959 | 1.2718 | 1.3258 |
+  At 60 % of its schedule it is still 2.0 % behind the LM in use, but at the same fraction of its
+  own schedule (step 3,000, interpolated: 1.327 on 2024-01) the LM in use was 0.4 % behind this run.
+  If the rest of the schedule gains what E29's did, it ends near 1.291 bits/byte on 2024-01: ~0.4 %
+  better than the LM in use, far from the 2 % needed (a projection, not a measurement). Stopped at
+  step 16,980 (incident above); finishing it takes ~3 h of the iGPU with nothing heavy alongside.
