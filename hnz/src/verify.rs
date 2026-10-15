@@ -131,23 +131,6 @@ struct ItemCheck {
     index_text: String,
 }
 
-/// The prompt prefixes of `text/prefix_fallback`: doc -> (flags, prefix).
-fn prefix_fallback(raw: &[u8]) -> Option<HashMap<u32, (u8, String)>> {
-    let n = u32::from_le_bytes(raw.get(..4)?.try_into().ok()?) as usize;
-    let mut p = 4;
-    let mut m = HashMap::with_capacity(n);
-    for _ in 0..n {
-        let doc = u32::from_le_bytes(raw.get(p..p + 4)?.try_into().ok()?);
-        let flags = *raw.get(p + 4)?;
-        p += 5;
-        let len = crate::varint::try_get(raw, &mut p)? as usize;
-        let s = String::from_utf8(raw.get(p..p.checked_add(len)?)?.to_vec()).ok()?;
-        p += len;
-        m.insert(doc, (flags, s));
-    }
-    (p == raw.len()).then_some(m)
-}
-
 /// Deep check: the block against the sources of its pack spec. It streams: per document it keeps
 /// only the id, time and parent (plus a few bits), and handles one month of items at a time
 /// (≈4 GB at 49 M documents, most of it the word index being rebuilt).
@@ -299,7 +282,7 @@ fn deep(block: &Arc<Block>, eng: &Engine, spec_path: Option<&Path>, decode: Opti
         diffs.add(format!("meta/kids.idx: {} offsets for {nf} frames", koffs.len()));
     }
     let fb = match block.part("text/prefix_fallback") {
-        Some(_) => prefix_fallback(&block.read_part("text/prefix_fallback")?).ok_or_else(|| crate::block::corrupt("text/prefix_fallback"))?,
+        Some(_) => crate::lm::store::parse_prefix_fallback(&block.read_part("text/prefix_fallback")?).ok_or_else(|| crate::block::corrupt("text/prefix_fallback"))?,
         None => HashMap::new(),
     };
     let classes = crate::globals::load_df(&spec.globals).map_err(src)?;

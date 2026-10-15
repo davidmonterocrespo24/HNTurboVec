@@ -554,6 +554,11 @@ impl Bm25 {
         }
     }
 
+    /// BM25 of a term that appears `tf` times in document `doc` (its full-length norm).
+    pub fn score_tf(&self, idf: f32, tf: u32, doc: u32) -> f32 {
+        self.score(idf, tf, doc)
+    }
+
     #[inline]
     fn score(&self, idf: f32, tf: u32, doc: u32) -> f32 {
         let dl = norm_decode(self.norms[doc as usize]);

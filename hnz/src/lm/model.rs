@@ -529,6 +529,14 @@ impl<'m> Batch<'m> {
         Self { m, caches: (0..n).map(|_| KvCache::new(m.h.layers, hd, hs)).collect(), pos: vec![0; n] }
     }
 
+    /// One more slot, with an empty KV cache; returns its index.
+    pub fn add_slot(&mut self) -> usize {
+        let (hd, hs) = (self.m.h.hidden, self.m.h.hidden / self.m.h.heads);
+        self.caches.push(KvCache::with_limit(self.m.h.layers, hd, hs, 0));
+        self.pos.push(0);
+        self.caches.len() - 1
+    }
+
     /// Vacía el hueco `slot` (KV-cache y posición) para empezar otra secuencia en él.
     pub fn reset(&mut self, slot: usize) {
         self.reset_limited(slot, usize::MAX);

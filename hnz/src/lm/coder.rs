@@ -87,12 +87,23 @@ impl Encoder {
 pub struct Decoder<'a> {
     code: u32,
     range: u32,
-    data: &'a [u8],
+    data: std::borrow::Cow<'a, [u8]>,
     pos: usize,
+}
+
+impl Decoder<'static> {
+    /// A decoder that owns its bytes (for decoding jobs that outlive the caller's buffers).
+    pub fn owned(data: Vec<u8>) -> Self {
+        Self::start(std::borrow::Cow::Owned(data))
+    }
 }
 
 impl<'a> Decoder<'a> {
     pub fn new(data: &'a [u8]) -> Self {
+        Self::start(std::borrow::Cow::Borrowed(data))
+    }
+
+    fn start(data: std::borrow::Cow<'a, [u8]>) -> Self {
         let mut d = Self { code: 0, range: u32::MAX, data, pos: 0 };
         for _ in 0..4 {
             d.code = (d.code << 8) | d.next() as u32;

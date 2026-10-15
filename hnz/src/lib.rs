@@ -17,6 +17,7 @@ pub mod meta;
 pub mod pack;
 pub mod plan;
 pub mod prompt;
+pub mod rerank;
 pub mod segment;
 pub mod textstore;
 pub mod tokenize;

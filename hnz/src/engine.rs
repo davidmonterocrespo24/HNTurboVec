@@ -49,7 +49,8 @@ fn round_cost(kc: usize, c1: usize) -> u64 {
 
 /// Un solo lote del LM a la vez en todo el proceso: su pool de hilos es global y dos lotes a la vez
 /// solo competirían por los mismos núcleos. Lo demás (metadatos, nivel zstd, cachés) va en paralelo.
-static LM_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+use crate::lm::jobs::{Decoded, Want};
+use crate::lm::service::{Job, LmService, Prio};
 
 /// Bytes counted per cached record: strings + hash-table entry with growth slack.
 fn rec_weight(r: &TextRec) -> u64 {
@@ -58,6 +59,10 @@ fn rec_weight(r: &TextRec) -> u64 {
 
 fn title_weight(t: &String) -> u64 {
     160 + t.len() as u64
+}
+
+fn prefix_weight(p: &Arc<crate::rerank::Prefix>) -> u64 {
+    96 + p.bytes.len() as u64
 }
 
 pub struct Seg {
@@ -129,13 +134,18 @@ pub struct Engine {
     pub segs: Vec<Seg>,
     pub total_docs: usize,
     /// modelos LM de los segmentos fríos (por nombre de fichero)
-    pub lms: HashMap<String, LmCodec>,
+    pub lms: HashMap<String, Arc<LmCodec>>,
+    /// the LM decoding service of each model (started when first needed): one continuous batch
+    /// shared by every query, within the LM pool
+    lm_svc: Mutex<HashMap<String, Arc<LmService>>>,
     /// RAM cache of fully decompressed LM-tier records
     cache: Mutex<GenCache<(usize, u32), TextRec>>,
     /// caché L2 (disco) de registros del nivel LM ya descomprimidos
     pub l2: Option<crate::cache::L2>,
     /// already decoded titles of LM-tier stories (thread context)
     titles: Mutex<GenCache<(usize, u32), String>>,
+    /// blocks: decoded prompt prefixes of reranked candidates (P4), by document
+    pub prefixes: Mutex<GenCache<u32, Arc<crate::rerank::Prefix>>>,
     seg_keys: Vec<u64>,
     /// por segmento, 1 byte por doc: tipo | dead<<3 | deleted<<4 (filtros sin descomprimir nada)
     flags: Vec<Vec<u8>>,
@@ -149,6 +159,9 @@ pub struct Engine {
     c1_min: usize,
     /// the compact block this engine reads, if it is one (P3)
     pub block: Option<Arc<crate::block::Block>>,
+    /// blocks: the prompt prefix of each document with a vector whose record has no LM tokens
+    prefix_fb: HashMap<u32, (u8, String)>,
+    _prefix_charge: Charge,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,6 +207,23 @@ impl Default for Query {
             vec_cand: None,
         }
     }
+}
+
+/// A query word for reranking (P4): its global idf and its postings (`TermPost::Frequent` for
+/// the words too common to have postings in a block).
+#[derive(Clone, Debug)]
+pub struct QTerm {
+    pub text: String,
+    pub idf: f32,
+    pub post: TermPost,
+}
+
+/// A stage-1 candidate (P4): its vector score s1 (0 without a vector).
+#[derive(Clone, Copy, Debug)]
+pub struct Cand {
+    pub doc: u32,
+    pub s1: f32,
+    pub has_vec: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -325,7 +355,7 @@ impl Engine {
             }
         }
         // LM models: their RAM is measured while loading (at least the size of the file)
-        let mut lms: HashMap<String, LmCodec> = HashMap::new();
+        let mut lms: HashMap<String, Arc<LmCodec>> = HashMap::new();
         let mut model_bytes = 0u64;
         for sg in &segs {
             if let (Some(f), TextSource::Lm(l)) = (&sg.s.man.lm_model, &sg.s.text) {
@@ -334,7 +364,7 @@ impl Engine {
                     let (c, steady, _) = crate::mem::measure(|| LmCodec::load(&path));
                     let c = c.with_context(|| format!("modelo LM {f}"))?;
                     model_bytes += steady.max(std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0));
-                    lms.insert(f.clone(), c);
+                    lms.insert(f.clone(), Arc::new(c));
                 }
                 l.check_model(&lms[f]).with_context(|| format!("segmento {}", sg.s.man.name))?;
             }
@@ -422,17 +452,25 @@ impl Engine {
         };
         let seg = Segment { dir: block.dir(), man, meta, text: TextSource::Lm(lm) };
         let mut lms = HashMap::new();
-        lms.insert("block".to_string(), codec);
+        lms.insert("block".to_string(), Arc::new(codec));
         let c1 = num(&m["search"]["c1"]).max(2000) as usize;
         let mut opts = opts;
         opts.l2 = None; // the block folder is read-only data: no disk cache written next to it
-        Ok(Self::assemble(vec![Seg { s: seg, bm25: Some(bm25), vec: Some(vec) }], lms, model_bytes, vec![flags], None, opts, c1, Some(block)))
+        let prefix_fb = match block.part("text/prefix_fallback") {
+            Some(_) => crate::lm::store::parse_prefix_fallback(&block.read_part("text/prefix_fallback")?).ok_or_else(|| crate::block::corrupt("text/prefix_fallback"))?,
+            None => HashMap::new(),
+        };
+        let fb_bytes: u64 = prefix_fb.values().map(|v| v.1.capacity() as u64 + 48).sum();
+        let mut eng = Self::assemble(vec![Seg { s: seg, bm25: Some(bm25), vec: Some(vec) }], lms, model_bytes, vec![flags], None, opts, c1, Some(block));
+        eng._prefix_charge = eng.budget.charge(Class::Index, fb_bytes);
+        eng.prefix_fb = prefix_fb;
+        Ok(eng)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn assemble(
         segs: Vec<Seg>,
-        lms: HashMap<String, LmCodec>,
+        lms: HashMap<String, Arc<LmCodec>>,
         model_bytes: u64,
         flags: Vec<Vec<u8>>,
         l2: Option<crate::cache::L2>,
@@ -449,14 +487,18 @@ impl Engine {
             .collect();
         let b = &opts.budget;
         let index = segs.iter().map(|sg| sg.ram_bytes() as u64).sum::<u64>() + flags.iter().map(|f| f.capacity() as u64).sum::<u64>();
-        let (titles_cap, records_cap) = (opts.cache_bytes / 8, opts.cache_bytes - opts.cache_bytes / 8);
+        // blocks keep a quarter for the reranker's prefixes
+        let prefixes_cap = if block.is_some() { opts.cache_bytes / 4 } else { 0 };
+        let (titles_cap, records_cap) = (opts.cache_bytes / 8, opts.cache_bytes - opts.cache_bytes / 8 - prefixes_cap);
         Self {
             segs,
             total_docs,
             lms,
+            lm_svc: Mutex::new(HashMap::new()),
             cache: Mutex::new(GenCache::new(records_cap, rec_weight, Some(b.charge(Class::Cache, 0)))),
             l2,
             titles: Mutex::new(GenCache::new(titles_cap, title_weight, Some(b.charge(Class::Cache, 0)))),
+            prefixes: Mutex::new(GenCache::new(prefixes_cap, prefix_weight, Some(b.charge(Class::Cache, 0)))),
             seg_keys,
             flags,
             lm_pool: opts.lm_pool,
@@ -465,6 +507,8 @@ impl Engine {
             model_charge: b.charge(Class::Model, model_bytes),
             c1_min,
             block,
+            prefix_fb: HashMap::new(),
+            _prefix_charge: b.charge(Class::Index, 0),
             budget: opts.budget,
         }
     }
@@ -488,16 +532,11 @@ impl Engine {
             }
             wants.push((0usize, d, None::<usize>, false));
         }
-        let codec = self.lms.get("block").context("block LM")?;
-        let raws: Vec<std::borrow::Cow<[u8]>> = wants.iter().map(|w| lm.raw(w.1)).collect::<Result<_>>()?;
-        let refs: Vec<&[u8]> = raws.iter().map(|c| c.as_ref()).collect();
-        let n = refs.len();
-        let dec = {
-            let _g = LM_GATE.lock().unwrap_or_else(|e| e.into_inner());
-            codec.decode_records_pool(&refs, true, &vec![None; n], &vec![false; n], &vec![true; n], self.lm_pool)
-        };
-        let dec = dec.map_err(|e| crate::block::incompatible(format!("canarios: {e:#}")))?;
-        for (c, (r, _)) in cans.iter().zip(dec) {
+        let jobs: Vec<Job> = wants.iter().map(|w| Ok(Job { rec: lm.raw(w.1)?.into_owned(), has_check: true, want: Want::Full })).collect::<Result<_>>()?;
+        let n = jobs.len();
+        let dec = self.lm_service("block")?.run(jobs, Prio::Interactive).map_err(|e| crate::block::incompatible(format!("canarios: {e:#}")))?;
+        for (c, d) in cans.iter().zip(dec) {
+            let Decoded::Text(r, _) = d else { return Err(crate::block::incompatible("canarios: decodificación inesperada")) };
             if xxh(format!("{}\0{}\0{}", r.title, r.url, r.text).as_bytes()).as_str() != c["text"].as_str().unwrap_or_default() {
                 return Err(crate::block::incompatible(format!("canario {}: el texto descomprimido no coincide (¿binario o CPU distintos?)", c["id"])));
             }
@@ -574,6 +613,21 @@ impl Engine {
     pub fn set_lm_pool(&mut self, bytes: u64) {
         self.lm_pool = bytes;
         self.lm_charge.resize(if bytes == u64::MAX { 0 } else { bytes });
+        for s in self.lm_svc.lock().unwrap_or_else(|e| e.into_inner()).values() {
+            s.set_pool(bytes);
+        }
+    }
+
+    /// The decoding service of LM model `name`, started on first use with the current pool.
+    pub fn lm_service(&self, name: &str) -> Result<Arc<LmService>> {
+        let mut m = self.lm_svc.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(s) = m.get(name) {
+            return Ok(s.clone());
+        }
+        let codec = self.lms.get(name).with_context(|| format!("falta el modelo LM {name}"))?.clone();
+        let s = Arc::new(LmService::new(codec, self.lm_pool)?);
+        m.insert(name.to_string(), s.clone());
+        Ok(s)
     }
 
     /// Sets the RAM of the caches: 1/8 for the index of the disk cache (if there is one), and of
@@ -587,8 +641,10 @@ impl Engine {
             None => 0,
         };
         let ram = bytes - l2;
+        let prefixes = if self.block.is_some() { ram / 4 } else { 0 };
         self.titles.lock().unwrap_or_else(|e| e.into_inner()).set_cap(ram / 8);
-        self.cache.lock().unwrap_or_else(|e| e.into_inner()).set_cap(ram - ram / 8);
+        self.prefixes.lock().unwrap_or_else(|e| e.into_inner()).set_cap(prefixes);
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).set_cap(ram - ram / 8 - prefixes);
     }
 
     /// RAM given to the caches (as last set by `set_cache_bytes`).
@@ -597,7 +653,8 @@ impl Engine {
         // one lock at a time (`texts_each` takes records then titles: never hold both here)
         let records = self.cache.lock().unwrap_or_else(|e| e.into_inner()).cap();
         let titles = self.titles.lock().unwrap_or_else(|e| e.into_inner()).cap();
-        records + titles + l2
+        let prefixes = self.prefixes.lock().unwrap_or_else(|e| e.into_inner()).cap();
+        records + titles + prefixes + l2
     }
 
     /// Memory needed by the disk reads of the vector scan when some codes are not in RAM: one
@@ -641,7 +698,7 @@ impl Engine {
 
     /// Modelo LM de un segmento del nivel frío.
     pub fn codec_for(&self, si: usize) -> Option<&LmCodec> {
-        self.lms.get(self.segs[si].s.man.lm_model.as_ref()?)
+        self.lms.get(self.segs[si].s.man.lm_model.as_ref()?).map(|c| c.as_ref())
     }
 
     /// ¿Cumple el documento los filtros de la consulta? (las filas deleted nunca se devuelven)
@@ -900,6 +957,134 @@ impl Engine {
         Ok(hits)
     }
 
+    /// The stored prompt prefix (flags, prefix) of a block document whose record has no LM tokens.
+    pub fn fallback_prefix(&self, doc: u32) -> Option<(u8, &str)> {
+        self.prefix_fb.get(&doc).map(|(f, s)| (*f, s.as_str()))
+    }
+
+    /// The query's words for BM25 over a block (P4): the global idf from the df of every term
+    /// (frequent ones included), words the index does not know dropped, at most `MAX_TERMS` (the
+    /// rarest), sorted.
+    pub fn query_terms(&self, text: &str) -> Result<Vec<QTerm>> {
+        let Some(bm) = self.segs.first().and_then(|s| s.bm25.as_ref()) else { return Ok(Vec::new()) };
+        let mut words = tokenize::terms(text);
+        words.sort();
+        words.dedup();
+        let n = self.total_docs as f32;
+        let mut out = Vec::new();
+        for w in words {
+            if let Some((post, df)) = bm.lookup(&w)? {
+                let idf = ((n - df as f32 + 0.5) / (df as f32 + 0.5) + 1.0).ln();
+                out.push(QTerm { text: w, idf, post });
+            }
+        }
+        if out.len() > MAX_TERMS {
+            out.sort_by(|a, b| b.idf.total_cmp(&a.idf).then(a.text.cmp(&b.text)));
+            out.truncate(MAX_TERMS);
+            out.sort_by(|a, b| a.text.cmp(&b.text));
+        }
+        Ok(out)
+    }
+
+    /// P4 stage 1 on a block: the top `kv` documents by the vector score and then the top `kb`
+    /// by the rare-term score (`rare`: postings and idf), among those that pass the query's
+    /// filters, without repeats. A round is widened (x4, up to x16) while filters leave too few.
+    pub fn candidates(&self, q: &Query, qvec: Option<&[f32]>, rare: &[(TermPost, f32)], kv: usize, kb: usize, grow: &(dyn Fn(u64) -> bool + Sync)) -> Result<Vec<Cand>> {
+        let sg = &self.segs[0];
+        let n_docs = sg.s.man.n_docs;
+        let lo = match q.from {
+            Some(t) => sg.s.meta.try_doc_at_time(t)?,
+            None => 0,
+        } as u32;
+        let hi = match q.to {
+            Some(t) => sg.s.meta.try_doc_at_time(t)?,
+            None => n_docs,
+        } as u32;
+        if lo >= hi {
+            return Ok(Vec::new());
+        }
+        let author = match &q.by {
+            Some(by) => match sg.s.meta.authors.position(by) {
+                Some(a) => Some(a as u32),
+                None => return Ok(Vec::new()),
+            },
+            None => None,
+        };
+        let lut = match (&sg.vec, qvec) {
+            (Some(v), Some(x)) => Some(QueryLut::new(x, v.nbytes)),
+            _ => None,
+        };
+        let s1_of = |docs: &[u32]| -> Result<Vec<f32>> {
+            match (&sg.vec, &lut) {
+                (Some(v), Some(l)) => v.score_docs(l, docs),
+                _ => Ok(vec![f32::NEG_INFINITY; docs.len()]),
+            }
+        };
+        let only_rare_types = !q.types.is_empty() && q.types.iter().all(|t| matches!(t, 3..=5));
+        let (mut vecs, mut rares): (Vec<u32>, Vec<u32>) = (Vec::new(), Vec::new());
+        if q.by.is_some() || only_rare_types {
+            // an exact scan of the range's metadata (author / rare types)
+            let (b0, b1) = (lo as usize / META_BLOCK, (hi as usize - 1) / META_BLOCK);
+            let mut docs = Vec::new();
+            for b in b0..=b1 {
+                for (kk, row) in sg.s.meta.try_block(b)?.iter().enumerate() {
+                    let d = b * META_BLOCK + kk;
+                    if d >= lo as usize && d < hi as usize && self.passes(q, 0, row, author) {
+                        docs.push(d as u32);
+                    }
+                }
+            }
+            let s1 = s1_of(&docs)?;
+            let br = match (&sg.bm25, rare.is_empty()) {
+                (Some(b), false) => b.score_docs(rare, &docs)?,
+                _ => vec![0.0; docs.len()],
+            };
+            let mut by_v: Vec<usize> = (0..docs.len()).filter(|&i| s1[i].is_finite()).collect();
+            by_v.sort_by(|&a, &b| s1[b].total_cmp(&s1[a]).then(docs[b].cmp(&docs[a])));
+            vecs = by_v.iter().take(kv).map(|&i| docs[i]).collect();
+            let mut by_b: Vec<usize> = (0..docs.len()).filter(|&i| br[i] > 0.0).collect();
+            by_b.sort_by(|&a, &b| br[b].total_cmp(&br[a]).then(docs[b].cmp(&docs[a])));
+            rares = by_b.iter().take(kb).map(|&i| docs[i]).collect();
+        } else {
+            let n_rng = (hi - lo) as usize;
+            if let (Some(v), Some(l), true) = (&sg.vec, &lut, kv > 0) {
+                let mut mult = 1;
+                loop {
+                    let (kc, c1) = round_sizes(q, kv, n_rng, mult, self.c1_min);
+                    let r = v.search(l, lo as usize, hi as usize, c1, kc)?;
+                    let saturated = r.len() >= kc && kc < n_rng;
+                    vecs = r.into_iter().map(|x| x.0).filter(|&d| self.passes_flags(q, 0, d)).take(kv).collect();
+                    if vecs.len() >= kv || !saturated || mult >= 16 {
+                        break;
+                    }
+                    let (kc4, c14) = round_sizes(q, kv, n_rng, mult * 4, self.c1_min);
+                    if !grow(round_cost(kc4, c14).saturating_sub(round_cost(kc, c1))) {
+                        break;
+                    }
+                    mult *= 4;
+                }
+            }
+            if let (Some(b), false) = (&sg.bm25, rare.is_empty() || kb == 0) {
+                let mut mult = 1;
+                loop {
+                    let kc = ((kb * 20).max(200) * mult).min(n_rng);
+                    let r = b.top_k(rare, lo, hi, kc)?;
+                    let saturated = r.len() >= kc && kc < n_rng;
+                    rares = r.into_iter().map(|x| x.0).filter(|&d| self.passes_flags(q, 0, d)).take(kb).collect();
+                    if rares.len() >= kb || !saturated || mult >= 16 {
+                        break;
+                    }
+                    mult *= 4;
+                }
+            }
+        }
+        // the vector list first, then the rare-term list
+        let mut seen = std::collections::HashSet::new();
+        let docs: Vec<u32> = vecs.into_iter().chain(rares).filter(|d| seen.insert(*d)).collect();
+        let s1 = s1_of(&docs)?;
+        Ok(docs.iter().zip(s1).map(|(&doc, s)| Cand { doc, s1: if s.is_finite() { s } else { 0.0 }, has_vec: s.is_finite() }).collect())
+    }
+
     /// Busca un id de HN en todo el archivo: (segmento, doc, metadatos).
     pub fn find_meta(&self, id: u32) -> Result<Option<(usize, usize, MetaRow)>> {
         let Some(si) = self.segs.partition_point(|s| s.s.man.id_min <= id).checked_sub(1) else { return Ok(None) };
@@ -965,31 +1150,24 @@ impl Engine {
             }
         }
         for (f, pending) in groups {
-            let codec = self.lms.get(&f).with_context(|| format!("falta el modelo LM {f}"))?;
-            let owned: Vec<std::borrow::Cow<[u8]>> = pending
+            // someone waits for these texts: interactive jobs of the shared batch
+            let jobs: Vec<Job> = pending
                 .iter()
-                .map(|&i| match &self.segs[wants[i].0].s.text {
-                    TextSource::Lm(l) => l.raw(wants[i].1),
-                    _ => unreachable!(),
+                .map(|&i| {
+                    let TextSource::Lm(l) = &self.segs[wants[i].0].s.text else { unreachable!() };
+                    let want = if wants[i].3 { Want::Title } else { wants[i].2.map_or(Want::Full, Want::Snippet) };
+                    Ok(Job { rec: l.raw(wants[i].1)?.into_owned(), has_check: l.rec_check(), want })
                 })
                 .collect::<Result<_>>()?;
-            let raws: Vec<&[u8]> = owned.iter().map(|c| c.as_ref()).collect();
-            let limits: Vec<Option<usize>> = pending.iter().map(|&i| wants[i].2).collect();
-            let tonly: Vec<bool> = pending.iter().map(|&i| wants[i].3).collect();
-            let checks: Vec<bool> = pending
-                .iter()
-                .map(|&i| match &self.segs[wants[i].0].s.text {
-                    TextSource::Lm(l) => l.rec_check(),
-                    _ => false,
+            let dec: Vec<(TextRec, bool)> = self
+                .lm_service(&f)?
+                .run(jobs, Prio::Interactive)?
+                .into_iter()
+                .map(|d| match d {
+                    Decoded::Text(t, p) => Ok((t, p)),
+                    Decoded::Prefix(_) => anyhow::bail!("decodificación inesperada"),
                 })
-                .collect();
-            // one batch at a time in the process, within the LM memory cap
-            let dec = {
-                let _g = LM_GATE.lock().unwrap_or_else(|e| e.into_inner());
-                codec.decode_records_pool(&raws, true, &limits, &tonly, &checks, self.lm_pool)?
-            };
-            drop(raws);
-            drop(owned);
+                .collect::<Result<_>>()?;
             {
                 let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
                 let mut titles = self.titles.lock().unwrap_or_else(|e| e.into_inner());

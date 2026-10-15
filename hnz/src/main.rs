@@ -245,6 +245,16 @@ enum Cmd {
         k: usize,
         #[command(flatten)]
         m: ModelArgs,
+        /// P4: evaluate the reranker (compact blocks) instead of stage 1
+        #[arg(long)]
+        rerank: bool,
+        /// document vectors for the reranker: "oracle:<base with {m}>" reads stored vectors (e.g.
+        /// oracle:emb/g2v2_{m}, with --months) instead of re-embedding the prompts
+        #[arg(long)]
+        emb: Option<String>,
+        /// months of the oracle's files (e.g. 2010-06,2015-06,2024-01)
+        #[arg(long)]
+        months: Option<String>,
     },
     /// Prueba del nivel frío sobre un segmento zstd: comprime y descomprime (en lote) una muestra
     /// Exporta a JSONL el texto de cada ítem tal como lo ve el LM (para entrenar/evaluar un LM de HN)
@@ -461,6 +471,92 @@ fn check_bits(bits: usize) -> Result<()> {
         bail!("--bits debe ser múltiplo de 64 (p.ej. 768, 512, 256), no {bits}");
     }
     Ok(())
+}
+
+/// `hnz eval --rerank`: P@k and MRR of reranked searches (P4) with several settings.
+fn cmd_eval_rerank(root: &Path, file: &Path, k: usize, m: &ModelArgs, emb: Option<&str>, months: Option<&str>) -> Result<()> {
+    use hnz::rerank::{OracleEmbed, RerankCfg};
+    let eng = Engine::open(root, &m.models)?;
+    let mut qemb = eng.embedder(&m.models, &m.ov_libs)?;
+    let qs = read_eval(file)?;
+    let vecs: Vec<Vec<f32>> = qs.iter().map(|q| qemb.embed_query(&q.0)).collect::<Result<_>>()?;
+    drop(qemb);
+    let pat = emb.and_then(|e| e.strip_prefix("oracle:")).context("--emb oracle:<base con {m}> (por ahora solo el oráculo)")?;
+    let bases: Vec<PathBuf> = months.context("--months")?.split(',').map(|mm| PathBuf::from(pat.replace("{m}", mm.trim()))).collect();
+    let oracle = OracleEmbed::open(&bases)?;
+    let base = Query { k: k + 1, ..Default::default() };
+    let d = RerankCfg::default();
+    let configs: Vec<(String, Query, RerankCfg)> = vec![
+        ("híbrida, cascada 50 (P4)".into(), base.clone(), d.clone()),
+        ("híbrida, todos re-embebidos (E30c)".into(), base.clone(), RerankCfg { embed_top: None, ..d.clone() }),
+        ("híbrida, cascada 30".into(), base.clone(), RerankCfg { embed_top: Some(30), ..d.clone() }),
+        ("híbrida, solo R0 (sin re-embeber)".into(), base.clone(), RerankCfg { embed_top: Some(0), ..d.clone() }),
+        ("vector, re-embebidos".into(), Query { mode: Mode::Vector, ..base.clone() }, d.clone()),
+        ("palabras (frecuentes entre candidatos)".into(), Query { mode: Mode::Keyword, ..base.clone() }, d.clone()),
+    ];
+    println!("{:<40} {:>7} {:>7} {:>9} {:>8} {:>8}", "configuración", "P@k", "MRR", "ms/cons.", "decod.", "embeb.");
+    for (name, tmpl, cfg) in &configs {
+        let t = Instant::now();
+        let (mut p, mut mrr, mut dec, mut emb_n) = (0f64, 0f64, 0usize, 0usize);
+        for (i, (text, story)) in qs.iter().enumerate() {
+            let q = Query { text: text.clone(), ..tmpl.clone() };
+            let out = hnz::rerank::search(&eng, &q, &vecs[i], cfg, &oracle)?;
+            dec += out.report.decoded;
+            emb_n += out.report.embedded;
+            let (r, f) = score_hits(&eng, &out.hits, *story, k)?;
+            p += r;
+            mrr += f;
+        }
+        let nq = qs.len() as f64;
+        println!(
+            "{name:<40} {:>7.3} {:>7.3} {:>9.0} {:>8.0} {:>8.0}",
+            p / nq,
+            mrr / nq,
+            t.elapsed().as_secs_f64() * 1e3 / nq,
+            dec as f64 / nq,
+            emb_n as f64 / nq
+        );
+    }
+    Ok(())
+}
+
+/// The queries of an eval file: (text, story id).
+fn read_eval(file: &Path) -> Result<Vec<(String, u32)>> {
+    let raw = std::fs::read(file)?;
+    if raw.starts_with(&[0xFF, 0xFE]) || raw.starts_with(&[0xFE, 0xFF]) {
+        bail!("{} está en UTF-16: genérelo con experimentos/make_eval.py --out (UTF-8)", file.display());
+    }
+    let text = String::from_utf8(raw)?;
+    text.trim_start_matches('\u{feff}')
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l)?;
+            Ok((v["q"].as_str().context("q")?.to_string(), v["story"].as_u64().context("story")? as u32))
+        })
+        .collect()
+}
+
+/// (precision at k, reciprocal rank) of a result list for a query whose relevant documents are
+/// the thread of `story` (the story itself does not count).
+fn score_hits(eng: &Engine, hits: &[hnz::engine::Hit], story: u32, k: usize) -> Result<(f64, f64)> {
+    let (mut rel, mut first, mut n) = (0, 0usize, 0);
+    for h in hits {
+        if eng.segs[h.seg].s.meta.try_row(h.doc as usize)?.id == story {
+            continue;
+        }
+        n += 1;
+        if n > k {
+            break;
+        }
+        if eng.root_id(h.seg, h.doc)? == Some(story) {
+            rel += 1;
+            if first == 0 {
+                first = n;
+            }
+        }
+    }
+    Ok((rel as f64 / k as f64, if first > 0 { 1.0 / first as f64 } else { 0.0 }))
 }
 
 fn cmd_eval(root: &Path, file: &Path, k: usize, m: &ModelArgs) -> Result<()> {
@@ -935,7 +1031,13 @@ fn main() -> Result<()> {
                 let _ = req.respond(resp);
             }
         }
-        Cmd::Eval { root, file, k, m } => cmd_eval(&root, &file, k, &m)?,
+        Cmd::Eval { root, file, k, m, rerank, emb, months } => {
+            if rerank {
+                cmd_eval_rerank(&root, &file, k, &m, emb.as_deref(), months.as_deref())?
+            } else {
+                cmd_eval(&root, &file, k, &m)?
+            }
+        }
         Cmd::Lmtest { seg, lm, n, batch } => cmd_lmtest(&seg, &lm, n, batch)?,
         Cmd::Lmdump { out, every, parquet } => {
             use std::io::Write;

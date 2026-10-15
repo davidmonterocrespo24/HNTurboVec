@@ -27,7 +27,7 @@ const GROUP: usize = 32;
 const MAX_TOKENS: usize = 2000;
 /// token cap when decoding only the title (HN titles have <= 80 characters: <= 321 tokens with the
 /// newline, even if every byte were a token)
-const TITLE_TOKENS: usize = 400;
+pub(super) const TITLE_TOKENS: usize = 400;
 
 /// Forma compacta (marcadores de htmlx) -> forma "natural" para el LM. None si sería ambigua.
 pub fn to_lm(c: &str) -> Option<String> {
@@ -236,7 +236,13 @@ fn plain_prefix(body: &str, flags: u64) -> String {
     out
 }
 
-fn partial_rec(s: &str, flags: u64) -> TextRec {
+/// The snippet of a cut LM string (title, url and the readable start of the body), as the
+/// decoder returns it when it stops early.
+pub fn snippet_of(s: &str, flags: u64) -> TextRec {
+    partial_rec(s, flags)
+}
+
+pub(super) fn partial_rec(s: &str, flags: u64) -> TextRec {
     let mut parts = s.splitn(3, '\n');
     let title = parts.next().unwrap_or("").to_string();
     let url = parts.next().unwrap_or("").to_string();
@@ -441,10 +447,34 @@ impl LmCodec {
     }
 
     /// Like `decode_records_each` with a memory cap for the batch (`pool` bytes): records join the
-    /// batch in order while the sum of their bounds (`record_cost`) fits, and each one that finishes
-    /// frees its KV cache and makes room for the next (continuous batching). The result is the same
-    /// with any cap: each sequence is computed identically in any batch.
+    /// batch while the sum of their bounds (`record_cost`) fits, and each one that finishes frees
+    /// its KV cache and makes room for the next (continuous batching, see `super::jobs`). The
+    /// result is the same with any cap: each sequence is computed identically in any batch.
     pub fn decode_records_pool(
+        &self,
+        recs: &[&[u8]],
+        parallel: bool,
+        limits: &[Option<usize>],
+        title_only: &[bool],
+        has_check: &[bool],
+        pool: u64,
+    ) -> Result<Vec<(TextRec, bool)>> {
+        use super::jobs::{Decoded, Want};
+        let wants: Vec<Want> = (0..recs.len())
+            .map(|i| if title_only[i] { Want::Title } else { limits[i].map_or(Want::Full, Want::Snippet) })
+            .collect();
+        self.decode_jobs(recs, &wants, has_check, parallel, pool)?
+            .into_iter()
+            .map(|d| match d {
+                Decoded::Text(t, p) => Ok((t, p)),
+                Decoded::Prefix(_) => anyhow::bail!("decodificación inesperada"),
+            })
+            .collect()
+    }
+
+    /// The batch loop before P4 (in-order admission); kept for the tests that compare both.
+    #[doc(hidden)]
+    pub fn decode_records_pool_v1(
         &self,
         recs: &[&[u8]],
         parallel: bool,
@@ -641,18 +671,18 @@ impl LmCodec {
 }
 
 /// Cabecera de un registro del nivel LM.
-struct RecHead<'a> {
-    ntok: usize,
+pub(super) struct RecHead<'a> {
+    pub ntok: usize,
     /// lmmap<<2 | modo
-    flags: u64,
-    zstd: bool,
-    check: Option<u8>,
-    payload: &'a [u8],
+    pub flags: u64,
+    pub zstd: bool,
+    pub check: Option<u8>,
+    pub payload: &'a [u8],
 }
 
 /// The header of a record; a damaged one (unreadable, or more tokens than any record can have,
 /// which would make the decoder run on and on) is a `CorruptBlockError`.
-fn parse_head(r: &[u8], has_check: bool, max_tok: usize) -> Result<RecHead<'_>> {
+pub(super) fn parse_head(r: &[u8], has_check: bool, max_tok: usize) -> Result<RecHead<'_>> {
     let bad = || crate::block::corrupt("cabecera de registro dañada");
     let mut p = 0;
     let h = try_get(r, &mut p).ok_or_else(bad)?;
@@ -669,7 +699,7 @@ fn parse_head(r: &[u8], has_check: bool, max_tok: usize) -> Result<RecHead<'_>> 
     Ok(RecHead { ntok, flags: h & 7, zstd, check, payload: &r[p.min(r.len())..] })
 }
 
-fn decode_fallback(payload: &[u8]) -> Result<TextRec> {
+pub(super) fn decode_fallback(payload: &[u8]) -> Result<TextRec> {
     let bad = || crate::block::corrupt("registro zstd dañado");
     let raw = zstd::stream::decode_all(payload).map_err(|_| bad())?;
     let mut q = 0;
@@ -697,14 +727,31 @@ pub fn check_byte(b: &[u8]) -> u8 {
 }
 
 fn finish_record(bytes: Vec<u8>, h: &RecHead) -> Result<TextRec> {
-    if let Some(c) = h.check {
-        if check_byte(&bytes) != c {
+    finish_bytes(bytes, h.check, h.flags)
+}
+
+/// The text of a whole decoded record: its check byte verified, then the LM string parsed.
+pub(super) fn finish_bytes(bytes: Vec<u8>, check: Option<u8>, flags: u64) -> Result<TextRec> {
+    verify_check(&bytes, check)?;
+    let s = String::from_utf8(bytes).context("UTF-8 inválido al descomprimir (¿modelo distinto?)")?;
+    parse_lm_string(&s, flags)
+}
+
+/// The check byte of a whole decoded record.
+pub(super) fn verify_check(bytes: &[u8], check: Option<u8>) -> Result<()> {
+    if let Some(c) = check {
+        if check_byte(bytes) != c {
             // the record's bytes passed their group checksum: this binary decodes them differently
             return Err(crate::block::incompatible("registro corrupto: la comprobación no coincide (¿modelo LM o binario distinto del que comprimió?)"));
         }
     }
+    Ok(())
+}
+
+/// The text of a whole LM string (title, url and body on three lines, with the record's flags).
+pub fn text_of(bytes: Vec<u8>, flags: u64) -> Result<TextRec> {
     let s = String::from_utf8(bytes).context("UTF-8 inválido al descomprimir (¿modelo distinto?)")?;
-    parse_lm_string(&s, h.flags)
+    parse_lm_string(&s, flags)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -942,4 +989,21 @@ impl LmStore {
         }
         Ok(())
     }
+}
+
+/// The prompt prefixes of `text/prefix_fallback`: doc -> (flags, prefix).
+pub fn parse_prefix_fallback(raw: &[u8]) -> Option<std::collections::HashMap<u32, (u8, String)>> {
+    let n = u32::from_le_bytes(raw.get(..4)?.try_into().ok()?) as usize;
+    let mut p = 4;
+    let mut m = std::collections::HashMap::with_capacity(n);
+    for _ in 0..n {
+        let doc = u32::from_le_bytes(raw.get(p..p + 4)?.try_into().ok()?);
+        let flags = *raw.get(p + 4)?;
+        p += 5;
+        let len = crate::varint::try_get(raw, &mut p)? as usize;
+        let s = String::from_utf8(raw.get(p..p.checked_add(len)?)?.to_vec()).ok()?;
+        p += len;
+        m.insert(doc, (flags, s));
+    }
+    (p == raw.len()).then_some(m)
 }

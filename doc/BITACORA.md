@@ -902,3 +902,40 @@ the multi-day all-HN runs (P5) start after P3.
   **Re-embedding only the top 50 of the cheap score gives the same quality as re-embedding all
   ~115** (top 30: −0.002): ~1.3-1.8 s of CPU embedding instead of ~3-4 s. The cheap score still
   needs every candidate's prefix decoded (for its BM25).
+- **P4 plan** (design panel: 3 architects — CPU latency, quality, integration/RAM — and a judge;
+  full plan in the session scratchpad): cold hybrid query on a block = stage 1 (100 vector + 20
+  rare-term candidates, already filtered) → a shared LM service decodes every candidate's prefix
+  (it replaces the global LM lock: interactive `get()`s go first) → b = exact BM25 of every query
+  word over the prefix → cheap score R0 = s1 + 0.3·b/(b+20) → re-embed the top 50 of R0 with one
+  dynamic int8 IR → final cos + 0.15·b/(b+40) → snippets from the decoded prefixes. Keyword mode
+  with frequent words: candidates = rare top-50 + vector top-100, scored by BM25 over their
+  prefixes, with a warning. Modelled cold latency on 16 CPU threads: ~2.4-4.1 s p50.
+  **User decisions (2026-10-15):** cascade of 50 on CPU (all candidates in vector mode, with an
+  iGPU or the `precise` preset); quality gate: mean P@10 >= 0.235 over the 900 queries and every
+  month >= today − 0.02; hardware target for ~4 s: >= 16 threads or an iGPU (8 threads ≈ 4.5-6 s,
+  documented); frequent words found among the semantic candidates (no frequent-word index).
+  Defaults taken from the plan: one dynamic IR for queries and documents if E33a passes,
+  bit-identical results (each document embedded at its own canonical shape), deadline with a
+  degraded answer only on request, snippets = the full record when it fits in the prefix (~84 %).
+- **E33a (first step) — dynamic-shape int8 IR** (`scripts/export_gemma2_dyn.py`, 22 s): query
+  cosine against the static `b1_s64` int8 IR 0.99992 / 0.99993 / 1.00000 on 3 samples; the full
+  check (900 queries, document prompts, latency, memory) waits for the LM training to end.
+- Note: the LM training process holds ~21 GB of private memory (14.8 GB working set) on this
+  31 GB laptop; running the full Python suites or a model export next to it exhausts the RAM.
+- **P4 step 1 — typed LM jobs** (`hnz/src/lm/jobs.rs`): one continuous-batch core for every kind
+  of decode: the whole record, a snippet, the title, or the raw prompt **prefix** (title, url and
+  the first 128 body tokens, as LM bytes, plus where a 64-token snippet would stop); admission is
+  first-fit (a record that does not fit no longer blocks smaller ones behind it). Checked on 2,000
+  real records of the v2 block (`hnz/examples/decode_check.rs`): whole / snippet / title results
+  identical to the loop before P4 at an unlimited pool and at the minimum pool (66 MB); 1,916 LM
+  prefixes (84 % of them whole records, as E30a said) identical to the ones computed with the LM
+  tokenizer, their snippet cut identical to a 64-token snippet, and **the 1,916 document prompts
+  rebuilt from them identical to the ones `hnz prompts` wrote**: the reranker rebuilds the exact
+  v2 prompts at query time from what it decodes.
+- **P4 step 2 — the shared LM service** (`hnz/src/lm/service.rs`), replacing the process-wide lock
+  around one batch per query: one thread per LM model runs one continuous batch for every query,
+  within the LM pool; interactive jobs (results, `get()`, titles) are admitted first and, while any
+  runs, bulk jobs (the reranker's prefixes) are paused; for room, the youngest bulk sequence is
+  restarted (results do not change: decoding is batch-independent); a panic fails the jobs of the
+  batch, not the service. Regression: the old archive gives the same eval figures and the same 20
+  searches (snippets included) as the P2 binary, and the block the same eval figures as before.
