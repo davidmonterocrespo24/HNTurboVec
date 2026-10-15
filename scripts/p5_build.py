@@ -49,11 +49,30 @@ def free_gb():
     return m.ullAvailPhys / 2 ** 30
 
 
+def _k32():
+    from ctypes import wintypes
+    k = ctypes.windll.kernel32
+    k.GetCurrentProcess.restype = wintypes.HANDLE
+    k.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    k.SetPriorityClass.restype = wintypes.BOOL
+    k.SetThreadExecutionState.argtypes = [wintypes.DWORD]
+    k.SetThreadExecutionState.restype = wintypes.DWORD
+    return k
+
+
 def keep_awake():
     """Asks Windows not to sleep while this process runs (ES_CONTINUOUS | ES_SYSTEM_REQUIRED); the
     display may still turn off and the session lock."""
     if os.name == 'nt':
-        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001)
+        _k32().SetThreadExecutionState(0x80000000 | 0x00000001)
+
+
+def set_priority(cls):
+    """This process's priority class (the processes it starts inherit it)."""
+    if os.name == 'nt':
+        k = _k32()
+        if not k.SetPriorityClass(k.GetCurrentProcess(), cls):
+            print(f'warning: SetPriorityClass failed ({ctypes.GetLastError()})', flush=True)
 
 
 def months_with_items(sel):
@@ -141,7 +160,7 @@ def worker_embed(months, hnz, device, min_free):
                 os.replace(os.path.join(tmp, f'{m}.{ext}'), os.path.join(PROMPTS, f'{m}.{ext}'))
             shutil.rmtree(tmp)
         t1 = time.time()
-        rc = run([py, os.path.join(ROOT, 'scripts', 'embed_prompts.py'), PROMPTS, m, '--device', device], 'embed', m)
+        rc = run([py, os.path.join(ROOT, 'scripts', 'embed_prompts.py'), PROMPTS, m, '--device', device, '--above-normal'], 'embed', m)
         if rc == 0 and emb_done(m):
             os.remove(tok)   # the token ids are only needed to embed (hnz prompts makes them again)
             log('embed', f'{m}: {rows:,} items, prompts {(t1 - t0) / 60:.1f} min, vectors {(time.time() - t1) / 60:.1f} min')
@@ -173,9 +192,14 @@ def main():
         status(months)
         return
     keep_awake()
+    if a.worker == 'lm':
+        # compression runs one large batch: every logical thread pays off (E20: 122 records/s with
+        # 16 threads); hnz's default, half of them, suits the small batches of searches
+        os.environ.setdefault('HNZ_LM_THREADS', str(os.cpu_count() or 8))
     if a.worker == 'embed' and os.name == 'nt':
-        # below normal (its tools inherit it): the LM worker is the critical path on the CPU
-        ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), 0x4000)
+        # above normal (its tools inherit it): it needs little CPU, but promptly, to keep the iGPU
+        # busy next to the LM worker's threads (below normal it starved: ~12 docs/s, not ~200)
+        set_priority(0x8000)
     log(a.worker, f'start: {len(months)} months, {sum(r for _, _, r in months):,} items')
     if a.worker == 'lm':
         worker_lm(months, a.hnz, a.min_free_gb)

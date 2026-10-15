@@ -65,6 +65,18 @@ def embed(lens, seqs, device):
     return out
 
 
+def above_normal_priority():
+    """Windows: this process above normal priority (it needs little CPU, but promptly, to keep the
+    GPU busy while other processes load every core; children do not inherit this class)."""
+    if os.name == 'nt':
+        import ctypes
+        from ctypes import wintypes
+        k = ctypes.windll.kernel32
+        k.GetCurrentProcess.restype = wintypes.HANDLE
+        k.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        k.SetPriorityClass(k.GetCurrentProcess(), 0x8000)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('prompts')
@@ -73,7 +85,10 @@ def main():
     ap.add_argument('--limit', type=int, default=0, help='a random sample of this many documents')
     ap.add_argument('--out', help='output path without extension (default emb/g2v2_<month>)')
     ap.add_argument('--compare', help='other vectors (path without .f16.npy) to compare with, by id')
+    ap.add_argument('--above-normal', action='store_true', help='run above normal priority (Windows)')
     a = ap.parse_args()
+    if a.above_normal:
+        above_normal_priority()
     ids, lens, seqs = load(a.prompts, a.month, a.limit)
     t0 = time.time()
     vec = embed(lens, seqs, a.device)
