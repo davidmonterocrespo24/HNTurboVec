@@ -91,6 +91,14 @@ impl DocEmbed for OracleEmbed {
     }
 }
 
+/// An embedder owned by one caller (the CLI): document prompts embedded one by one.
+impl DocEmbed for std::sync::Mutex<crate::embed::Embedder> {
+    fn embed(&self, docs: &[(u32, String)]) -> Result<Vec<Vec<f32>>> {
+        let mut e = self.lock().unwrap_or_else(|p| p.into_inner());
+        docs.iter().map(|d| e.embed_doc(&d.1)).collect()
+    }
+}
+
 /// The decoded prefix of a candidate (results reuse it: snippet, or the whole record).
 #[derive(Clone, Debug)]
 pub struct Prefix {

@@ -93,6 +93,8 @@ pub struct SearchRequest {
     pub include_dead: bool,
     pub w_bm25: f32,
     pub c_bm25: f32,
+    /// P4: rerank the candidates by their prefix (compact blocks); None = whenever possible
+    pub rerank: Option<bool>,
 }
 
 impl Default for SearchRequest {
@@ -111,6 +113,7 @@ impl Default for SearchRequest {
             include_dead: false,
             w_bm25: 0.15,
             c_bm25: 20.0,
+            rerank: None,
         }
     }
 }
@@ -131,6 +134,11 @@ pub struct SearchResponse {
     pub k: usize,
     pub results: Vec<ResultItem>,
     pub ms: Timings,
+    /// what the reranking did (P4), if the search was reranked
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rerank: Option<crate::rerank::Report>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// Error en los argumentos de una consulta (en Python: ValueError).
@@ -215,7 +223,11 @@ pub fn make_query(r: &SearchRequest) -> Result<Query> {
     })
 }
 
-type EmbedReply = mpsc::Sender<Result<Vec<f32>>>;
+/// Work for the embedder's thread: a query (always answered first), or document prompts (P4).
+enum EmbedJob {
+    Query(String, mpsc::Sender<Result<Vec<f32>>>),
+    Docs(Vec<String>, mpsc::Sender<Result<Vec<Vec<f32>>>>),
+}
 
 /// Minimum working memory for queries (on top of the vector read windows).
 const QUERY_BASE: u64 = 16 * MB;
@@ -234,6 +246,8 @@ const GET_COST: u64 = MB;
 struct EmbMem {
     steady: u64,
     peak: u64,
+    /// the embedder can embed document prompts (an IR with dynamic shapes)
+    docs: bool,
 }
 
 /// Un archivo hnz abierto.
@@ -250,7 +264,7 @@ pub struct Archive {
     emb_charge: Mutex<Charge>,
     emb_mem: Mutex<Option<EmbMem>>,
     /// channel to the embedder thread (created on first use; reading it never blocks)
-    emb: OnceLock<mpsc::Sender<(String, EmbedReply)>>,
+    emb: OnceLock<mpsc::Sender<EmbedJob>>,
     /// serializes the attempts to load the embedder and remembers the last failure (so the load is
     /// not retried on every query)
     /// the last failed load: when, its message, and whether it was a damaged (1) or an
@@ -411,7 +425,7 @@ impl Archive {
         Ok(a)
     }
 
-    fn embedder(&self) -> Result<mpsc::Sender<(String, EmbedReply)>> {
+    fn embedder(&self) -> Result<mpsc::Sender<EmbedJob>> {
         if let Some(tx) = self.emb.get() {
             return Ok(tx.clone());
         }
@@ -467,13 +481,13 @@ impl Archive {
         *self.emb_mem.lock().unwrap_or_else(|e| e.into_inner()) = Some(mem);
     }
 
-    fn spawn_embedder(&self) -> Result<(mpsc::Sender<(String, EmbedReply)>, EmbMem)> {
+    fn spawn_embedder(&self) -> Result<(mpsc::Sender<EmbedJob>, EmbMem)> {
         let libs = self.ov_libs.clone().context("falta la carpeta de OpenVINO (ov_libs o la variable HNZ_OV_LIBS)")?;
         let models = self.models.clone();
         // a block: its IR files (checked against their hashes) and the tokenizer inside it, read
         // in the embedder's thread so the measured load includes them and frees the tokenizer
         let block = self.eng.block.clone();
-        let (tx, rx) = mpsc::channel::<(String, EmbedReply)>();
+        let (tx, rx) = mpsc::channel::<EmbedJob>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<EmbMem>>();
         std::thread::Builder::new().name("hnz-embedder".into()).spawn(move || {
             // measure the load and a first inference (it allocates OpenVINO's buffers and threads)
@@ -484,12 +498,16 @@ impl Archive {
                 };
                 e.and_then(|mut e| {
                     e.embed_query("warm up")?;
+                    if e.can_embed_docs() {
+                        // the longest document shape, so the measured size includes its buffers
+                        e.embed_doc(&"warm up ".repeat(200))?;
+                    }
                     Ok(e)
                 })
             });
             let mut emb = match r {
                 Ok(e) => {
-                    let _ = ready_tx.send(Ok(EmbMem { steady, peak }));
+                    let _ = ready_tx.send(Ok(EmbMem { steady, peak, docs: e.can_embed_docs() }));
                     e
                 }
                 Err(e) => {
@@ -497,9 +515,42 @@ impl Archive {
                     return;
                 }
             };
-            // ends only when the archive is closed (all senders dropped)
-            for (text, reply) in rx {
-                let _ = reply.send(emb.embed_query(&text));
+            // queries go first: a document job advances one document at a time between them; the
+            // thread ends when the archive is closed (all senders dropped) and nothing is pending
+            type DocJob = (Vec<String>, Vec<Vec<f32>>, mpsc::Sender<Result<Vec<Vec<f32>>>>);
+            let mut docs: std::collections::VecDeque<DocJob> = std::collections::VecDeque::new();
+            loop {
+                let first = if docs.is_empty() {
+                    match rx.recv() {
+                        Ok(j) => Some(j),
+                        Err(_) => return,
+                    }
+                } else {
+                    None
+                };
+                for job in first.into_iter().chain(rx.try_iter()) {
+                    match job {
+                        EmbedJob::Query(t, reply) => {
+                            let _ = reply.send(emb.embed_query(&t));
+                        }
+                        EmbedJob::Docs(p, reply) => docs.push_back((p, Vec::new(), reply)),
+                    }
+                }
+                let Some(job) = docs.front_mut() else { continue };
+                if job.1.len() < job.0.len() {
+                    match emb.embed_doc(&job.0[job.1.len()]) {
+                        Ok(v) => job.1.push(v),
+                        Err(e) => {
+                            let (_, _, reply) = docs.pop_front().unwrap();
+                            let _ = reply.send(Err(e));
+                            continue;
+                        }
+                    }
+                }
+                if job.1.len() == job.0.len() {
+                    let (_, out, reply) = docs.pop_front().unwrap();
+                    let _ = reply.send(Ok(out));
+                }
             }
         })?;
         let mem = ready_rx.recv().map_err(|_| anyhow!("el hilo del embedder terminó al arrancar"))??;
@@ -508,8 +559,29 @@ impl Archive {
 
     fn embed_inner(&self, text: &str) -> Result<Vec<f32>> {
         let (rtx, rrx) = mpsc::channel();
-        self.embedder()?.send((text.to_string(), rtx)).map_err(|_| anyhow!("el embedder no está disponible"))?;
+        self.embedder()?.send(EmbedJob::Query(text.to_string(), rtx)).map_err(|_| anyhow!("el embedder no está disponible"))?;
         rrx.recv().map_err(|_| anyhow!("el embedder no respondió"))?
+    }
+
+    /// The vectors of document prompts (P4 reranking).
+    fn embed_docs(&self, prompts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+        if prompts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (rtx, rrx) = mpsc::channel();
+        self.embedder()?.send(EmbedJob::Docs(prompts, rtx)).map_err(|_| anyhow!("el embedder no está disponible"))?;
+        rrx.recv().map_err(|_| anyhow!("el embedder no respondió"))?
+    }
+
+    /// Searches of this archive can be reranked (P4): a compact block with prompt v2 and an
+    /// embedder that embeds documents. Loads the embedder if needed.
+    fn can_rerank(&self) -> Result<bool> {
+        let Some(b) = &self.eng.block else { return Ok(false) };
+        if b.manifest()["vec"]["prompt_version"].as_u64() != Some(2) {
+            return Ok(false);
+        }
+        self.embedder()?;
+        Ok(self.emb_mem.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|m| m.docs))
     }
 
     /// Vector of a query with EmbeddingGemma 2 (the same one semantic search uses).
@@ -524,11 +596,32 @@ impl Archive {
         let t0 = Instant::now();
         let turn = self.adm.enter(search_cost(q.k, req.full) + self.eng.search_cost(&q))?;
         let t_q = t0.elapsed();
-        let qv = if q.mode != Mode::Keyword && !q.text.trim().is_empty() { Some(self.embed_inner(&q.text)?) } else { None };
+        let has_text = !q.text.trim().is_empty();
+        // P4: rerank when asked (or by default when the archive can); a keyword query needs the
+        // query vector only for its frequent words
+        let rerank = has_text
+            && match req.rerank {
+                Some(false) => false,
+                Some(true) => {
+                    if !self.can_rerank()? {
+                        return Err(anyhow::Error::new(QueryError("rerank no disponible: hace falta un bloque compacto con prompts v2 y un embedder de formas dinámicas".into())));
+                    }
+                    true
+                }
+                None => self.can_rerank().unwrap_or(false),
+            };
+        let frequent = rerank && q.mode == Mode::Keyword && self.eng.query_terms(&q.text)?.iter().any(|t| t.post == crate::bm25::TermPost::Frequent);
+        let qv = if has_text && (q.mode != Mode::Keyword || frequent) { Some(self.embed_inner(&q.text)?) } else { None };
         let t_emb = t0.elapsed();
-        let hits = self.eng.search_with(&q, qv.as_deref(), &|extra| turn.try_grow(extra))?;
+        let (hits, prefixes, report, warning) = match (&qv, rerank) {
+            (Some(v), true) => {
+                let o = crate::rerank::search(&self.eng, &q, v, &crate::rerank::RerankCfg::default(), self)?;
+                (o.hits, o.prefixes, Some(o.report), o.warning)
+            }
+            _ => (self.eng.search_with(&q, qv.as_deref(), &|extra| turn.try_grow(extra))?, Default::default(), None, None),
+        };
         let t_s = t0.elapsed();
-        let results = self.eng.fetch(&hits, req.full)?;
+        let results = self.eng.fetch_with(&hits, req.full, &prefixes)?;
         let t_all = t0.elapsed();
         let ms = |d: Duration| d.as_secs_f64() * 1e3;
         Ok(SearchResponse {
@@ -536,6 +629,8 @@ impl Archive {
             k: q.k,
             results,
             ms: Timings { queue: ms(t_q), embedding: ms(t_emb - t_q), search: ms(t_s - t_emb), fetch: ms(t_all - t_s), total: ms(t_all) },
+            rerank: report,
+            warning,
         })
     }
 
@@ -598,5 +693,11 @@ impl Archive {
             "embedder_loaded": self.emb.get().is_some(),
             "memory": self.memory(),
         })
+    }
+}
+
+impl crate::rerank::DocEmbed for Archive {
+    fn embed(&self, docs: &[(u32, String)]) -> Result<Vec<Vec<f32>>> {
+        self.embed_docs(docs.iter().map(|d| d.1.clone()).collect())
     }
 }

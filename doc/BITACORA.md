@@ -939,3 +939,26 @@ the multi-day all-HN runs (P5) start after P3.
   restarted (results do not change: decoding is batch-independent); a panic fails the jobs of the
   batch, not the service. Regression: the old archive gives the same eval figures and the same 20
   searches (snippets included) as the P2 binary, and the block the same eval figures as before.
+- **P4 step 3 — the reranker in Rust** (`hnz/src/rerank.rs`; `Engine::candidates` and
+  `Engine::query_terms`; a cache of decoded prefixes): stage 1 (100 vector + 20 rare-term
+  candidates, filtered), prefixes from the LM service (or `text/prefix_fallback`, or the cache),
+  b = BM25 of every query word over the prefix (global idf from the block's df of every term, the
+  document's full-length norm), R0 = s1 + 0.3·b/(b+20), cascade re-embedding of the top 50,
+  cos + 0.15·b/(b+40); keyword queries with a frequent word: rare top-50 + vector top-100 scored
+  by BM25 over their prefixes. `hnz search --rerank`, `hnz eval --rerank`, `rerank=` in Python.
+- **E33e step 1 — quality of the Rust reranker** (`hnz eval --rerank --emb oracle:emb/g2v2_{m}`:
+  the stored v2 vectors stand in for re-embedding; 300 queries per month →
+  `resultados/results_e33e_oracle.txt`), P@10 2024 / 2010 / 2015 (mean):
+| Setting | 2024 | 2010 | 2015 | mean | P3 block |
+|---|---|---|---|---|---|
+| **hybrid, cascade 50 (P4 default)** | 0.282 | 0.193 | 0.241 | **0.239** | 0.211 |
+| hybrid, all ~107 re-embedded | 0.282 | 0.192 | 0.239 | 0.238 | |
+| hybrid, cascade 30 | 0.280 | 0.189 | 0.241 | 0.237 | |
+| hybrid, R0 only (no re-embedding) | 0.253 | 0.176 | 0.223 | 0.217 | |
+| vector, re-embedded | 0.264 | 0.183 | 0.224 | 0.224 | 0.183 |
+| keyword, frequent words among the candidates | 0.229 | 0.152 | 0.187 | 0.189 | 0.085 |
+  **The quality gate holds:** mean 0.239 >= 0.235 and every month >= today − 0.02 (today, full
+  index and text: 0.278 / 0.208 / 0.249; 2024 +0.004, 2010 −0.015, 2015 −0.008). The Rust
+  reranker reproduces the Python simulations (E30c 0.238, E30f cascade 0.238). Keyword search
+  more than doubles (frequent words are now found). A cold query decoded ~96 prefixes (~6,000
+  tokens) in ~3.3-3.5 s here, with the CPU shared with the LM training.

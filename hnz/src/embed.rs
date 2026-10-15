@@ -3,7 +3,7 @@
 //! o de una instalación de OpenVINO): se añade su carpeta al PATH antes de crear el Core.
 
 use anyhow::{anyhow, bail, Context, Result};
-use openvino::{CompiledModel, Core, DeviceType, ElementType, InferRequest, Shape, Tensor};
+use openvino::{CompiledModel, Core, DeviceType, ElementType, InferRequest, RwPropertyKey, Shape, Tensor};
 use std::path::Path;
 use tokenizers::Tokenizer;
 
@@ -16,6 +16,8 @@ pub struct Embedder {
     _core: Core,
     tok: Tokenizer,
     seq: usize,
+    /// the IR takes any shape (P4: one IR embeds queries and document prompts)
+    dynamic: bool,
 }
 
 fn ov<E: std::fmt::Debug>(e: E) -> anyhow::Error {
@@ -72,18 +74,44 @@ impl Embedder {
         tok.with_model(bpe);
         load_openvino(ov_libs)?;
         let mut core = Core::new().map_err(ov)?;
+        // f32 everywhere: the CPU plugin would choose bf16 on AMX servers, and the vectors must
+        // not depend on the machine
+        core.set_property(&DeviceType::CPU, &RwPropertyKey::Other("INFERENCE_PRECISION_HINT".into()), "f32").map_err(ov)?;
         let model = core.read_model_from_file(&xml.to_string_lossy(), &bin.to_string_lossy()).map_err(ov)?;
+        let dynamic = model.is_dynamic();
         let mut compiled = core.compile_model(&model, DeviceType::CPU).map_err(ov)?;
         let req = compiled.create_infer_request().map_err(ov)?;
-        Ok(Self { req, _model: compiled, _core: core, tok, seq: 64 })
+        Ok(Self { req, _model: compiled, _core: core, tok, seq: 64, dynamic })
+    }
+
+    /// The IR takes any shape: it can embed document prompts (P4).
+    pub fn can_embed_docs(&self) -> bool {
+        self.dynamic
+    }
+
+    /// The normalized vector (768-dim) of a document prompt (`crate::prompt::doc_prompt`), at
+    /// most `prompt::MAX_SEQ` tokens, computed at its own canonical shape [1, tokens rounded up to
+    /// 16]: it never depends on what else is embedded. Needs an IR with dynamic shapes.
+    pub fn embed_doc(&mut self, prompt: &str) -> Result<Vec<f32>> {
+        if !self.dynamic {
+            bail!("el embedder de este bloque tiene formas fijas: no puede embeber documentos");
+        }
+        let enc = self.tok.encode(prompt, true).map_err(|e| anyhow!("tokenizer: {e}"))?;
+        let ids: Vec<u32> = enc.get_ids().iter().take(crate::prompt::MAX_SEQ).copied().collect();
+        self.infer(&ids, ids.len().div_ceil(16).max(1) * 16)
     }
 
     /// Vector normalizado (768d) de la consulta.
     pub fn embed_query(&mut self, q: &str) -> Result<Vec<f32>> {
         let enc = self.tok.encode(format!("{QUERY_PROMPT}{q}"), true).map_err(|e| anyhow!("tokenizer: {e}"))?;
-        let ids = enc.get_ids();
-        let n = ids.len().min(self.seq);
-        let shape = Shape::new(&[1, self.seq as i64]).map_err(ov)?;
+        let ids = enc.get_ids().to_vec();
+        self.infer(&ids, self.seq)
+    }
+
+    /// Runs the model on `ids` padded (or cut) to `len` tokens; returns the normalized vector.
+    fn infer(&mut self, ids: &[u32], len: usize) -> Result<Vec<f32>> {
+        let n = ids.len().min(len);
+        let shape = Shape::new(&[1, len as i64]).map_err(ov)?;
         let mut ti = Tensor::new(ElementType::I64, &shape).map_err(ov)?;
         let mut tm = Tensor::new(ElementType::I64, &shape).map_err(ov)?;
         {

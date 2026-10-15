@@ -1220,6 +1220,27 @@ impl Engine {
 
     /// Resultados completos. `full=false`: en el nivel LM solo se decodifica un fragmento.
     pub fn fetch(&self, hits: &[Hit], full: bool) -> Result<Vec<ResultItem>> {
+        self.fetch_with(hits, full, &HashMap::new())
+    }
+
+    /// Like `fetch`, reusing prefixes the reranker already decoded (`known`, by document of a
+    /// block): a record that fits in its prefix comes back whole, the others as the same 64-token
+    /// snippet (unless `full`), and a story's title from its prefix's first line.
+    pub fn fetch_with(&self, hits: &[Hit], full: bool, known: &HashMap<u32, Arc<crate::rerank::Prefix>>) -> Result<Vec<ResultItem>> {
+        let from_prefix = |si: usize, doc: usize, title_only: bool| -> Option<(TextRec, bool)> {
+            if si != 0 || self.block.is_none() {
+                return None;
+            }
+            let p = known.get(&(doc as u32))?;
+            if title_only {
+                let s = String::from_utf8_lossy(&p.bytes);
+                return Some((TextRec { title: s.split('\n').next().unwrap_or("").to_string(), ..Default::default() }, true));
+            }
+            if p.complete {
+                return crate::lm::store::text_of(p.bytes.clone(), p.flags as u64).ok().map(|t| (t, false));
+            }
+            (!full).then(|| (crate::lm::store::snippet_of(&String::from_utf8_lossy(&p.bytes[..p.snippet_end]), p.flags as u64), true))
+        };
         let rows: Vec<MetaRow> = hits.iter().map(|h| self.segs[h.seg].s.meta.try_row(h.doc as usize)).collect::<Result<_>>()?;
         // contexto del hilo: story raíz de cada comentario (títulos en un solo lote)
         let roots: Vec<Option<u32>> = hits
@@ -1242,7 +1263,11 @@ impl Engine {
         let limit = if full { None } else { Some(SNIPPET_TOKENS) };
         let mut wants: Vec<(usize, usize, Option<usize>, bool)> = hits.iter().map(|h| (h.seg, h.doc as usize, limit, false)).collect();
         wants.extend(root_docs.iter().map(|&(si, d)| (si, d, None, true)));
-        let mut got = self.texts_each(&wants)?;
+        // what the reranker decoded is reused; only the rest is decoded now
+        let reused: Vec<Option<(TextRec, bool)>> = wants.iter().map(|w| from_prefix(w.0, w.1, w.3)).collect();
+        let rest: Vec<(usize, usize, Option<usize>, bool)> = wants.iter().zip(&reused).filter(|x| x.1.is_none()).map(|x| *x.0).collect();
+        let mut decoded = self.texts_each(&rest)?.into_iter();
+        let mut got: Vec<(TextRec, bool)> = reused.into_iter().map(|r| r.unwrap_or_else(|| decoded.next().expect("one text per job"))).collect();
         let root_titles: Vec<(TextRec, bool)> = got.split_off(hits.len());
         let texts = got;
         let mut out = Vec::with_capacity(hits.len());

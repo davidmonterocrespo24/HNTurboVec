@@ -46,6 +46,10 @@ struct SearchArgs {
     /// nº de resultados
     #[arg(short, long, default_value_t = 10)]
     k: usize,
+    /// P4: rerank the candidates by their prefix (compact blocks with prompts v2 and an embedder
+    /// of dynamic shapes)
+    #[arg(long)]
+    rerank: bool,
     /// desde (2015 | 2015-06 | 2015-06-01), inclusive
     #[arg(long)]
     from: Option<String>,
@@ -255,6 +259,9 @@ enum Cmd {
         /// months of the oracle's files (e.g. 2010-06,2015-06,2024-01)
         #[arg(long)]
         months: Option<String>,
+        /// rerank: only the default setting (P4) and the keyword mode
+        #[arg(long)]
+        quick: bool,
     },
     /// Prueba del nivel frío sobre un segmento zstd: comprime y descomprime (en lote) una muestra
     /// Exporta a JSONL el texto de cada ítem tal como lo ve el LM (para entrenar/evaluar un LM de HN)
@@ -474,19 +481,26 @@ fn check_bits(bits: usize) -> Result<()> {
 }
 
 /// `hnz eval --rerank`: P@k and MRR of reranked searches (P4) with several settings.
-fn cmd_eval_rerank(root: &Path, file: &Path, k: usize, m: &ModelArgs, emb: Option<&str>, months: Option<&str>) -> Result<()> {
+fn cmd_eval_rerank(root: &Path, file: &Path, k: usize, m: &ModelArgs, emb: Option<&str>, months: Option<&str>, quick: bool) -> Result<()> {
     use hnz::rerank::{OracleEmbed, RerankCfg};
     let eng = Engine::open(root, &m.models)?;
     let mut qemb = eng.embedder(&m.models, &m.ov_libs)?;
     let qs = read_eval(file)?;
     let vecs: Vec<Vec<f32>> = qs.iter().map(|q| qemb.embed_query(&q.0)).collect::<Result<_>>()?;
     drop(qemb);
-    let pat = emb.and_then(|e| e.strip_prefix("oracle:")).context("--emb oracle:<base con {m}> (por ahora solo el oráculo)")?;
-    let bases: Vec<PathBuf> = months.context("--months")?.split(',').map(|mm| PathBuf::from(pat.replace("{m}", mm.trim()))).collect();
-    let oracle = OracleEmbed::open(&bases)?;
+    // the document embedder: stored vectors (oracle:<base with {m}>) or the block's own (ov)
+    let oracle: Box<dyn hnz::rerank::DocEmbed> = match emb {
+        Some("ov") => Box::new(std::sync::Mutex::new(eng.embedder(&m.models, &m.ov_libs)?)),
+        Some(e) if e.starts_with("oracle:") => {
+            let pat = &e["oracle:".len()..];
+            let bases: Vec<PathBuf> = months.context("--months")?.split(',').map(|mm| PathBuf::from(pat.replace("{m}", mm.trim()))).collect();
+            Box::new(OracleEmbed::open(&bases)?)
+        }
+        _ => bail!("--emb ov | oracle:<base con {{m}}>"),
+    };
     let base = Query { k: k + 1, ..Default::default() };
     let d = RerankCfg::default();
-    let configs: Vec<(String, Query, RerankCfg)> = vec![
+    let mut configs: Vec<(String, Query, RerankCfg)> = vec![
         ("híbrida, cascada 50 (P4)".into(), base.clone(), d.clone()),
         ("híbrida, todos re-embebidos (E30c)".into(), base.clone(), RerankCfg { embed_top: None, ..d.clone() }),
         ("híbrida, cascada 30".into(), base.clone(), RerankCfg { embed_top: Some(30), ..d.clone() }),
@@ -494,13 +508,16 @@ fn cmd_eval_rerank(root: &Path, file: &Path, k: usize, m: &ModelArgs, emb: Optio
         ("vector, re-embebidos".into(), Query { mode: Mode::Vector, ..base.clone() }, d.clone()),
         ("palabras (frecuentes entre candidatos)".into(), Query { mode: Mode::Keyword, ..base.clone() }, d.clone()),
     ];
+    if quick {
+        configs.retain(|c| c.0.contains("(P4)") || c.0.starts_with("palabras"));
+    }
     println!("{:<40} {:>7} {:>7} {:>9} {:>8} {:>8}", "configuración", "P@k", "MRR", "ms/cons.", "decod.", "embeb.");
     for (name, tmpl, cfg) in &configs {
         let t = Instant::now();
         let (mut p, mut mrr, mut dec, mut emb_n) = (0f64, 0f64, 0usize, 0usize);
         for (i, (text, story)) in qs.iter().enumerate() {
             let q = Query { text: text.clone(), ..tmpl.clone() };
-            let out = hnz::rerank::search(&eng, &q, &vecs[i], cfg, &oracle)?;
+            let out = hnz::rerank::search(&eng, &q, &vecs[i], cfg, oracle.as_ref())?;
             dec += out.report.decoded;
             emb_n += out.report.embedded;
             let (r, f) = score_hits(&eng, &out.hits, *story, k)?;
@@ -933,7 +950,7 @@ fn main() -> Result<()> {
             let t0 = Instant::now();
             let eng = Engine::open(&root, &m.models)?;
             let t_open = t0.elapsed();
-            let mut emb = if q.mode != Mode::Keyword && !text.trim().is_empty() { Some(eng.embedder(&m.models, &m.ov_libs)?) } else { None };
+            let mut emb = if (s.rerank || q.mode != Mode::Keyword) && !text.trim().is_empty() { Some(eng.embedder(&m.models, &m.ov_libs)?) } else { None };
             let t_load = t0.elapsed();
             let t1 = Instant::now();
             let qv = match emb.as_mut() {
@@ -942,10 +959,19 @@ fn main() -> Result<()> {
             };
             let t_emb = t1.elapsed();
             let t2 = Instant::now();
-            let hits = eng.search(&q, qv.as_deref())?;
+            let (hits, prefixes) = match (s.rerank, &qv, emb) {
+                (true, Some(v), Some(e)) => {
+                    let o = hnz::rerank::search(&eng, &q, v, &hnz::rerank::RerankCfg::default(), &std::sync::Mutex::new(e))?;
+                    eprintln!("[reordenado: {} candidatos, {} prefijos decodificados ({} tokens), {} re-embebidos; etapa 1 {:.0} ms, decodificación {:.0} ms, embebido y fusión {:.0} ms]{}",
+                        o.report.candidates, o.report.decoded, o.report.tokens, o.report.embedded, o.report.ms_stage1, o.report.ms_decode, o.report.ms_embed,
+                        o.warning.map(|w| format!(" aviso: {w}")).unwrap_or_default());
+                    (o.hits, o.prefixes)
+                }
+                _ => (eng.search(&q, qv.as_deref())?, Default::default()),
+            };
             let t_search = t2.elapsed();
             let t3 = Instant::now();
-            let res = eng.fetch(&hits, s.full)?;
+            let res = eng.fetch_with(&hits, s.full, &prefixes)?;
             let t_fetch = t3.elapsed();
             if json {
                 println!("{}", serde_json::to_string_pretty(&res)?);
@@ -986,6 +1012,7 @@ fn main() -> Result<()> {
                             _ => ModeArg::Hybrid,
                         };
                         let s = SearchArgs {
+                            rerank: false,
                             k: query_param(&url, "k").and_then(|x| x.parse::<usize>().ok()).unwrap_or(10).clamp(1, 100),
                             from: query_param(&url, "from").filter(|x| !x.is_empty()),
                             to: query_param(&url, "to").filter(|x| !x.is_empty()),
@@ -1031,9 +1058,9 @@ fn main() -> Result<()> {
                 let _ = req.respond(resp);
             }
         }
-        Cmd::Eval { root, file, k, m, rerank, emb, months } => {
+        Cmd::Eval { root, file, k, m, rerank, emb, months, quick } => {
             if rerank {
-                cmd_eval_rerank(&root, &file, k, &m, emb.as_deref(), months.as_deref())?
+                cmd_eval_rerank(&root, &file, k, &m, emb.as_deref(), months.as_deref(), quick)?
             } else {
                 cmd_eval(&root, &file, k, &m)?
             }

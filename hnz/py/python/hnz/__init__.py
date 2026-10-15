@@ -185,7 +185,7 @@ class Archive:
                until: Optional[DateLike] = None, types: Union[str, Iterable[str], None] = None,
                author: Optional[str] = None, mode: Literal['hybrid', 'vector', 'keyword'] = 'hybrid',
                text: Literal['snippet', 'full'] = 'snippet', include_dead: bool = False, raw: bool = False,
-               w_bm25: float = 0.15, c_bm25: float = 20.0) -> Union[SearchResult, dict]:
+               w_bm25: float = 0.15, c_bm25: float = 20.0, rerank: Optional[bool] = None) -> Union[SearchResult, dict]:
         """Searches all of HN (or the range [since, until], both inclusive: "2015", "2015-06", a date,
         or a datetime for an exact instant in UTC).
 
@@ -193,6 +193,8 @@ class Archive:
         - `types`: "story", "comment", "job", "poll", "pollopt" (one or several).
         - `text="full"`: full text also for items of the LM-compressed tier (slower).
         - `raw=True`: returns the JSON dict as is (the same format as the HTTP server).
+        - `rerank` (compact blocks with an embedder of dynamic shapes): rerank the candidates by
+          their prefix (P4); None = whenever possible.
 
         Raises `BusyError` if it found no turn within the archive's `timeout`.
         """
@@ -205,7 +207,8 @@ class Archive:
         req = {'query': query or '', 'k': int(k), 'since': since_s, 'until': until_s,
                'since_ts': since_ts, 'until_ts': until_ts,
                'types': list(types or []), 'author': author, 'mode': mode, 'full': text == 'full',
-               'include_dead': bool(include_dead), 'w_bm25': float(w_bm25), 'c_bm25': float(c_bm25)}
+               'include_dead': bool(include_dead), 'w_bm25': float(w_bm25), 'c_bm25': float(c_bm25),
+               'rerank': rerank}
         d = json.loads(self._live().search_json(json.dumps(req)))
         if raw:
             return d
