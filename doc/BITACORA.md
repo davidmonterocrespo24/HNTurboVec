@@ -1174,3 +1174,34 @@ the multi-day all-HN runs (P5) start after P3.
   **P4 done:** quality gate met (0.238 by default, 0.239 with 100 candidates; real re-embedding =
   stored vectors), cold reranked search ~2.8 s in the library (~4 s in the CLI) on this 16-thread
   laptop, memory within `ram`, 68 Python and 32 Rust tests, adversarial review fixed.
+
+### E34 — P5 (the compact block of all of HN), in progress
+- **User decisions (2026-10-15):** finish everything on this laptop (an RTX 4060 laptop was
+  considered: CUDA would embed ~3-4x faster than the iGPU, but the LM compression must stay on a
+  CPU, bit-exact); **the LM retrained on 5 % of HN is dropped** (projected ~0.4 % less text, the
+  bar was 2 %; adopting a new LM after P5 would mean compressing everything again): P5 compresses
+  with E29's `lm-hn-70m`.
+- **Machine time, measured:** LM compression 122 records/s (81.9 tokens per record, the 16-thread
+  build of E20/P3) → 49.3 M records in ~4.7 days of CPU; embedding the v2 prompts on the iGPU at
+  ~200 docs/s → ~2.8 days, at the same time (the iGPU slows the CPU a little). Disk: 243 GB free;
+  the intermediate material takes ~100 GB (LM segments ~8 GB, f16 vectors ~76 GB, prompt token ids
+  deleted once embedded).
+- **Incident: the laptop slept with its lid closed.** Windows' event log shows Modern Standby from
+  18:42 to 22:15 on 10-14 and from 08:11 to 09:19 on 10-15 (the user had closed the lid); in that
+  state every process is frozen. The lid action on AC power is now "do nothing"
+  (`powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS LIDACTION 0`; no policy of the
+  organization sets it; on battery it still sleeps). The screen lock that the organization
+  enforces does not stop processes. The P5 workers also ask Windows not to sleep while they run
+  (`SetThreadExecutionState`).
+- **`scripts/p5_build.py`**: two resumable workers, each in its own process, started detached from
+  the agent's session (`Start-Process`), so they survive it: `lm` builds each month's LM segment
+  (`hnz build --tier lm --lm models/lm-hn-70m.hnzlm` → `work/p5/seg-YYYY-MM`), `embed` makes each
+  month's v2 prompts (`hnz prompts`) and embeds them on the iGPU (`embed_prompts.py` →
+  `emb/g2v2_YYYY-MM`), at below-normal priority so the LM worker (the critical path) keeps the CPU.
+  Each month is built under a temporary name and renamed when complete; the vectors are written
+  last and renamed, so a cut run never leaves a month that looks finished; months with no items (2
+  of 239) are skipped; before each month a worker waits while less than 4 GB of RAM is free (the
+  agent's environment had killed long jobs for low memory). OpenVINO's compile cache
+  (`work/ov_cache`) saves ~20 s of GPU compile per month. Tested on the first 4 months (7,916
+  items), then started for all 237 (2026-10-15 20:09) with the frozen binary `work/bin/hnz-p5.exe`.
+  The three sample months already have their v2 vectors.

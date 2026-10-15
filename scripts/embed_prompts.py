@@ -7,6 +7,7 @@ Usage: python scripts/embed_prompts.py work/p3/prompts 2015-06 [--device GPU|CPU
        python scripts/embed_prompts.py work/p3/prompts 2015-06 --compare emb/g2p128_2015-06   # cosine vs other vectors
 """
 import argparse
+import os
 import time
 
 import numpy as np
@@ -30,6 +31,8 @@ def load(prompts, month, limit):
 def embed(lens, seqs, device):
     import openvino as ov
     core = ov.Core()
+    # compiled models cached on disk: a month after the first one skips the GPU compile (~20 s)
+    core.set_property({'CACHE_DIR': 'work/ov_cache'})
     out = np.zeros((len(seqs), 768), np.float16)
     lo = 0
     for seq, bs in BUCKETS:
@@ -86,8 +89,12 @@ def main():
               f'p5 {np.percentile(cos, 5):.4f}, < 0.95: {(cos < 0.95).mean():.1%}', flush=True)
     if not a.limit or a.out:
         base = a.out or f'emb/g2v2_{a.month}'
-        np.save(f'{base}.f16.npy', vec)
-        np.save(f'{base}.ids.npy', ids.astype(np.uint32))
+        # written under temporary names and renamed, the vectors last: a cut run never leaves a
+        # pair of files that looks complete
+        for ext, arr in (('ids.npy', ids.astype(np.uint32)), ('f16.npy', vec)):
+            with open(f'{base}.{ext}.tmp', 'wb') as f:
+                np.save(f, arr)
+            os.replace(f'{base}.{ext}.tmp', f'{base}.{ext}')
         print(f'-> {base}.f16.npy', flush=True)
 
 
