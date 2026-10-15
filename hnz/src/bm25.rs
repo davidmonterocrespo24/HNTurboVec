@@ -517,31 +517,28 @@ impl Bm25 {
         &mut self.post
     }
 
-    /// (postings, df) del término en este segmento.
-    pub fn lookup(&self, term: &str) -> Option<(TermPost, u32)> {
-        let v = self.fst.get(term)?;
+    /// (postings, df) of the term in this index (None if it is not in it). The df of a list is
+    /// read from its first bytes: a failed read or a damaged header is an error.
+    pub fn lookup(&self, term: &str) -> Result<Option<(TermPost, u32)>> {
+        let Some(v) = self.fst.get(term) else { return Ok(None) };
+        let list = |off: usize| -> Result<Option<(TermPost, u32)>> {
+            let head = self.post.get(off, 10)?;
+            let mut p = 0;
+            let df = try_get(&head, &mut p).ok_or_else(|| crate::block::corrupt(format!("índice de palabras: cabecera de la lista en {off}")))?;
+            Ok(Some((TermPost::List { off }, df as u32)))
+        };
         if self.info.layout == LAYOUT_BLOCK {
             return match v & 3 {
-                TAG_FREQUENT => Some((TermPost::Frequent, (v >> 2) as u32)),
-                TAG_SINGLE => Some((TermPost::Single { doc: (v >> 2) as u32, tf: 1 }, 1)),
-                TAG_LIST => {
-                    let off = (v >> 2) as usize;
-                    let head = self.post.get(off, 10).ok()?;
-                    let mut p = 0;
-                    let df = crate::varint::try_get(&head, &mut p)? as u32;
-                    Some((TermPost::List { off }, df))
-                }
-                _ => None,
+                TAG_FREQUENT => Ok(Some((TermPost::Frequent, (v >> 2) as u32))),
+                TAG_SINGLE => Ok(Some((TermPost::Single { doc: (v >> 2) as u32, tf: 1 }, 1))),
+                TAG_LIST => list((v >> 2) as usize),
+                _ => Err(crate::block::incompatible(format!("índice de palabras: valor {v} desconocido"))),
             };
         }
         if v & 1 == 1 {
-            Some((TermPost::Single { doc: (v >> 9) as u32, tf: ((v >> 1) & 0xff) as u32 }, 1))
+            Ok(Some((TermPost::Single { doc: (v >> 9) as u32, tf: ((v >> 1) & 0xff) as u32 }, 1)))
         } else {
-            let off = (v >> 1) as usize;
-            let head = self.post.get(off, 10).ok()?;
-            let mut p = 0;
-            let df = try_get(&head, &mut p)? as u32;
-            Some((TermPost::List { off }, df))
+            list((v >> 1) as usize)
         }
     }
 
@@ -804,7 +801,7 @@ mod tests {
         b.add_batch(&texts[500..]);
         b.write(&dir).unwrap();
         let ix = Bm25::open(&dir).unwrap();
-        let (tp, df) = ix.lookup("rust").unwrap();
+        let (tp, df) = ix.lookup("rust").unwrap().unwrap();
         let expect: Vec<u32> = (0..1000).filter(|i| i % 3 == 0 || i % 7 == 0).collect();
         assert_eq!(df as usize, expect.len());
         let mut c = ix.cursor(tp);
@@ -817,11 +814,11 @@ mod tests {
         let mut c = ix.cursor(tp);
         c.advance(500);
         assert_eq!(c.doc(), 501);
-        let (tu, dfu) = ix.lookup("uniqueterm").unwrap();
+        let (tu, dfu) = ix.lookup("uniqueterm").unwrap().unwrap();
         assert_eq!(dfu, 1);
         let r = ix.top_k(&[(tu, 5.0)], 0, 1000, 3).unwrap();
         assert_eq!(r[0].0, 999);
-        let (ta, _) = ix.lookup("async").unwrap();
+        let (ta, _) = ix.lookup("async").unwrap().unwrap();
         let r = ix.top_k(&[(tp, 1.0), (ta, 2.0)], 100, 400, 5).unwrap();
         assert!(r.iter().all(|x| x.0 >= 100 && x.0 < 400 && x.0 % 7 == 0));
         let s = ix.score_docs(&[(ta, 2.0)], &[7, 8, 14]).unwrap();
@@ -895,17 +892,17 @@ mod tests {
         b.write_opts(&dir, false, 1.0).unwrap();
         let seg = Bm25::open(&dir).unwrap();
         for w in ["rust", "async", "uniqueterm", "filler"] {
-            let (a, da) = blk.lookup(w).unwrap();
-            let (b, db) = seg.lookup(w).unwrap();
+            let (a, da) = blk.lookup(w).unwrap().unwrap();
+            let (b, db) = seg.lookup(w).unwrap().unwrap();
             assert_eq!(da, db, "{w}");
             let idf = 1.5;
             assert_eq!(blk.top_k(&[(a, idf)], 0, 1000, 20).unwrap(), seg.top_k(&[(b, idf)], 0, 1000, 20).unwrap(), "{w}");
             assert_eq!(blk.score_docs(&[(a, idf)], &[0, 3, 7, 999]).unwrap(), seg.score_docs(&[(b, idf)], &[0, 3, 7, 999]).unwrap());
         }
-        let (ta, _) = blk.lookup("async").unwrap();
-        let (tr, _) = blk.lookup("rust").unwrap();
-        let (sa, _) = seg.lookup("async").unwrap();
-        let (sr, _) = seg.lookup("rust").unwrap();
+        let (ta, _) = blk.lookup("async").unwrap().unwrap();
+        let (tr, _) = blk.lookup("rust").unwrap().unwrap();
+        let (sa, _) = seg.lookup("async").unwrap().unwrap();
+        let (sr, _) = seg.lookup("rust").unwrap().unwrap();
         assert_eq!(blk.top_k(&[(tr, 1.0), (ta, 2.0)], 100, 400, 5).unwrap(), seg.top_k(&[(sr, 1.0), (sa, 2.0)], 100, 400, 5).unwrap());
         std::fs::remove_dir_all(&dir).ok();
         // with a threshold: frequent terms keep their df but have no postings
@@ -913,13 +910,13 @@ mod tests {
         lw.add_batch(&texts);
         let lp = lw.finish().unwrap();
         let blk = Bm25::from_parts(lp.fst, Blob::Resident(lp.post), lp.norms, lp.info).unwrap();
-        let (t, df) = blk.lookup("filler").unwrap();
+        let (t, df) = blk.lookup("filler").unwrap().unwrap();
         assert_eq!((t, df), (TermPost::Frequent, 1000));
-        let (t, df) = blk.lookup("rust").unwrap();
+        let (t, df) = blk.lookup("rust").unwrap().unwrap();
         assert_eq!((t, df), (TermPost::Frequent, 429));
-        let (t, df) = blk.lookup("async").unwrap();
+        let (t, df) = blk.lookup("async").unwrap().unwrap();
         assert!(matches!(t, TermPost::List { .. }) && df == 143);
-        assert_eq!(blk.lookup("uniqueterm").unwrap(), (TermPost::Single { doc: 999, tf: 1 }, 1));
+        assert_eq!(blk.lookup("uniqueterm").unwrap().unwrap(), (TermPost::Single { doc: 999, tf: 1 }, 1));
         assert!(blk.top_k(&[(TermPost::Frequent, 1.0)], 0, 1000, 5).unwrap().is_empty());
         assert_eq!(lp.classes, (3, 1, 2)); // filler, words, rust ("here" is a stopword) | uniqueterm | async, tokio
         // a term missing from the global table is an error

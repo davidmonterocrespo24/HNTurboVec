@@ -15,7 +15,10 @@ Design context: [06-libreria.md](06-libreria.md).
 | `cache` | decompressed records and titles; the RAM index of the optional disk cache | weighed per entry (strings + hash-table slack), bounded |
 
 Not covered: the host application's own memory (e.g. the Python objects built from the results)
-and the operating system's file cache (outside the process; it speeds up the disk reads).
+and the operating system's file cache (outside the process; it speeds up the disk reads). `ram`
+covers what one open `Archive` holds: `hnz.verify_block()` (quick or full) and
+`hnz.inspect(id=…)` open a block on their own, outside any budget (its always-loaded parts and the
+LM model: ≈0.15 GB for the sample block, ≈0.4 GB for all of HN).
 
 ## How it works
 

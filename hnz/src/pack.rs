@@ -59,9 +59,21 @@ fn xxh(b: &[u8]) -> String {
     format!("xxh3-64:{:016x}", XxHash3_64::oneshot(b))
 }
 
-fn load_month(spec: &PackSpec, m: &str, codec: &LmCodec) -> Result<Month> {
+/// A month of the spec, or None if its file has no items (nothing else is needed for it).
+fn load_month(spec: &PackSpec, m: &str, codec: &LmCodec) -> Result<Option<Month>> {
     let parquet = fill(&spec.parquet, m);
     let items = read_parquet(&parquet)?.items;
+    if items.is_empty() {
+        eprintln!("pack: {m} has no items");
+        return Ok(None);
+    }
+    // the dataset's files are months by item time: an item outside its month means a misread
+    let (t0, t1) = (crate::dates::parse(m, false), crate::dates::parse(m, true));
+    if let (Some(t0), Some(t1)) = (t0, t1) {
+        if let Some(it) = items.iter().find(|it| it.time < t0 || it.time >= t1) {
+            bail!("{m}: id {} has time {} ({}), outside the month", it.id, it.time, crate::dates::fmt(it.time));
+        }
+    }
     let kl = read_kids(&parquet)?;
     if kl.len() != items.len() || kl.iter().zip(&items).any(|(k, it)| k.0 != it.id) {
         bail!("{m}: the kids column does not match the items");
@@ -98,16 +110,23 @@ fn load_month(spec: &PackSpec, m: &str, codec: &LmCodec) -> Result<Month> {
     if descr != "<f2" || shape.len() != 2 || shape[1] < spec.bits || idescr != "<u4" || ishape[0] != shape[0] {
         bail!("{m}: embeddings must be float16 N x >= {} with uint32 ids", spec.bits);
     }
-    let known: std::collections::HashSet<u32> = items.iter().map(|x| x.id).collect();
+    // exactly the items with a prompt have an embedding
+    let prompt: Vec<bool> = items.par_iter().map(crate::prompt::has_prompt).collect();
+    let want: std::collections::HashSet<u32> = items.iter().zip(&prompt).filter(|x| *x.1).map(|x| x.0.id).collect();
     let mut emb = HashMap::with_capacity(shape[0]);
     for (row, c) in imap[ioff..].chunks_exact(4).enumerate() {
         let id = u32::from_le_bytes(c.try_into().unwrap());
-        if !known.contains(&id) {
-            bail!("{m}: embedding for id {id}, which is not an item of the month");
+        if !want.contains(&id) {
+            bail!("{m}: embedding for id {id}, which is not an item of the month with a prompt");
         }
-        emb.insert(id, row);
+        if emb.insert(id, row).is_some() {
+            bail!("{m}: two embeddings for id {id}");
+        }
     }
-    Ok(Month { name: m.to_string(), parquet, items, kids, lm, emb, npy: (shape, map, off) })
+    if emb.len() != want.len() {
+        bail!("{m}: {} items have a prompt and {} have an embedding", want.len(), emb.len());
+    }
+    Ok(Some(Month { name: m.to_string(), parquet, items, kids, lm, emb, npy: (shape, map, off) }))
 }
 
 /// Sign bits of the first `bits` dimensions of a row (bit j of byte j/8 = dim j > 0).
@@ -132,7 +151,8 @@ pub(crate) fn sign_bits(row_f16: &[u8], bits: usize) -> Vec<u8> {
 pub(crate) fn check_record(codec: &LmCodec, it: &Item, rec: &[u8]) -> Result<(&'static str, usize)> {
     match codec.plan_record(&it.title, &it.url, &it.text) {
         RecPlan::Empty => {
-            if rec.len() != 1 {
+            // what encode_record writes for an empty record: the header alone (mode 0, no tokens)
+            if rec != [0u8] {
                 bail!("id {}: expected an empty record", it.id);
             }
             Ok(("empty", 0))
@@ -165,9 +185,12 @@ pub fn pack(spec: &PackSpec, out: &Path) -> Result<serde_json::Value> {
     let gj: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(spec.globals.join("globals.json"))?)?;
     let n_all = gj["n_docs"].as_u64().context("globals.json: n_docs")?;
     let max_df_abs = (spec.max_df_ratio * n_all as f64).ceil() as u64;
-    let codec = LmCodec::load(&spec.lm_model)?;
+    // the records are checked with the model and the tokenizer the block stores
+    let lm_bytes = std::fs::read(&spec.lm_model).with_context(|| format!("{}", spec.lm_model.display()))?;
+    let lm_tok = std::fs::read(&spec.lm_tokenizer).with_context(|| format!("{}", spec.lm_tokenizer.display()))?;
+    let codec = LmCodec::from_parts(lm_bytes.clone(), Some(&lm_tok))?;
     eprintln!("pack: models and globals loaded ({:.0} s)", t0.elapsed().as_secs_f64());
-    let months: Vec<Month> = spec.months.iter().map(|m| load_month(spec, m, &codec)).collect::<Result<_>>()?;
+    let months: Vec<Month> = spec.months.iter().map(|m| load_month(spec, m, &codec)).collect::<Result<Vec<_>>>()?.into_iter().flatten().collect();
     eprintln!("pack: {} months loaded ({:.0} s)", months.len(), t0.elapsed().as_secs_f64());
 
     // document order: (time, id); "late" = time later than some item with a higher id
@@ -189,6 +212,9 @@ pub fn pack(spec: &PackSpec, out: &Path) -> Result<serde_json::Value> {
     let late: Vec<bool> = order.iter().map(|&i| late_of[i]).collect();
     docs = order.iter().map(|&i| docs[i]).collect();
     let n = docs.len();
+    if n == 0 {
+        bail!("nothing to pack: the months of the spec have no items");
+    }
 
     // every copied record against its item (in parallel)
     let checks: Vec<(&'static str, usize)> = docs
@@ -209,6 +235,10 @@ pub fn pack(spec: &PackSpec, out: &Path) -> Result<serde_json::Value> {
     let mut lex = LexWriter::new(&classes, max_df_abs, spec.max_df_ratio as f32);
     let mut batch: Vec<String> = Vec::new();
     let (mut n_deleted, mut n_with_vector) = (0u64, 0u64);
+    // the prompt prefix of the documents with a vector whose record has no LM tokens (P4 rebuilds
+    // their prompt from it instead of decoding): u32 doc, u8 flags, varint length, bytes
+    let mut prefix_fb: Vec<u8> = Vec::new();
+    let mut n_prefix_fb = 0u32;
     for (doc, d) in docs.iter().enumerate() {
         let it = item(d);
         let author = *author_id.get(it.by.as_str()).with_context(|| format!("id {}: author {:?} is not in the global table", it.id, it.by))?;
@@ -232,6 +262,14 @@ pub fn pack(spec: &PackSpec, out: &Path) -> Result<serde_json::Value> {
             has[doc / 64] |= 1 << (doc % 64);
             codes.extend(sign_code(&months[d.0], row, spec.bits));
             n_with_vector += 1;
+            if checks[doc].0 == "fallback" {
+                let (p, flags) = codec.prefix(&it.title, &it.url, &it.text).context("prefix of a record with a prompt")?;
+                prefix_fb.extend_from_slice(&(doc as u32).to_le_bytes());
+                prefix_fb.push(flags as u8);
+                crate::varint::put(&mut prefix_fb, p.len() as u64);
+                prefix_fb.extend_from_slice(p.as_bytes());
+                n_prefix_fb += 1;
+            }
         }
         ids.push(it.id);
         parents.push(it.parent);
@@ -278,8 +316,9 @@ pub fn pack(spec: &PackSpec, out: &Path) -> Result<serde_json::Value> {
 
     // write the block: always-loaded parts first, then the large ones
     std::fs::create_dir_all(out)?;
-    let lm_bytes = std::fs::read(&spec.lm_model)?;
     let mut w = BlockWriter::create(&out.join(crate::block::FILE_NAME))?;
+    let mut fb = n_prefix_fb.to_le_bytes().to_vec();
+    fb.extend_from_slice(&prefix_fb);
     let authors_txt = authors.join("\n");
     let parts: Vec<(&str, Codec, Access, &[u8])> = vec![
         ("meta/index", Codec::Zstd, Access::Load, &meta_index),
@@ -288,6 +327,7 @@ pub fn pack(spec: &PackSpec, out: &Path) -> Result<serde_json::Value> {
         ("meta/authors", Codec::Zstd, Access::Load, authors_txt.as_bytes()),
         ("text/idx", Codec::Zstd, Access::Load, &text_idx),
         ("text/gsum", Codec::Raw, Access::Load, &gsum),
+        ("text/prefix_fallback", Codec::Zstd, Access::Load, &fb),
         ("vec/has", Codec::Zstd, Access::Load, bytemuck_u64(&has)),
         ("lex/fst", Codec::Raw, Access::Load, &lp.fst),
         ("lex/norms", Codec::Zstd, Access::Load, &lp.norms),
@@ -296,7 +336,7 @@ pub fn pack(spec: &PackSpec, out: &Path) -> Result<serde_json::Value> {
         ("meta/blocks", Codec::Raw, Access::Random, &meta_blocks),
         ("lex/post", Codec::Raw, Access::Random, &lp.post),
         ("text/groups", Codec::Raw, Access::Random, &groups),
-        ("meta/kids", Codec::Raw, Access::Random, &kids_frames),
+        ("meta/kids", Codec::Raw, Access::Cold, &kids_frames),
         ("meta/kids.idx", Codec::Zstd, Access::Cold, &kids_idx),
     ];
     for (name, codec, access, bytes) in &parts {
@@ -304,7 +344,6 @@ pub fn pack(spec: &PackSpec, out: &Path) -> Result<serde_json::Value> {
     }
     let embed_tok = std::fs::read(&spec.embed_tokenizer)?;
     w.add(PartSpec::new("model/embed.tok", Codec::Zstd, Access::Cold), &embed_tok)?;
-    let lm_tok = std::fs::read(&spec.lm_tokenizer)?;
     w.add(PartSpec::new("model/lm.tok", Codec::Zstd, Access::Cold), &lm_tok)?;
     for (ext, name) in [("xml", "embed.xml"), ("bin", "embed.bin")] {
         let src = PathBuf::from(format!("{}.{ext}", spec.embed_ir.display()));
@@ -334,7 +373,10 @@ pub fn pack(spec: &PackSpec, out: &Path) -> Result<serde_json::Value> {
         "text": {"codec": "lm", "group": 32, "framing": 1, "rec_check": 1, "math_version": crate::lm::model::MATH_VERSION,
                  "transform_version": 1, "max_tokens": 2000, "model_id": codec.model.id, "lm_records": count("lm"),
                  "zstd_records": count("fallback"), "tokens": tokens, "gsum": "xxh3_64 low 32"},
-        "vec": {"bits": spec.bits, "source_dims": 768, "sign_rule": 1, "layout": "sparse", "prompt_version": spec.prompt_version},
+        "vec": {"bits": spec.bits, "source_dims": 768, "sign_rule": 1, "layout": "sparse", "prompt_version": spec.prompt_version,
+                "prefix_tokens": crate::prompt::PREFIX_TOKENS, "max_seq": crate::prompt::MAX_SEQ,
+                "doc_prompt": "title: <title or none> | text: <prefix body as plain text>", "query_prompt": crate::prompt::QUERY_PROMPT,
+                "prefix_fallback": n_prefix_fb},
         "lex": {"info": lp.info, "tokenizer_version": 1, "value_layout": 1,
                 "class_source": {"n_docs": n_all, "df": gj["df_xxh3"]},
                 "terms": {"frequent": lp.classes.0, "single": lp.classes.1, "list": lp.classes.2}},

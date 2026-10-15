@@ -69,6 +69,9 @@ pub fn incompatible(m: impl Into<String>) -> anyhow::Error {
 pub enum Codec {
     Raw,
     Zstd,
+    /// written by a newer hnz (an optional part with it is ignored, a required one refused)
+    #[serde(other)]
+    Unknown,
 }
 
 /// How the engine uses a part: a hint for the RAM planner and for verification at open.
@@ -81,8 +84,11 @@ pub enum Access {
     Scan,
     /// read at random offsets (metadata blocks, text, postings)
     Random,
-    /// only tools read it
+    /// read whole when needed (tools, the embedder's load), never by queries
     Cold,
+    /// written by a newer hnz
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -223,6 +229,7 @@ impl BlockWriter {
         let stored: Cow<[u8]> = match spec.codec {
             Codec::Raw => Cow::Borrowed(raw),
             Codec::Zstd => Cow::Owned(zstd::bulk::compress(raw, 19)?),
+            Codec::Unknown => bail!("parte {}: no se puede escribir con un códec desconocido", spec.name),
         };
         let raw_len = raw.len() as u64;
         self.add_stream(spec, Some(raw_len), |s| Ok(s.write_all(&stored)?))
@@ -367,6 +374,9 @@ impl Block {
     /// TOC hashes, and part bounds. Part hashes are checked when a part is read whole
     /// (`read_part`, resident `blob`) or by `verify_full`.
     pub fn open(path: &Path) -> Result<Arc<Self>> {
+        if path.is_dir() && Self::locate(path).is_none() {
+            return Err(incompatible(format!("{} no es un bloque hnz (falta {FILE_NAME})", path.display())));
+        }
         let file = Self::locate(path).unwrap_or_else(|| path.to_path_buf());
         let pool = FilePool::open(&file, FilePool::default_handles(), true)?;
         let flen = pool.len;
@@ -428,7 +438,8 @@ impl Block {
             1 => zstd::bulk::decompress(&stored, toc_raw_len as usize).map_err(|e| corrupt(format!("índice (TOC): {e}")))?,
             c => return Err(incompatible(format!("códec del índice desconocido {c}"))),
         };
-        let toc: Toc = serde_json::from_slice(&json).map_err(|e| corrupt(format!("índice (TOC): {e}")))?;
+        // the TOC's hash matched: bytes this binary cannot parse come from another writer
+        let toc: Toc = serde_json::from_slice(&json).map_err(|e| incompatible(format!("índice (TOC) ilegible para este binario: {e}")))?;
         if toc.format.major != FORMAT_MAJOR {
             return Err(incompatible(format!("versión de formato {} en el índice", toc.format.major)));
         }
@@ -438,9 +449,19 @@ impl Block {
         // parts: aligned, inside [4096, toc_off), not overlapping, unique names, well-formed hashes
         let mut by_name = BTreeMap::new();
         let mut spans: Vec<(u64, u64, &str)> = Vec::new();
+        let mut names = std::collections::HashSet::new();
         for (i, p) in toc.parts.iter().enumerate() {
-            if by_name.insert(p.name.clone(), i).is_some() {
+            if !names.insert(p.name.as_str()) {
                 return Err(corrupt(format!("parte repetida en el índice: {}", p.name)));
+            }
+            // a codec or access class from a newer writer: such a required part cannot be read; an
+            // optional one is never read (but still hashed by `full`)
+            if p.codec == Codec::Unknown || p.access == Access::Unknown {
+                if p.required {
+                    return Err(incompatible(format!("parte {}: códec o tipo de acceso desconocido", p.name)));
+                }
+            } else {
+                by_name.insert(p.name.clone(), i);
             }
             if p.off % ALIGN != 0 || p.off < SB_LEN as u64 || p.off.checked_add(p.len).is_none_or(|e| e > toc_off) {
                 return Err(corrupt(format!("parte {} fuera de rango", p.name)));
@@ -456,6 +477,16 @@ impl Block {
         spans.sort_unstable();
         if let Some(w) = spans.windows(2).find(|w| w[1].0 < w[0].1) {
             return Err(corrupt(format!("las partes {} y {} se solapan", w[0].2, w[1].2)));
+        }
+        // external files: plain names next to the container (never a path elsewhere), one per role
+        let mut roles = std::collections::HashSet::new();
+        for e in &toc.external {
+            let mut c = Path::new(&e.name).components();
+            let plain = matches!((c.next(), c.next()), (Some(std::path::Component::Normal(n)), None) if n.to_str() == Some(e.name.as_str()))
+                && !e.name.contains([':', '/', '\\']);
+            if !plain || !roles.insert(e.role.as_str()) || parse_hash(&e.hash).is_none() {
+                return Err(incompatible(format!("fichero externo no válido en el índice: {:?} ({})", e.name, e.role)));
+            }
         }
         let writer = String::from_utf8_lossy(&sb[104..168]).trim_end_matches('\0').to_string();
         Ok(Arc::new(Self { path: file, pool, toc, by_name, snapshot: toc_hash, toc_off, n_docs: le_u64(&sb, 88), math_version: le_u32(&sb, 96), writer }))
@@ -512,6 +543,7 @@ impl Block {
         let stored = self.read_stored(p)?;
         match p.codec {
             Codec::Raw => Ok(stored),
+            Codec::Unknown => Err(incompatible(format!("parte {}: códec desconocido", p.name))),
             Codec::Zstd => {
                 let raw = zstd::bulk::decompress(&stored, p.raw_len as usize).map_err(|e| corrupt(format!("parte {}: {e}", p.name)))?;
                 if raw.len() as u64 != p.raw_len {

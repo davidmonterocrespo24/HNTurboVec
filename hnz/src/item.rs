@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use arrow::array::{Array, ArrayRef, AsArray, RecordBatch};
-use arrow::datatypes::{DataType, Int32Type, Int64Type, UInt32Type};
+use arrow::datatypes::{DataType, Int32Type, Int64Type, TimeUnit, UInt32Type};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Serialize;
 use std::fs::File;
@@ -101,12 +101,21 @@ pub fn read_parquet(path: &Path) -> Result<Loaded> {
         let poll = ints::<UInt32Type>(col(&b, "poll")?)?;
         let score = ints::<Int32Type>(col(&b, "score")?)?;
         let desc = ints::<Int32Type>(col(&b, "descendants")?)?;
-        // timestamp[ms] -> Int64 (ms)
-        let time_ms = {
+        // a timestamp in its own unit (most files are in ms; the dataset's 2026-03.. files are in
+        // microseconds) or plain integer seconds; casting a timestamp to Int64 keeps the raw value
+        let (time_raw, scale) = {
             let t = col(&b, "time")?;
+            let scale: i64 = match t.data_type() {
+                DataType::Timestamp(TimeUnit::Second, _) => 1,
+                DataType::Timestamp(TimeUnit::Millisecond, _) => 1_000,
+                DataType::Timestamp(TimeUnit::Microsecond, _) => 1_000_000,
+                DataType::Timestamp(TimeUnit::Nanosecond, _) => 1_000_000_000,
+                DataType::Int64 | DataType::Int32 | DataType::UInt32 => 1,
+                other => bail!("la columna time es de tipo {other}: se esperaba una marca de tiempo"),
+            };
             let c = arrow::compute::cast(t, &DataType::Int64)?;
             let p = c.as_primitive::<Int64Type>();
-            (0..p.len()).map(|i| p.value(i)).collect::<Vec<i64>>()
+            ((0..p.len()).map(|i| p.value(i)).collect::<Vec<i64>>(), scale)
         };
         let by = strings(col(&b, "by")?)?;
         let text = strings(col(&b, "text")?)?;
@@ -117,8 +126,8 @@ pub fn read_parquet(path: &Path) -> Result<Loaded> {
             if del[i] != 0 {
                 deleted += 1;
             }
-            if time_ms[i] % 1000 != 0 {
-                bail!("id {}: time con milisegundos ({}), el formato asume segundos", id[i], time_ms[i]);
+            if time_raw[i] % scale != 0 {
+                bail!("id {}: time con fracciones de segundo ({} en unidades de 1/{scale} s), el formato guarda segundos", id[i], time_raw[i]);
             }
             items.push(Item {
                 id: id[i] as u32,
@@ -126,7 +135,7 @@ pub fn read_parquet(path: &Path) -> Result<Loaded> {
                 dead: dead[i] != 0,
                 deleted: del[i] != 0,
                 by: by[i].clone(),
-                time: time_ms[i] / 1000,
+                time: time_raw[i] / scale,
                 text: text[i].clone(),
                 parent: parent[i] as u32,
                 poll: poll[i] as u32,

@@ -251,6 +251,7 @@ pub const BLOCK_DEFS: &[crate::block::Definition<'static>] = &[
     crate::block::Definition { section: "text", key: "transform_version", supported: &[1] },
     crate::block::Definition { section: "text", key: "rec_check", supported: &[1] },
     crate::block::Definition { section: "text", key: "framing", supported: &[1] },
+    crate::block::Definition { section: "text", key: "group", supported: &[32] },
     crate::block::Definition { section: "meta", key: "row_encoding", supported: &[2] },
     crate::block::Definition { section: "lex", key: "value_layout", supported: &[1] },
     crate::block::Definition { section: "lex", key: "tokenizer_version", supported: &[1] },
@@ -269,6 +270,7 @@ pub const BLOCK_PARTS: &[(&str, &[u32])] = &[
     ("meta/kids.idx", &[1]),
     ("text/idx", &[1]),
     ("text/gsum", &[1]),
+    ("text/prefix_fallback", &[1]),
     ("text/groups", &[1]),
     ("vec/has", &[1]),
     ("vec/codes", &[1]),
@@ -380,14 +382,19 @@ impl Engine {
             rec_check: true,
         };
         let lm = LmStore::from_parts(block.blob("text/groups", res.text)?, &block.read_part("text/idx")?, &block.read_part("text/gsum")?, info)?;
-        let (codec, steady, _) = crate::mem::measure(|| -> Result<LmCodec> { LmCodec::from_parts(block.read_part("model/lm")?, None) });
+        // intact bytes (hashed) this binary cannot parse are an incompatible block, not a damaged one
+        let (codec, steady, _) = crate::mem::measure(|| -> Result<LmCodec> {
+            let bytes = block.read_part("model/lm")?;
+            LmCodec::from_parts(bytes, None).map_err(|e| incompatible(format!("model/lm: {e:#}")))
+        });
         let codec = codec?;
         if codec.model.id != lm.info.model_id {
             return Err(incompatible(format!("el modelo LM del bloque es {} y el manifiesto dice {}", codec.model.id, lm.info.model_id)));
         }
         let model_bytes = steady.max(block.require("model/lm")?.len);
-        let li: crate::bm25::Bm25Info = serde_json::from_value(m["lex"]["info"].clone()).map_err(|e| crate::block::corrupt(format!("lex: {e}")))?;
-        let bm25 = Bm25::from_parts(block.read_part("lex/fst")?, block.blob("lex/post", res.postings)?, block.read_part("lex/norms")?, li)?;
+        let li: crate::bm25::Bm25Info = serde_json::from_value(m["lex"]["info"].clone()).map_err(|e| incompatible(format!("lex.info: {e}")))?;
+        let (fst, norms) = (block.read_part("lex/fst")?, block.read_part("lex/norms")?);
+        let bm25 = Bm25::from_parts(fst, block.blob("lex/post", res.postings)?, norms, li).map_err(|e| incompatible(format!("lex: {e:#}")))?;
         let bits = num(&m["vec"]["bits"]) as usize;
         let vec = VecIndex::from_parts(&block.read_part("vec/has")?, block.blob("vec/codes", res.vectors)?, bits, n)?;
         let flags = block.read_part("meta/flags")?;
@@ -708,7 +715,12 @@ impl Engine {
         let use_vec = q.mode != Mode::Keyword && qvec.is_some() && has_text;
         // IDF global (df sumado en todos los segmentos)
         let n = self.total_docs as f32;
-        let dfs: Vec<u64> = terms.iter().map(|t| self.segs.iter().filter_map(|s| s.bm25.as_ref()?.lookup(t).map(|x| x.1 as u64)).sum()).collect();
+        let mut dfs: Vec<u64> = vec![0; terms.len()];
+        for (i, t) in terms.iter().enumerate() {
+            for s in self.segs.iter().filter_map(|s| s.bm25.as_ref()) {
+                dfs[i] += s.lookup(t)?.map_or(0, |x| x.1 as u64);
+            }
+        }
         let mut idf: Vec<f32> = dfs.iter().map(|&df| ((n - df as f32 + 0.5) / (df as f32 + 0.5) + 1.0).ln()).collect();
         // very long queries: only the MAX_TERMS rarest terms that appear somewhere count
         if terms.len() > MAX_TERMS {
@@ -778,7 +790,7 @@ impl Engine {
                     return Ok(Some(out));
                 }
                 let tps: Vec<(TermPost, f32)> = match (&sg.bm25, use_bm25) {
-                    (Some(b), true) => terms.iter().zip(&idf).filter_map(|(t, &w)| b.lookup(t).map(|x| (x.0, w))).collect(),
+                    (Some(b), true) => terms.iter().zip(&idf).filter_map(|(t, &w)| b.lookup(t).transpose().map(|x| x.map(|x| (x.0, w)))).collect::<Result<_>>()?,
                     _ => Vec::new(),
                 };
                 let lut = match (&sg.vec, use_vec) {
@@ -787,7 +799,7 @@ impl Engine {
                 };
                 let score = |cand: &[u32]| -> Result<Vec<Hit>> {
                     let vs = match (&sg.vec, &lut) {
-                        (Some(v), Some(l)) => v.score_docs(l, cand),
+                        (Some(v), Some(l)) => v.score_docs(l, cand)?,
                         _ => vec![f32::NEG_INFINITY; cand.len()],
                     };
                     let bs = match (&sg.bm25, tps.is_empty()) {
@@ -846,7 +858,7 @@ impl Engine {
                     let mut raw: Vec<u32> = Vec::new();
                     let mut saturated = false;
                     if let (Some(v), Some(l)) = (&sg.vec, &lut) {
-                        let r = v.search(l, lo as usize, hi as usize, c1, kc);
+                        let r = v.search(l, lo as usize, hi as usize, c1, kc)?;
                         saturated |= r.len() >= kc && kc < (hi - lo) as usize;
                         raw.extend(r.into_iter().map(|x| x.0));
                     }
@@ -896,7 +908,9 @@ impl Engine {
             return Ok(None);
         }
         let Some(doc) = sg.s.meta.try_doc_of_id(id)? else { return Ok(None) };
-        Ok(Some((si, doc, sg.s.meta.try_row(doc)?)))
+        let row = sg.s.meta.try_row(doc)?;
+        // a lookup that lands on another id (a wrong late-table entry) finds nothing
+        Ok((row.id == id).then_some((si, doc, row)))
     }
 
     /// Textos de varios documentos: zstd directo, LM en un único lote (con cachés L1/L2).

@@ -253,7 +253,9 @@ pub struct Archive {
     emb: OnceLock<mpsc::Sender<(String, EmbedReply)>>,
     /// serializes the attempts to load the embedder and remembers the last failure (so the load is
     /// not retried on every query)
-    emb_init: Mutex<Option<(Instant, String)>>,
+    /// the last failed load: when, its message, and whether it was a damaged (1) or an
+    /// incompatible (2) block, so a retry inside EMB_RETRY raises the same error type
+    emb_init: Mutex<Option<(Instant, String, u8)>>,
 }
 
 /// After a failure to load the embedder, it is not retried until this time has passed.
@@ -417,9 +419,14 @@ impl Archive {
         if let Some(tx) = self.emb.get() {
             return Ok(tx.clone()); // another thread loaded it while we waited
         }
-        if let Some((t, msg)) = last.as_ref() {
+        if let Some((t, msg, kind)) = last.as_ref() {
             if t.elapsed() < EMB_RETRY {
-                bail!("el embedder no se pudo cargar hace {:.0} s: {msg}", t.elapsed().as_secs_f64());
+                let m = format!("el embedder no se pudo cargar hace {:.0} s: {msg}", t.elapsed().as_secs_f64());
+                return Err(match kind {
+                    1 => crate::block::corrupt(m),
+                    2 => crate::block::incompatible(m),
+                    _ => anyhow!(m),
+                });
             }
         }
         match self.spawn_embedder() {
@@ -430,7 +437,14 @@ impl Archive {
                 Ok(tx)
             }
             Err(e) => {
-                *last = Some((Instant::now(), format!("{e:#}")));
+                let kind = if e.downcast_ref::<crate::block::CorruptBlockError>().is_some() {
+                    1
+                } else if e.downcast_ref::<crate::block::IncompatibleBlockError>().is_some() {
+                    2
+                } else {
+                    0
+                };
+                *last = Some((Instant::now(), format!("{e:#}"), kind));
                 Err(e)
             }
         }
@@ -456,18 +470,16 @@ impl Archive {
     fn spawn_embedder(&self) -> Result<(mpsc::Sender<(String, EmbedReply)>, EmbMem)> {
         let libs = self.ov_libs.clone().context("falta la carpeta de OpenVINO (ov_libs o la variable HNZ_OV_LIBS)")?;
         let models = self.models.clone();
-        // a block: its IR files (checked against their hashes) and the tokenizer inside it
-        let block_files = match &self.eng.block {
-            Some(b) => Some(b.embedder_files()?),
-            None => None,
-        };
+        // a block: its IR files (checked against their hashes) and the tokenizer inside it, read
+        // in the embedder's thread so the measured load includes them and frees the tokenizer
+        let block = self.eng.block.clone();
         let (tx, rx) = mpsc::channel::<(String, EmbedReply)>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<EmbMem>>();
         std::thread::Builder::new().name("hnz-embedder".into()).spawn(move || {
             // measure the load and a first inference (it allocates OpenVINO's buffers and threads)
             let (r, steady, peak) = crate::mem::measure(|| {
-                let e = match &block_files {
-                    Some((xml, bin, tok)) => Embedder::from_files(xml, bin, tok, &libs),
+                let e = match &block {
+                    Some(b) => b.embedder_files().and_then(|(xml, bin, tok)| Embedder::from_files(&xml, &bin, &tok, &libs)),
                     None => Embedder::new(&models, &libs),
                 };
                 e.and_then(|mut e| {

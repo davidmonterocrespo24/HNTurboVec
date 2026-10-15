@@ -327,6 +327,27 @@ impl LmCodec {
         (out, ids.len() as u64)
     }
 
+    /// The prefix of an item's LM string (see `crate::prompt`: up to the end of the url plus
+    /// `PREFIX_TOKENS` body tokens) and the record's text flags, found with the LM tokenizer; for an
+    /// LM record it is exactly what the decoder emits when asked for that many body tokens. None if
+    /// the item has no LM string.
+    pub fn prefix(&self, title: &str, url: &str, text: &str) -> Option<(String, u64)> {
+        use crate::prompt::{prefix_cut, prefix_string, PREFIX_TOKENS};
+        let (s, flags) = lm_string(title, url, text)?;
+        let ids = self.tokenizer().encode(s.as_str(), false).map(|e| e.get_ids().to_vec()).unwrap_or_default();
+        let v = self.model.h.vocab as u32;
+        if ids.is_empty() || ids.iter().any(|&i| i >= v) {
+            // not tokenizable for this model (such records are stored with zstd): the title, the
+            // url and the first PREFIX_TOKENS x 4 characters of the body
+            let mut parts = s.splitn(3, '\n');
+            let (t, u, b) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+            return Some((format!("{t}\n{u}\n{}", b.chars().take(PREFIX_TOKENS * 4).collect::<String>()), flags));
+        }
+        let cut = prefix_cut(&ids, |i| self.model.token_bytes(i), PREFIX_TOKENS);
+        let bytes: Vec<u8> = ids[..cut].iter().flat_map(|&i| self.model.token_bytes(i).iter().copied()).collect();
+        Some((prefix_string(&bytes), flags))
+    }
+
     /// What `encode_record` does with a record, without the arithmetic coding: the whole record if
     /// it is empty or stored with zstd, or the LM token ids and the record's header (varint + check
     /// byte). Pack and verify use it to check copied records against the source items.
@@ -844,8 +865,11 @@ impl LmStore {
     /// From the parts of a block: the groups (in RAM or on disk), their offsets and checksums.
     pub fn from_parts(bin: Blob, idx: &[u8], gsum: &[u8], info: LmInfo) -> Result<Self> {
         let bad = |m: &str| crate::block::corrupt(format!("text: {m}"));
+        if info.group == 0 {
+            return Err(crate::block::incompatible("text: grupo de 0 registros"));
+        }
         let ng = info.n_docs.div_ceil(info.group);
-        if idx.len() != (ng + 1) * 8 || gsum.len() != ng * 4 || info.group == 0 {
+        if idx.len() != (ng + 1) * 8 || gsum.len() != ng * 4 {
             return Err(bad("tamaño del índice"));
         }
         let off: Vec<u64> = idx.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
@@ -870,6 +894,9 @@ impl LmStore {
 
     /// Compressed bytes of record `doc` (borrowed if lm.bin is resident; read if not).
     pub fn raw(&self, doc: usize) -> Result<Cow<'_, [u8]>> {
+        if doc >= self.info.n_docs || doc / self.info.group + 1 >= self.off.len() {
+            bail!("registro {doc} fuera de rango ({} documentos)", self.info.n_docs);
+        }
         let g = doc / self.info.group;
         let k = doc % self.info.group;
         let data = self.bin.get(self.off[g] as usize, (self.off[g + 1] - self.off[g]) as usize)?;

@@ -82,7 +82,7 @@ fn main() -> anyhow::Result<()> {
                     .map(|q| {
                         let lut = QueryLut::new(q, nb);
                         let t = Instant::now();
-                        let r = vi.search(&lut, 0, n, cand, k);
+                        let r = vi.search(&lut, 0, n, cand, k).unwrap();
                         assert_eq!(r.len(), k);
                         t.elapsed().as_secs_f64() * 1e3
                     })

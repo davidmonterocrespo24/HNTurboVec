@@ -104,11 +104,18 @@ class Item:
 _KIND = {1: 'story', 2: 'comment', 3: 'poll', 4: 'pollopt', 5: 'job'}
 
 
+def _date(t: int) -> str:
+    try:
+        return _dt.datetime.fromtimestamp(t, _dt.timezone.utc).strftime('%Y-%m-%d %H:%M')
+    except (OverflowError, OSError, ValueError):     # a time outside Python's dates: keep the item
+        return ''
+
+
 def _item(d: dict) -> Item:
     t = int(d.get('time', 0))
     return Item(
         id=d['id'], kind=_KIND.get(d.get('typ', 0), str(d.get('typ'))), by=d.get('by', ''), time=t,
-        date=_dt.datetime.fromtimestamp(t, _dt.timezone.utc).strftime('%Y-%m-%d %H:%M'),
+        date=_date(t),
         title=d.get('title', ''), url=d.get('url', ''), html=d.get('text', ''), text=d.get('text_plain', ''),
         points=d.get('score', 0), descendants=d.get('descendants', 0), parent_id=d.get('parent') or None,
         poll=d.get('poll') or None, parts=list(d.get('parts', [])), dead=bool(d.get('dead')), deleted=bool(d.get('deleted')))
@@ -292,7 +299,9 @@ def verify_block(path: Union[str, os.PathLike], level: Literal['header', 'quick'
     """Checks a compact block without opening it for queries: "header" (structure and versions),
     "quick" (what `open` checks by default) or "full" (every part hash, the padding, the embedder
     files and every canary: a few seconds per GB). Returns a report; raises `CorruptBlockError` or
-    `IncompatibleBlockError` (the deeper check against the sources is `hnz verify-block --level deep`)."""
+    `IncompatibleBlockError` (the deeper check against the sources is `hnz verify-block --level deep`).
+    It opens the block on its own, outside any open archive's `ram` budget (quick and full load the
+    always-loaded parts and the LM model)."""
     return json.loads(_hnz.verify_block(os.fspath(path), level))
 
 
@@ -300,7 +309,8 @@ def inspect(path: Union[str, os.PathLike], *, project: Optional[int] = None,
             lex: Union[str, os.PathLike, None] = None, id: Optional[int] = None) -> dict:
     """Describes a compact block: its parts (offset, bytes, bytes per document), TOC and source
     snapshot. `project`: sizes projected to that many documents (`lex`: the exact word-index sizes
-    from `hnz lexicon`); `id`: where that item's bytes are."""
+    from `hnz lexicon`); `id`: where that item's bytes are (this opens the block on its own,
+    outside any `ram` budget)."""
     return json.loads(_hnz.inspect(os.fspath(path), project, os.fspath(lex) if lex else None, id))
 
 

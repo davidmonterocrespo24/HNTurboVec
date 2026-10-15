@@ -90,6 +90,9 @@ pub struct VecIndex {
     /// blocks: ties at the Hamming cut are broken by a hash of (doc, query) instead of the doc
     /// number (in one global, time-ordered segment the doc number would always favour old docs)
     pub tie_seeded: bool,
+    /// read errors of the codes so far (a search fails if any happens while it runs) and the last
+    read_errors: std::sync::atomic::AtomicU64,
+    last_error: std::sync::Mutex<String>,
 }
 
 /// 32-bit integer hash (murmur3 finalizer).
@@ -172,7 +175,7 @@ impl VecIndex {
                 hb.len()
             );
         }
-        Ok(Self { n: n_docs, codes, has, nbytes, rank: None, tie_seeded: false })
+        Ok(Self { n: n_docs, codes, has, nbytes, rank: None, tie_seeded: false, read_errors: Default::default(), last_error: Default::default() })
     }
 
     /// From the parts of a block: the bitmap of documents with a vector and their codes (only
@@ -192,7 +195,7 @@ impl VecIndex {
         if codes.len() != acc as usize * nbytes {
             return Err(crate::block::corrupt(format!("vec/codes: {} bytes para {acc} vectores de {nbytes} B", codes.len())));
         }
-        Ok(Self { n: n_docs, codes, has, nbytes, rank: Some(rank), tie_seeded: true })
+        Ok(Self { n: n_docs, codes, has, nbytes, rank: Some(rank), tie_seeded: true, read_errors: Default::default(), last_error: Default::default() })
     }
 
     /// Code slot of a document (dense: the document; sparse: vectors before it).
@@ -225,7 +228,7 @@ impl VecIndex {
         while s < s1 {
             let e = (s + step).min(s1);
             let bytes = self.codes.get(s * nb, (e - s) * nb).unwrap_or_else(|err| {
-                eprintln!("hnz: no se pudo leer vec/codes: {err:#}");
+                self.read_failed(&err);
                 Cow::Owned(vec![0; (e - s) * nb])
             });
             for i in 0..e - s {
@@ -280,9 +283,25 @@ impl VecIndex {
     #[inline]
     pub fn code(&self, doc: usize) -> Cow<'_, [u8]> {
         self.try_code(doc).unwrap_or_else(|e| {
-            eprintln!("hnz: no se pudo leer vec.bin: {e:#}");
+            self.read_failed(&e);
             Cow::Owned(vec![0; self.nbytes])
         })
+    }
+
+    /// A failed read of codes: counted, so the search that was running reports it.
+    fn read_failed(&self, e: &anyhow::Error) {
+        *self.last_error.lock().unwrap_or_else(|p| p.into_inner()) = format!("{e:#}");
+        self.read_errors.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Runs `f`; an error if a read of codes failed meanwhile (their place was read as zeros).
+    fn checked<T>(&self, f: impl FnOnce() -> T) -> Result<T> {
+        let before = self.read_errors.load(std::sync::atomic::Ordering::SeqCst);
+        let r = f();
+        if self.read_errors.load(std::sync::atomic::Ordering::SeqCst) != before {
+            bail!("no se pudieron leer los códigos de los vectores: {}", self.last_error.lock().unwrap_or_else(|p| p.into_inner()));
+        }
+        Ok(r)
     }
 
     /// Code of the document, or the read error.
@@ -293,7 +312,7 @@ impl VecIndex {
     /// Codes of documents [st, en), consecutive (a single read if they are on disk).
     fn codes_of(&self, st: usize, en: usize) -> Cow<'_, [u8]> {
         self.codes.get(st * self.nbytes, (en - st) * self.nbytes).unwrap_or_else(|e| {
-            eprintln!("hnz: no se pudo leer vec.bin: {e:#}");
+            self.read_failed(&e);
             Cow::Owned(vec![0; (en - st) * self.nbytes])
         })
     }
@@ -428,8 +447,13 @@ impl VecIndex {
         self.hamming_select(q, lo, hi, cand)
     }
 
-    /// Top-k en [lo, hi): Hamming (256 bits) -> `cand` candidatos -> asimétrico.
-    pub fn search(&self, q: &QueryLut, lo: usize, hi: usize, cand: usize, k: usize) -> Vec<(u32, f32)> {
+    /// Top-k en [lo, hi): Hamming (256 bits) -> `cand` candidatos -> asimétrico. A failed read of
+    /// codes is an error.
+    pub fn search(&self, q: &QueryLut, lo: usize, hi: usize, cand: usize, k: usize) -> Result<Vec<(u32, f32)>> {
+        self.checked(|| self.search_unchecked(q, lo, hi, cand, k))
+    }
+
+    fn search_unchecked(&self, q: &QueryLut, lo: usize, hi: usize, cand: usize, k: usize) -> Vec<(u32, f32)> {
         let hi = hi.min(self.n);
         if lo >= hi || cand == 0 || k == 0 {
             return Vec::new();
@@ -445,9 +469,9 @@ impl VecIndex {
         scored
     }
 
-    pub fn score_docs(&self, q: &QueryLut, docs: &[u32]) -> Vec<f32> {
+    pub fn score_docs(&self, q: &QueryLut, docs: &[u32]) -> Result<Vec<f32>> {
         docs.iter()
-            .map(|&d| if self.has(d as usize) { q.score(&self.code(d as usize)) } else { f32::NEG_INFINITY })
+            .map(|&d| if self.has(d as usize) { Ok(q.score(&self.try_code(d as usize)?)) } else { Ok(f32::NEG_INFINITY) })
             .collect()
     }
 }
@@ -480,7 +504,7 @@ mod tests {
             }
         }
         let hb: Vec<u8> = has.iter().flat_map(|w| w.to_le_bytes()).collect();
-        let dv = VecIndex { codes: Blob::Resident(dense), has: has.clone(), nbytes: nb, n, rank: None, tie_seeded: false };
+        let dv = VecIndex { codes: Blob::Resident(dense), has: has.clone(), nbytes: nb, n, rank: None, tie_seeded: false, read_errors: Default::default(), last_error: Default::default() };
         for resident in [true, false] {
             let codes = if resident {
                 Blob::Resident(sparse.clone())
@@ -501,12 +525,12 @@ mod tests {
             }
             for (lo, hi) in [(0, n), (100, 7_000), (12_345, 19_999)] {
                 for cand in [50, 2_000] {
-                    assert_eq!(dv.search(&lut, lo, hi, cand, 30), sv.search(&lut, lo, hi, cand, 30), "{lo}..{hi} {cand}");
+                    assert_eq!(dv.search(&lut, lo, hi, cand, 30).unwrap(), sv.search(&lut, lo, hi, cand, 30).unwrap(), "{lo}..{hi} {cand}");
                     assert_eq!(dv.hamming_select_heap(&lut, lo, hi, cand), sv.hamming_select_heap(&lut, lo, hi, cand));
                 }
             }
             let docs: Vec<u32> = (0..n as u32).step_by(7).collect();
-            assert_eq!(dv.score_docs(&lut, &docs), sv.score_docs(&lut, &docs));
+            assert_eq!(dv.score_docs(&lut, &docs).unwrap(), sv.score_docs(&lut, &docs).unwrap());
             // seeded ties: same candidates up to the tie group, not biased towards low doc numbers
             sv.tie_seeded = true;
             let a = sv.hamming_select_pub(&lut, 0, n, 500);

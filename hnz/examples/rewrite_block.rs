@@ -1,6 +1,7 @@
 //! Rewrites a compact block with changes, for the incompatibility tests (P3): every part and
 //! external file is copied as is, then
-//! - `--set <section>.<key>=<json>` changes a manifest value (e.g. `text.math_version=1`);
+//! - `--set <section>.<key>=<json>` changes a manifest value (e.g. `text.math_version=1`), or
+//!   `--set /json/pointer=<json>` any value of the manifest (e.g. `/canaries/0/text="…"`);
 //! - `--part <name>=<file>` replaces a part's decoded bytes with a file's, or adds a required part
 //!   with that name (e.g. `model/lm=models/lm-pythia-70m.hnzlm`).
 //! The TOC, hashes and trailer are all valid: only the content changes. With no change the output
@@ -25,8 +26,13 @@ fn main() -> Result<()> {
         let (k, v) = args[i + 1].split_once('=').context("expected name=value")?;
         match args[i].as_str() {
             "--set" => {
-                let (sec, key) = k.split_once('.').context("--set section.key=json")?;
-                manifest[sec][key] = serde_json::from_str(v).with_context(|| format!("{v} is not JSON"))?;
+                let value: serde_json::Value = serde_json::from_str(v).with_context(|| format!("{v} is not JSON"))?;
+                if k.starts_with('/') {
+                    *manifest.pointer_mut(k).with_context(|| format!("no {k} in the manifest"))? = value;
+                } else {
+                    let (sec, key) = k.split_once('.').context("--set section.key=json")?;
+                    manifest[sec][key] = value;
+                }
             }
             "--part" => replace.push((k.to_string(), std::fs::read(v).with_context(|| v.to_string())?)),
             o => bail!("unknown option {o}"),

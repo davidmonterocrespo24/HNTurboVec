@@ -399,13 +399,11 @@ impl MetaStore {
         Ok(rows.swap_remove(k))
     }
 
-    /// Document number of a HN id (None if it is not in this store).
-    pub fn try_doc_of_id(&self, id: u32) -> Result<Option<usize>> {
-        if let Ok(i) = self.late.binary_search_by_key(&id, |x| x.0) {
-            return Ok(Some(self.late[i].1 as usize));
-        }
+    /// The block where an in-order id is (or would be), without decoding anything; None before
+    /// the first block. Out-of-order ids (blocks) are found through the late table instead.
+    pub fn block_of_id(&self, id: u32) -> Option<usize> {
         if self.first_id.is_empty() || id < self.first_id[0] {
-            return Ok(None);
+            return None;
         }
         let mut b = self.first_id.partition_point(|&x| x <= id) - 1;
         // blocks: a block whose rows are all out of time order repeats the main id of the block
@@ -413,6 +411,15 @@ impl MetaStore {
         while self.enc == 2 && b > 0 && self.first_id[b - 1] == self.first_id[b] {
             b -= 1;
         }
+        Some(b)
+    }
+
+    /// Document number of a HN id (None if it is not in this store).
+    pub fn try_doc_of_id(&self, id: u32) -> Result<Option<usize>> {
+        if let Ok(i) = self.late.binary_search_by_key(&id, |x| x.0) {
+            return Ok(Some(self.late[i].1 as usize));
+        }
+        let Some(b) = self.block_of_id(id) else { return Ok(None) };
         let rows = self.try_block(b)?;
         Ok(if self.enc == 1 {
             rows.binary_search_by_key(&id, |r| r.id).ok().map(|k| b * META_BLOCK + k)

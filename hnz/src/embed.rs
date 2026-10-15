@@ -7,7 +7,7 @@ use openvino::{CompiledModel, Core, DeviceType, ElementType, InferRequest, Shape
 use std::path::Path;
 use tokenizers::Tokenizer;
 
-pub const QUERY_PROMPT: &str = "task: search result | query: ";
+pub use crate::prompt::QUERY_PROMPT;
 
 pub struct Embedder {
     // orden de campos = orden de destrucción (request antes que el modelo y el core)

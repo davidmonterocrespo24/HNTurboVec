@@ -106,63 +106,77 @@ impl LmModel {
         if data.len() < 12 || &data[..6] != b"HNZLM1" {
             bail!("no es un .hnzlm");
         }
+        // every range the header names must lie inside the file (an unexpected file is an error,
+        // never a panic)
+        let span = |a: usize, len: usize| -> Result<std::ops::Range<usize>> {
+            a.checked_add(len).filter(|&e| e <= data.len()).map(|e| a..e).with_context(|| format!("modelo LM: rango {a}+{len} fuera del fichero"))
+        };
         let hl = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
-        let h: Header = serde_json::from_slice(&data[12..12 + hl])?;
+        let h: Header = serde_json::from_slice(&data[span(12, hl)?])?;
         if h.arch != "gpt_neox" {
             bail!("arquitectura no soportada: {}", h.arch);
+        }
+        if h.heads == 0 || h.hidden == 0 || h.inter == 0 || h.hidden % h.heads != 0 || h.rotary_ndims > h.hidden / h.heads || h.rotary_ndims % 2 != 0 || h.vocab == 0 || h.max_pos == 0 {
+            bail!("modelo LM: dimensiones incoherentes en la cabecera");
         }
         let base = 12 + hl + ((64 - (12 + hl) % 64) % 64);
         let find = |name: &str| -> Result<TensorInfo> {
             h.tensors.iter().find(|t| t.name == name).cloned().with_context(|| format!("falta tensor {name}"))
         };
-        let vecf = |name: &str| -> Result<Vec<f32>> {
+        let at = |off: usize| base.checked_add(off).context("modelo LM: desplazamiento");
+        let vecf = |name: &str, want: usize| -> Result<Vec<f32>> {
             let t = find(name)?;
-            Ok(f32s(&data[base + t.offset..base + t.offset + t.len * 4]))
+            if t.len < want {
+                bail!("modelo LM: {name} tiene {} valores, se esperaban {want}", t.len);
+            }
+            Ok(f32s(&data[span(at(t.offset)?, t.len.checked_mul(4).context("tamaño")?)?]))
         };
-        let q8 = |name: &str| -> Result<QMat> {
+        let q8 = |name: &str, rows: usize, cols: usize| -> Result<QMat> {
             let t = find(name)?;
             if t.kind != "q8" {
                 bail!("{name} no es q8");
             }
-            let s0 = base + t.offset;
-            let d0 = s0 + t.rows * 4;
-            let rowsum = (0..t.rows)
-                .map(|r| data[d0 + r * t.cols..d0 + (r + 1) * t.cols].iter().map(|&b| b as i8 as i32).sum())
-                .collect();
-            Ok(QMat { rows: t.rows, cols: t.cols, scales: f32s(&data[s0..d0]), rowsum, off: d0 })
+            if t.rows < rows || t.cols != cols {
+                bail!("modelo LM: {name} es {}x{}, se esperaba {rows}x{cols}", t.rows, t.cols);
+            }
+            let s = span(at(t.offset)?, t.rows.checked_mul(4).context("tamaño")?)?;
+            let d = span(s.end, t.rows.checked_mul(t.cols).context("tamaño")?)?;
+            let rowsum = data[d.clone()].chunks_exact(t.cols).map(|r| r.iter().map(|&b| b as i8 as i32).sum()).collect();
+            Ok(QMat { rows: t.rows, cols: t.cols, scales: f32s(&data[s]), rowsum, off: d.start })
         };
+        let (hd, inter) = (h.hidden, h.inter);
         let mut layers = Vec::new();
         for l in 0..h.layers {
             layers.push(LayerW {
-                ln1_w: vecf(&format!("l{l}.ln1.w"))?,
-                ln1_b: vecf(&format!("l{l}.ln1.b"))?,
-                ln2_w: vecf(&format!("l{l}.ln2.w"))?,
-                ln2_b: vecf(&format!("l{l}.ln2.b"))?,
-                qkv: q8(&format!("l{l}.qkv.w"))?,
-                qkv_b: vecf(&format!("l{l}.qkv.b"))?,
-                o: q8(&format!("l{l}.o.w"))?,
-                o_b: vecf(&format!("l{l}.o.b"))?,
-                fc1: q8(&format!("l{l}.fc1.w"))?,
-                fc1_b: vecf(&format!("l{l}.fc1.b"))?,
-                fc2: q8(&format!("l{l}.fc2.w"))?,
-                fc2_b: vecf(&format!("l{l}.fc2.b"))?,
+                ln1_w: vecf(&format!("l{l}.ln1.w"), hd)?,
+                ln1_b: vecf(&format!("l{l}.ln1.b"), hd)?,
+                ln2_w: vecf(&format!("l{l}.ln2.w"), hd)?,
+                ln2_b: vecf(&format!("l{l}.ln2.b"), hd)?,
+                qkv: q8(&format!("l{l}.qkv.w"), 3 * hd, hd)?,
+                qkv_b: vecf(&format!("l{l}.qkv.b"), 3 * hd)?,
+                o: q8(&format!("l{l}.o.w"), hd, hd)?,
+                o_b: vecf(&format!("l{l}.o.b"), hd)?,
+                fc1: q8(&format!("l{l}.fc1.w"), inter, hd)?,
+                fc1_b: vecf(&format!("l{l}.fc1.b"), inter)?,
+                fc2: q8(&format!("l{l}.fc2.w"), hd, inter)?,
+                fc2_b: vecf(&format!("l{l}.fc2.b"), hd)?,
             });
         }
-        let vo_start = base + h.vocab_offsets;
-        let vocab_off: Vec<u32> = data[vo_start..vo_start + (h.vocab + 1) * 4]
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-            .collect();
-        let vocab_bytes = data[base + h.vocab_bytes..base + h.vocab_bytes + h.vocab_bytes_len].to_vec();
+        let vo = span(at(h.vocab_offsets)?, (h.vocab + 1).checked_mul(4).context("tamaño")?)?;
+        let vocab_off: Vec<u32> = data[vo].chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        let vocab_bytes = data[span(at(h.vocab_bytes)?, h.vocab_bytes_len)?].to_vec();
+        if vocab_off.windows(2).any(|w| w[1] < w[0]) || *vocab_off.last().unwrap() as usize > vocab_bytes.len() {
+            bail!("modelo LM: tabla de bytes de los tokens incoherente");
+        }
         let id = format!("{}#full:{:016x}", h.source, fnv_full(&data));
         let id_legacy = format!("{}#{:016x}", h.source, fnv(&data));
         Ok(Self {
-            embed_in: q8("embed_in")?,
-            lnf_w: vecf("lnf.w")?,
-            lnf_b: vecf("lnf.b")?,
-            embed_out: q8("embed_out")?,
-            rope_cos: vecf("rope_cos")?,
-            rope_sin: vecf("rope_sin")?,
+            embed_in: q8("embed_in", h.vocab, hd)?,
+            lnf_w: vecf("lnf.w", hd)?,
+            lnf_b: vecf("lnf.b", hd)?,
+            embed_out: q8("embed_out", h.vocab, hd)?,
+            rope_cos: vecf("rope_cos", h.max_pos * (h.rotary_ndims / 2))?,
+            rope_sin: vecf("rope_sin", h.max_pos * (h.rotary_ndims / 2))?,
             layers,
             vocab_off,
             vocab_bytes,

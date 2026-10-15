@@ -146,6 +146,21 @@ enum Cmd {
         #[arg(long, default_value = "0.02")]
         decode: String,
     },
+    /// Document prompts (prompt version 2, see hnz::prompt) of the items that get a vector, as
+    /// Gemma token ids for scripts/embed_prompts.py: <out>/<file>.ids.npy, .len.npy, .tok.npy
+    Prompts {
+        #[arg(long)]
+        out: PathBuf,
+        /// LM model (its tokenizer, next to it, cuts each document's prefix)
+        #[arg(long, default_value = "models/lm-hn-70m.hnzlm")]
+        lm: PathBuf,
+        #[arg(long, default_value = "models/gemma2_tokenizer.json")]
+        tokenizer: PathBuf,
+        /// also write the prompts as text (<out>/<file>.prompts.jsonl)
+        #[arg(long)]
+        text: bool,
+        parquet: Vec<PathBuf>,
+    },
     /// Describes a compact block: parts, sizes and bytes per document; optionally projected to N
     /// documents (49324111 = all of HN)
     Inspect {
@@ -749,6 +764,9 @@ fn main() -> Result<()> {
                 }
             };
             std::process::exit(code);
+        }
+        Cmd::Prompts { out, lm, tokenizer, text, parquet } => {
+            println!("{}", serde_json::to_string_pretty(&hnz::prompt::dump(&parquet, &out, &lm, &tokenizer, text)?)?);
         }
         Cmd::Inspect { path, project, lex, id } => {
             println!("{}", serde_json::to_string_pretty(&hnz::verify::inspect(&path, project, lex.as_deref(), id)?)?);

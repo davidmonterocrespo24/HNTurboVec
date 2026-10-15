@@ -71,7 +71,7 @@ def test_open_stats_and_verify(full, info):
     s = full.stats()
     assert s['docs'] == 637046
     b = s['block']
-    assert b['parts'] == 18 and len(b['snapshot']) == 32
+    assert b['parts'] == 19 and len(b['snapshot']) == 32
     r = hnz.verify_block(BLOCK, 'full')
     assert r['ok'] and r['snapshot'] == b['snapshot']
     assert [c['check'] for c in r['checks']] == ['header', 'quick', 'full']
@@ -344,14 +344,16 @@ def test_block_next_to_segments_refused(tmp_path):
     ['--set', 'vec.sign_rule=2'],
     ['--part', 'model/lm=models/lm-pythia-70m.hnzlm'],
     ['--part', 'future/part=models/lm-hn-70m.tokenizer.json'],
+    ['--set', '/canaries/0/text="xxh3-64:0000000000000000"'],
 ])
 def test_intact_but_incompatible(tmp_path, change):
     """Valid hashes everywhere, but a definition, a model or a part this binary does not read."""
     d = tmp_path / 'rw'
     subprocess.run([REWRITE, BLOCK, str(d), *change], cwd=ROOT, check=True, capture_output=True)
-    # definitions and parts are checked with the header; the LM model's id when it is loaded
+    # definitions and parts are checked with the header; the LM model's id when it is loaded and
+    # the canaries' text when they are decoded (intact bytes that decode to another text)
     with pytest.raises(hnz.IncompatibleBlockError):
-        hnz.verify_block(d, 'quick' if change[1].startswith('model/lm') else 'header')
+        hnz.verify_block(d, 'quick' if change[1].startswith(('model/lm', '/canaries')) else 'header')
     with pytest.raises(hnz.IncompatibleBlockError):
         hnz.open(d)
 

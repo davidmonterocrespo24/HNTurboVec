@@ -776,11 +776,13 @@ the multi-day all-HN runs (P5) start after P3.
   magic, major version, unknown feature). Reads go through a pool of file handles (Windows
   serializes I/O on one synchronous handle).
 - **Finding: HN ids are not in time order.** 309,761 items (0.63 %) have a time later than some
-  higher id; they concentrate in 2013, 2015, 2024 and 2025, and 2 have corrupt times (year ~58,000).
+  higher id; most are in 2013 (29.8 k), 2015 (110 k), 2024 (58 k), 2025 (101 k) and 2026 (10 k).
   Without them the rest is perfectly monotonic. So a block keeps documents in **(time, id) order**
   (a date range = a contiguous range of documents, exact) and finds the out-of-order ids through a
   small table (`meta/late`). Month files' id ranges overlap (24 pairs): the old engine refuses
-  overlapping segments, which would have broken a per-year build in the old format.
+  overlapping segments, which would have broken a per-year build in the old format. *(Corrected
+  after the review: an earlier note said 2 items had corrupt years around 58,000; that was the
+  microsecond bug below, the data has none: times go from 2006-10-09 to 2026-08-21.)*
 - **`hnz globals`** (replaces `dfpass`; 117 s): the same df FST (byte-identical), the global author
   table (1,144,172 authors, 4.97 MB zstd) and per-file counts and hashes.
 - **Exact all-HN word index** (`hnz lexicon`, 579 s): FST 52.9 MB + postings 276.4 MB + norms
@@ -826,3 +828,54 @@ the multi-day all-HN runs (P5) start after P3.
   200 flips in codes and postings without a crash, not-a-block, a block next to segments, and 5
   intact-but-incompatible rewrites: math version, row encoding, sign rule, another LM, an unknown
   required part).
+- **Document prompt v2, defined in Rust** (`hnz/src/prompt.rs`; the user preferred Rust as the
+  reference over an exact port of the Python of E30a): the prefix is the LM string up to the token
+  that completes the 2nd newline (end of title and url) plus 128 body tokens, which is exactly where
+  the LM decoder stops when asked for 128 body tokens (so the P4 reranker needs no tokenizer); the
+  prompt is `title: <title or none> | text: <prefix body as plain text>` (links with their own text
+  as "text (url)"), at most 256 Gemma tokens. `hnz prompts` writes the Gemma token ids of every item
+  with a vector (the same rule as E30a: 611,626 of 637,046 in the sample; 39 s; 63 tokens on
+  average, 2 cut at 256) and `scripts/embed_prompts.py` embeds them with the E30a IRs and buckets.
+  Against the E30a vectors (2,000 random docs, CPU): cosine mean 0.9966, median 1.0000, p5 0.970,
+  1.2 % below 0.95: most prompts are identical, the rest differ in link and HTML details.
+- **Fuzz: 10,000 damaged bytes** (`hnz/examples/fuzz_block.rs`, 69 min; a read-fault hook flips one
+  byte as it is read, the file is never touched; 1 in 4 iterations reopens the block with nothing or
+  everything in RAM, the rest query an open engine with everything on disk; half the bytes are
+  among those the iteration reads): **0 panics, 0 untyped errors**; 4,087 `CorruptBlockError`, 5,380
+  clean results, 533 silent differences, all in the parts that are not hashed per read: 531 in word
+  postings (a flipped bit inside a valid-looking list moves a document) and 2 in vector codes.
+  Damage in the always-loaded parts, the superblock or the TOC was always found at open; in text
+  groups and metadata frames, when read (group checksum, zstd checksum); in cold parts (kids,
+  tokenizers) and padding, only by `full`, as designed.
+- **Adversarial review of P3** (workflow: 5 reviewers by dimension, each followed by a skeptic
+  that tries to refute every finding; 10 agents): **31 findings confirmed, 2 refuted**, all fixed:
+  - **High: the Parquet `time` column was read without its unit.** The dataset's files from
+    2026-03 on (6 files, 2,191,195 items, 4.4 % of HN) store microseconds, the rest milliseconds;
+    the reader assumed milliseconds, so those items got times 1000 x too large (year ~58,000) and
+    date filters over 2026 would have broken in the full build (the sample's months are in ms). Now
+    the reader uses the column's unit, and `hnz pack` and the deep check refuse items outside their
+    file's month (a guard that does not depend on the reader).
+  - The deep check held every document in RAM (20-27 GB at 49 M documents): rewritten to stream
+    month by month (≈4 GB), and it now also checks `meta/late` and `meta/index` against the rows,
+    every id lookup, the models, tokenizers and embedder files against the pack spec, the source
+    files' consistency (their problems are plain errors, exit 1, not "corrupt"), the text counters,
+    and `lex.info` as typed values (an f32 read back from JSON as an f64 gave false differences).
+    On the sample: 0 differences in 4.4 min (0.5 % decoded); a manifest with two altered counters
+    is reported (exit 4).
+  - Typed errors and no panics: an intact TOC or model/word-index part this binary cannot parse is
+    incompatible (not corrupt); unknown optional parts are ignored; a `text.group` of 0 is refused
+    before dividing; the LM model parser checks every range and tensor shape; failed reads of codes
+    and postings are errors (they were read as zeros or as absent terms); a lookup that lands on
+    another id finds nothing; a folder without `hn.hnzb` is "not a block"; external file names
+    must be plain names in the block folder (a TOC could have pointed at a network path).
+  - The block's embedder tokenizer (32 MB) stayed allocated, uncharged, for the archive's lifetime:
+    now read inside the measured load and freed; a failed embedder load keeps its error type on
+    retries; an item date outside Python's range no longer breaks `get()`.
+  - `hnz pack`: empty records checked byte for byte; empty months skipped; records checked with the
+    tokenizer the block stores; the vector ids must be exactly the items with a prompt; new part
+    `text/prefix_fallback` (the prompt prefix of the 64 LM-less records with a vector, for P4);
+    `meta/kids` is a cold part.
+  - doc/08-block.md: 11 statements corrected (check-byte fold, LM math, prompt versions, which
+    documents have a vector, access classes, deep's checks and memory, sample numbers).
+  Regression: Rust 29 tests; the old archive gives the same eval figures and searches as the P2
+  binary; the block's eval figures do not change.
