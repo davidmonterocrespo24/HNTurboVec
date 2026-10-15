@@ -1,0 +1,6 @@
+queries: 900; cosine dynamic vs static: mean 1.00000, min 1.00000; latency p50 dynamic 32.4 ms, static 28.0 ms
+documents: 1200 (48 ms each, mean 63 tokens); cosine vs stored v2: mean 0.99974, p1 0.99927, min 0.99739; sign flips of 256: mean 2.35, p99 7, max 9
+  2024-01: cosine mean 0.99975, min 0.99909; flips mean 2.24, max 7
+  2010-06: cosine mean 0.99972, min 0.99881; flips mean 2.39, max 9
+  2015-06: cosine mean 0.99973, min 0.99739; flips mean 2.41, max 8
+repeat on 4 streams, reverse order: 1200/1200 bit-identical; max |diff| 0.00e+00

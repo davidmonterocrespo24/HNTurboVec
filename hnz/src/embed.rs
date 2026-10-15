@@ -19,6 +19,17 @@ pub fn doc_streams() -> usize {
 /// with margin; E33a measures it).
 pub const DOC_REQUEST_BYTES: u64 = 64 << 20;
 
+/// Sign disagreements between a vector's first `code.len() * 8` dimensions and a stored code
+/// (bit d set = dimension d > 0, as `crate::vecs::build` writes it).
+pub fn sign_flips(v: &[f32], code: &[u8]) -> u32 {
+    (0..(code.len() * 8).min(v.len())).filter(|&d| (v[d] > 0.0) != (code[d / 8] >> (d % 8) & 1 == 1)).count() as u32
+}
+
+/// Mean sign flips (of 256) between re-embedded canaries and their stored codes above which the
+/// reranking chain is taken as broken: a matching chain flips 2.35 on average and at most 9
+/// (E33a, 1,200 prompts), an unrelated vector about 128.
+pub const MAX_MEAN_FLIPS: f64 = 32.0;
+
 pub struct Embedder {
     // orden de campos = orden de destrucción (request antes que el modelo y el core)
     req: InferRequest,
@@ -208,4 +219,22 @@ fn normalized(req: &InferRequest) -> Result<Vec<f32>> {
     let v: Vec<f32> = out.get_data::<f32>().map_err(ov)?.to_vec();
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
     Ok(v.iter().map(|x| x / norm).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sign_flips_counts_disagreements() {
+        let v: Vec<f32> = (0..16).map(|d| if d % 3 == 0 { 0.5 } else { -0.5 }).collect();
+        let mut code = vec![0u8; 2];
+        for d in (0..16).filter(|d| d % 3 == 0) {
+            code[d / 8] |= 1 << (d % 8);
+        }
+        assert_eq!(super::sign_flips(&v, &code), 0);
+        code[0] ^= 0b101; // dimensions 0 and 2
+        assert_eq!(super::sign_flips(&v, &code), 2);
+        // zero is "not positive", as `vecs::build` writes it
+        assert_eq!(super::sign_flips(&[0.0; 8], &[0u8]), 0);
+        assert_eq!(super::sign_flips(&[0.0; 8], &[0xffu8]), 8);
+    }
 }

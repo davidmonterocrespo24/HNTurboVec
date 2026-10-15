@@ -129,6 +129,8 @@ pub struct Report {
     pub ms_decode: f64,
     /// waiting for the re-embedding after the last prefix
     pub ms_embed: f64,
+    /// the deadline passed: "decode" (the answer is stage 1's) or "embed" (the cheap score's)
+    pub degraded: Option<&'static str>,
 }
 
 pub struct Outcome {
@@ -156,15 +158,25 @@ struct EmbedQueue {
     theta: f32,
     /// nothing more will be added
     done: bool,
+    /// (candidate, vector) embedded so far
+    got: Vec<(usize, Vec<f32>)>,
+    /// the worker has ended (its error, if any, comes back when its thread is joined)
+    ended: bool,
 }
 
 type SharedQueue = (std::sync::Mutex<EmbedQueue>, std::sync::Condvar);
+
+fn new_queue() -> SharedQueue {
+    let q = EmbedQueue { pending: Vec::new(), theta: f32::NEG_INFINITY, done: false, got: Vec::new(), ended: false };
+    (std::sync::Mutex::new(q), std::sync::Condvar::new())
+}
 
 fn lock_queue(q: &SharedQueue) -> std::sync::MutexGuard<'_, EmbedQueue> {
     q.0.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Ends the embedding worker when the search returns early (an error): what is pending is dropped.
+/// Ends the embedding worker when the search returns early (an error, or the deadline while
+/// decoding): what is pending is dropped.
 struct StopWorker<'a>(&'a SharedQueue);
 
 impl Drop for StopWorker<'_> {
@@ -174,15 +186,27 @@ impl Drop for StopWorker<'_> {
             g.pending.clear();
             g.done = true;
         }
-        self.0 .1.notify_one();
+        drop(g);
+        self.0 .1.notify_all();
+    }
+}
+
+/// Tells the waiting search that the worker ended, however it ended.
+struct WorkerEnded<'a>(&'a SharedQueue);
+
+impl Drop for WorkerEnded<'_> {
+    fn drop(&mut self) {
+        lock_queue(self.0).ended = true;
+        self.0 .1.notify_all();
     }
 }
 
 /// The embedding worker of one reranked search: up to `emb.batch()` pending candidates at a time,
-/// the best R0 first, until nothing more will come and nothing is pending.
-fn embed_worker(q: &SharedQueue, emb: &dyn DocEmbed) -> Result<Vec<(usize, Vec<f32>)>> {
+/// the best R0 first, until nothing more will come and nothing is pending. The vectors go to the
+/// queue's `got` as they are made.
+fn embed_worker(q: &SharedQueue, emb: &dyn DocEmbed) -> Result<()> {
+    let _ended = WorkerEnded(q);
     let batch = emb.batch().max(1);
-    let mut out = Vec::new();
     loop {
         let take: Vec<(usize, f32, u32, String)> = {
             let mut g = lock_queue(q);
@@ -195,14 +219,16 @@ fn embed_worker(q: &SharedQueue, emb: &dyn DocEmbed) -> Result<Vec<(usize, Vec<f
                 g = q.1.wait(g).unwrap_or_else(|e| e.into_inner());
             }
             if g.pending.is_empty() {
-                return Ok(out);
+                return Ok(());
             }
             g.pending.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
             let n = g.pending.len().min(batch);
             g.pending.drain(..n).collect()
         };
         let (cis, docs): (Vec<usize>, Vec<(u32, String)>) = take.into_iter().map(|(ci, _, id, p)| (ci, (id, p))).unzip();
-        out.extend(cis.into_iter().zip(emb.embed(&docs)?));
+        let vecs = emb.embed(&docs)?;
+        lock_queue(q).got.extend(cis.into_iter().zip(vecs));
+        q.1.notify_all();
     }
 }
 
@@ -217,7 +243,12 @@ fn ms(t: Instant) -> f64 {
 /// (R0 when known, s1 while it is being decoded: b >= 0) is embedded at once, while the LM
 /// decodes the rest. The final choice uses every R0, so the result never depends on timing; at
 /// worst a few speculative embeddings are wasted.
-pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn DocEmbed) -> Result<Outcome> {
+///
+/// `deadline` (opt-in): if the prefixes are not all decoded by then, the rest are cancelled and
+/// the answer is stage 1's; if the top candidates are not all re-embedded by then, they keep the
+/// cheap score's order. Either way `report.degraded` says so; without a deadline the result never
+/// depends on timing.
+pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn DocEmbed, deadline: Option<Instant>) -> Result<Outcome> {
     let t0 = Instant::now();
     let k = q.k.clamp(1, MAX_K);
     let terms = eng.query_terms(&q.text)?;
@@ -322,8 +353,11 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
         Mode::Keyword => 0,
     };
     let ids: Vec<u32> = cands.iter().map(|c| sg.s.meta.try_row(c.doc as usize).map(|r| r.id)).collect::<Result<_>>()?;
-    let queue: SharedQueue = (std::sync::Mutex::new(EmbedQueue { pending: Vec::new(), theta: f32::NEG_INFINITY, done: false }), std::sync::Condvar::new());
-    let embedded: HashMap<usize, Vec<f32>> = std::thread::scope(|sc| -> Result<HashMap<usize, Vec<f32>>> {
+    let queue = new_queue();
+    // None: the deadline passed while decoding; Some((vectors, late)): late = it passed while
+    // re-embedding
+    type Scoped = Option<(HashMap<usize, Vec<f32>>, bool)>;
+    let scoped: Scoped = std::thread::scope(|sc| -> Result<Scoped> {
         let worker = (n_e > 0).then(|| sc.spawn(|| embed_worker(&queue, emb)));
         let _stop = StopWorker(&queue);
         let mut sent = vec![false; n];
@@ -348,13 +382,23 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
                 }
             }
             drop(g);
-            queue.1.notify_one();
+            queue.1.notify_all();
         };
         speculate(&feats, &mut sent);
         if !jobs.is_empty() {
+            // dropping the ticket (the deadline, an error) cancels what is not decoded yet
             let ticket = eng.lm_service("block")?.submit(jobs, Prio::Bulk);
             for _ in 0..ticket.n {
-                let (j, r) = ticket.recv().context("el decodificador LM se detuvo")?;
+                let (j, r) = match deadline {
+                    Some(d) => match ticket.recv_until(d)? {
+                        Some(x) => x,
+                        None => {
+                            report.ms_decode = ms(t1);
+                            return Ok(None);
+                        }
+                    },
+                    None => ticket.recv().context("el decodificador LM se detuvo")?,
+                };
                 let ci = job_ci[j];
                 let d = cands[ci].doc;
                 feats[ci] = Some(match r? {
@@ -399,14 +443,52 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
             }
             g.done = true;
         }
-        queue.1.notify_one();
-        let got = match worker {
-            Some(w) => w.join().map_err(|_| anyhow::anyhow!("fallo interno al embeber documentos"))??,
-            None => Vec::new(),
-        };
+        queue.1.notify_all();
+        // wait for the vectors of the top n_e (until the deadline, if any)
+        let need: Vec<usize> = order[..n_e].iter().copied().filter(|&i| feats[i].as_ref().is_some_and(|f| f.prompt.is_some())).collect();
+        let mut late = false;
+        {
+            let mut g = lock_queue(&queue);
+            loop {
+                let have: std::collections::HashSet<usize> = g.got.iter().map(|x| x.0).collect();
+                if g.ended || need.iter().all(|i| have.contains(i)) {
+                    break;
+                }
+                g = match deadline {
+                    Some(d) => {
+                        let now = Instant::now();
+                        if now >= d {
+                            // the worker ends after the document it is embedding
+                            g.pending.clear();
+                            late = true;
+                            break;
+                        }
+                        queue.1.wait_timeout(g, d - now).unwrap_or_else(|e| e.into_inner()).0
+                    }
+                    None => queue.1.wait(g).unwrap_or_else(|e| e.into_inner()),
+                };
+            }
+        }
+        queue.1.notify_all();
+        if let Some(w) = worker {
+            w.join().map_err(|_| anyhow::anyhow!("fallo interno al embeber documentos"))??;
+        }
         report.ms_embed = ms(t_tail);
-        Ok(got.into_iter().collect())
+        let got = std::mem::take(&mut lock_queue(&queue).got);
+        Ok(Some((got.into_iter().collect(), late)))
     })?;
+    let Some((embedded, late)) = scoped else {
+        // the deadline passed while decoding: stage 1's answer (decoded prefixes still serve the
+        // results' text)
+        report.degraded = Some("decode");
+        let mut hits = eng.search(q, if q.mode == Mode::Keyword { None } else { Some(qvec) })?;
+        hits.truncate(k);
+        let warning = Some("se agotó el plazo durante la decodificación: resultados de la etapa 1, sin reordenar".to_string());
+        return Ok(Outcome { hits, prefixes, report, warning });
+    };
+    if late {
+        report.degraded = Some("embed");
+    }
     report.embedded = embedded.len();
     let feats: Vec<Feat> = feats.into_iter().map(|f| f.expect("every candidate has its features")).collect();
 
@@ -424,7 +506,8 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
         Mode::Vector | Mode::Hybrid => {
             let mut order: Vec<usize> = (0..n).collect();
             order.sort_by(|&a, &b| desc(feats[a].r0, feats[b].r0, feats[a].doc, feats[b].doc));
-            let (top, rest) = order.split_at(n_e);
+            // the deadline passed before the top n_e were re-embedded: everything in R0 order
+            let (top, rest) = order.split_at(if late { 0 } else { n_e });
             let w = if q.mode == Mode::Vector { 0.0 } else { cfg.w };
             let mut head: Vec<(u32, f32, f32, f32)> = top
                 .iter()
@@ -437,6 +520,9 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
             head.sort_by(|a, b| desc(a.1, b.1, a.0, b.0));
             scored.extend(head);
             scored.extend(rest.iter().map(|&i| (feats[i].doc, feats[i].r0, feats[i].s1, feats[i].b)));
+            if late {
+                warning = Some("se agotó el plazo durante el re-embebido: resultados en el orden de la puntuación barata".to_string());
+            }
         }
     }
     let mut hits: Vec<Hit> = scored.into_iter().map(|(doc, score, v, b)| Hit { seg: 0, doc, score, v, b }).collect();
@@ -453,7 +539,7 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Condvar, Mutex};
+    use std::sync::Mutex;
 
     /// Records the ids it is asked to embed; each vector is [id].
     struct Rec(Mutex<Vec<u32>>);
@@ -469,13 +555,9 @@ mod tests {
         }
     }
 
-    fn queue() -> SharedQueue {
-        (Mutex::new(EmbedQueue { pending: Vec::new(), theta: f32::NEG_INFINITY, done: false }), Condvar::new())
-    }
-
     #[test]
     fn worker_takes_the_best_first_and_drops_the_hopeless() {
-        let q = queue();
+        let q = new_queue();
         {
             let mut g = lock_queue(&q);
             for (ci, r0) in [(0usize, 0.5f32), (1, 0.9), (2, 0.1), (3, 0.7), (4, 0.4)] {
@@ -486,24 +568,26 @@ mod tests {
             g.done = true;
         }
         let emb = Rec(Mutex::new(Vec::new()));
-        let got = embed_worker(&q, &emb).unwrap();
+        embed_worker(&q, &emb).unwrap();
         assert_eq!(*emb.0.lock().unwrap(), vec![101, 103, 100, 104]);
-        assert_eq!(got.iter().map(|g| (g.0, g.1[0])).collect::<Vec<_>>(), vec![(1, 101.0), (3, 103.0), (0, 100.0), (4, 104.0)]);
+        let g = lock_queue(&q);
+        assert!(g.ended);
+        assert_eq!(g.got.iter().map(|g| (g.0, g.1[0])).collect::<Vec<_>>(), vec![(1, 101.0), (3, 103.0), (0, 100.0), (4, 104.0)]);
     }
 
     #[test]
     fn worker_waits_for_work_and_ends_when_stopped() {
-        let q = queue();
+        let q = new_queue();
         let emb = Rec(Mutex::new(Vec::new()));
         std::thread::scope(|sc| {
             let w = sc.spawn(|| embed_worker(&q, &emb));
             lock_queue(&q).pending.push((0, 1.0, 7, String::new()));
-            q.1.notify_one();
+            q.1.notify_all();
             // an early return: the guard ends the worker (what is still pending is dropped)
             drop(StopWorker(&q));
-            let got = w.join().unwrap().unwrap();
-            assert!(got.len() <= 1);
+            w.join().unwrap().unwrap();
         });
-        assert!(lock_queue(&q).done);
+        let g = lock_queue(&q);
+        assert!(g.done && g.ended && g.got.len() <= 1);
     }
 }

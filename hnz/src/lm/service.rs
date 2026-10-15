@@ -44,6 +44,15 @@ impl Ticket {
         self.rx.recv().ok()
     }
 
+    /// As `recv`, waiting at most until `deadline`: Ok(None) when it passes first.
+    pub fn recv_until(&self, deadline: std::time::Instant) -> Result<Option<(usize, Result<Decoded>)>> {
+        match self.rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+            Ok(x) => Ok(Some(x)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow!("el decodificador LM se detuvo")),
+        }
+    }
+
     /// Every result, in submission order (the first error ends the wait).
     pub fn wait_all(self) -> Result<Vec<Decoded>> {
         let mut out: Vec<Option<Decoded>> = (0..self.n).map(|_| None).collect();

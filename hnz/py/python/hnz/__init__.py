@@ -69,6 +69,11 @@ class SearchResult:
     query: str
     hits: list[Hit]
     timings_ms: dict[str, float]
+    #: what the reranking did (P4): candidates, decoded, tokens, embedded, ms_stage1, ms_decode,
+    #: ms_embed and `degraded` ("decode" or "embed" when a deadline passed); None if not reranked
+    rerank: Optional[dict] = None
+    #: a note about the results (keyword search with frequent words, a deadline that passed)
+    warning: Optional[str] = None
 
     def __iter__(self) -> Iterator[Hit]:
         return iter(self.hits)
@@ -185,7 +190,8 @@ class Archive:
                until: Optional[DateLike] = None, types: Union[str, Iterable[str], None] = None,
                author: Optional[str] = None, mode: Literal['hybrid', 'vector', 'keyword'] = 'hybrid',
                text: Literal['snippet', 'full'] = 'snippet', include_dead: bool = False, raw: bool = False,
-               w_bm25: float = 0.15, c_bm25: float = 20.0, rerank: Optional[bool] = None) -> Union[SearchResult, dict]:
+               w_bm25: float = 0.15, c_bm25: float = 20.0, rerank: Optional[bool] = None,
+               deadline_ms: Optional[float] = None) -> Union[SearchResult, dict]:
         """Searches all of HN (or the range [since, until], both inclusive: "2015", "2015-06", a date,
         or a datetime for an exact instant in UTC).
 
@@ -195,6 +201,9 @@ class Archive:
         - `raw=True`: returns the JSON dict as is (the same format as the HTTP server).
         - `rerank` (compact blocks with an embedder of dynamic shapes): rerank the candidates by
           their prefix (P4); None = whenever possible.
+        - `deadline_ms` (opt-in): answer within this many milliseconds from the call. A reranking
+          not done by then gives way to stage 1's results (or to the cheap score's order) and
+          `rerank["degraded"]` says so; fetching the results' text comes after it.
 
         Raises `BusyError` if it found no turn within the archive's `timeout`.
         """
@@ -208,11 +217,12 @@ class Archive:
                'since_ts': since_ts, 'until_ts': until_ts,
                'types': list(types or []), 'author': author, 'mode': mode, 'full': text == 'full',
                'include_dead': bool(include_dead), 'w_bm25': float(w_bm25), 'c_bm25': float(c_bm25),
-               'rerank': rerank}
+               'rerank': rerank, 'deadline_ms': None if deadline_ms is None else float(deadline_ms)}
         d = json.loads(self._live().search_json(json.dumps(req)))
         if raw:
             return d
-        return SearchResult(query=d['query'], hits=[Hit(**h) for h in d['results']], timings_ms=d['ms'])
+        return SearchResult(query=d['query'], hits=[Hit(**h) for h in d['results']], timings_ms=d['ms'],
+                            rerank=d.get('rerank'), warning=d.get('warning'))
 
     def get(self, id: int, *, raw: bool = False) -> Union[Item, dict, None]:
         """An item by HN id, verbatim and complete; None if it is not in the archive."""

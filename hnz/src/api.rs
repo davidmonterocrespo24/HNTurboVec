@@ -95,6 +95,9 @@ pub struct SearchRequest {
     pub c_bm25: f32,
     /// P4: rerank the candidates by their prefix (compact blocks); None = whenever possible
     pub rerank: Option<bool>,
+    /// P4: answer within this many milliseconds from the call (opt-in): a reranking not done by
+    /// then gives way to stage 1's results, or to the cheap score's order, marked `degraded`
+    pub deadline_ms: Option<f64>,
 }
 
 impl Default for SearchRequest {
@@ -114,6 +117,7 @@ impl Default for SearchRequest {
             w_bm25: 0.15,
             c_bm25: 20.0,
             rerank: None,
+            deadline_ms: None,
         }
     }
 }
@@ -173,6 +177,9 @@ pub fn make_query(r: &SearchRequest) -> Result<Query> {
     }
     if !(r.c_bm25.is_finite() && r.c_bm25 > 0.0 && r.w_bm25.is_finite() && r.w_bm25 >= 0.0) {
         return Err(bad(format!("c_bm25 debe ser > 0 y w_bm25 >= 0 (son {} y {})", r.c_bm25, r.w_bm25)));
+    }
+    if r.deadline_ms.is_some_and(|d| !(d.is_finite() && d > 0.0 && d <= 3.6e6)) {
+        return Err(bad(format!("deadline_ms debe estar entre 0 y 3.600.000 (es {:?})", r.deadline_ms)));
     }
     let mut types = Vec::new();
     for t in &r.types {
@@ -250,6 +257,8 @@ struct EmbMem {
     docs: bool,
     /// document prompts embedded at the same time (CPU streams)
     streams: usize,
+    /// mean sign flips (of 256) of the re-embedded canaries against their stored codes (P4)
+    check_flips: Option<f64>,
 }
 
 /// Un archivo hnz abierto.
@@ -490,6 +499,8 @@ impl Archive {
         // a block: its IR files (checked against their hashes) and the tokenizer inside it, read
         // in the embedder's thread so the measured load includes them and frees the tokenizer
         let block = self.eng.block.clone();
+        // the reranking chain's canaries: decoded now, re-embedded once the embedder is loaded
+        let checks = self.eng.embed_checks()?;
         let (tx, rx) = mpsc::channel::<EmbedJob>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<EmbMem>>();
         std::thread::Builder::new().name("hnz-embedder".into()).spawn(move || {
@@ -501,16 +512,31 @@ impl Archive {
                 };
                 e.and_then(|mut e| {
                     e.embed_query("warm up")?;
+                    let mut flips = None;
                     if e.can_embed_docs() {
                         // the longest document shape, so the measured size includes its buffers
                         e.embed_doc(&"warm up ".repeat(200))?;
+                        // the chain LM prefix -> prompt -> tokenizer -> IR must give back the
+                        // vectors packed in the block (their stage-1 signs)
+                        if !checks.is_empty() {
+                            let v = e.embed_docs(&checks.iter().map(|c| c.0.clone()).collect::<Vec<_>>())?;
+                            let f: Vec<u32> = v.iter().zip(&checks).map(|(v, c)| crate::embed::sign_flips(v, &c.1)).collect();
+                            let mean = f.iter().sum::<u32>() as f64 / f.len() as f64;
+                            if mean > crate::embed::MAX_MEAN_FLIPS {
+                                return Err(crate::block::incompatible(format!(
+                                    "el embedder no reproduce los vectores del bloque: {mean:.0} de 256 signos distintos de media en {} canarios ({f:?})",
+                                    f.len()
+                                )));
+                            }
+                            flips = Some(mean);
+                        }
                     }
-                    Ok(e)
+                    Ok((e, flips))
                 })
             });
             let mut emb = match r {
-                Ok(e) => {
-                    let _ = ready_tx.send(Ok(EmbMem { steady, peak, docs: e.can_embed_docs(), streams: e.doc_parallelism() }));
+                Ok((e, check_flips)) => {
+                    let _ = ready_tx.send(Ok(EmbMem { steady, peak, docs: e.can_embed_docs(), streams: e.doc_parallelism(), check_flips }));
                     e
                 }
                 Err(e) => {
@@ -638,7 +664,8 @@ impl Archive {
         let t_emb = t0.elapsed();
         let (hits, prefixes, report, warning) = match (&qv, rerank) {
             (Some(v), true) => {
-                let o = crate::rerank::search(&self.eng, &q, v, &crate::rerank::RerankCfg::default(), self)?;
+                let deadline = req.deadline_ms.map(|d| t0 + Duration::from_secs_f64(d / 1e3));
+                let o = crate::rerank::search(&self.eng, &q, v, &crate::rerank::RerankCfg::default(), self, deadline)?;
                 (o.hits, o.prefixes, Some(o.report), o.warning)
             }
             _ => (self.eng.search_with(&q, qv.as_deref(), &|extra| turn.try_grow(extra))?, Default::default(), None, None),

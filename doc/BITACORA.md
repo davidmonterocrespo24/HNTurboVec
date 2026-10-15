@@ -1034,3 +1034,47 @@ the multi-day all-HN runs (P5) start after P3.
   If the rest of the schedule gains what E29's did, it ends near 1.291 bits/byte on 2024-01: ~0.4 %
   better than the LM in use, far from the 2 % needed (a projection, not a measurement). Stopped at
   step 16,980 (incident above); finishing it takes ~3 h of the iGPU with nothing heavy alongside.
+- **E33e step 4b — the embedder's threads and core type** (`bench_p4_latency.py … cores` →
+  `resultados/results_e33e_latency_cores.txt`; the binary with the priority queue; 20 cold queries,
+  1 embedding stream, 8 LM threads, nothing else running):
+| Embedder (`HNZ_EMBED_THREADS` / `HNZ_EMBED_CORES`) | search p50 | p90 | decoding | wait after decoding | embedded |
+|---|---|---|---|---|---|
+| OpenVINO's choice (default) | 3,486 ms | 4,463 ms | 2,946 ms | 366 ms | 62.0 |
+| 4 threads | 3,453 | 4,462 | 2,883 | 448 | 61.8 |
+| 8 threads | 3,635 | 4,605 | 2,882 | 588 | 59.9 |
+| E-cores only | 3,825 | 4,804 | 2,773 | 962 | 56.5 |
+| P-cores only | 3,504 | 4,372 | 2,990 | 389 | 62.1 |
+| 2 streams, E-cores only | 4,874 | 6,493 | 3,501 | 920 | 59.2 |
+  On E-cores only the LM decodes faster (it keeps the P-cores) but the embedder falls behind and
+  the wait at the end triples; the default, 4 threads and P-cores only are within noise of each
+  other. The default stays. **This run's default (p50 3.5 s, p90 4.5 s) is ~1.1 s faster than step
+  4's (4.6 s)**, with the same queries: decoding 3.6 → 2.9 s and the final wait 0.87 → 0.37 s. The
+  priority queue explains the wait, not the decoding; the laptop's state (clocks, temperature) may
+  differ between the runs, so an interleaved A/B run of both binaries is pending before crediting
+  the queue with it.
+- **E33a — the dynamic int8 IR on the CPU** (`experimentos/bench_doc_embed_dyn.py` →
+  `resultados/results_e33a.txt`), against the plan's rules:
+  - **Queries** (the 900 eval queries at [1, 64]): cosine with the static b1_s64 int8 IR mean
+    1.00000, min 1.00000; latency p50 32.4 ms vs 28.0 ms (+4.4 ms; rule: <= +5 ms). **Passes.**
+  - **Documents** (1,200 v2 prompts, 400 per month, mean 63 tokens, at their canonical shape):
+    48 ms each; cosine with the stored v2 vectors (static fp16 IRs on the iGPU) mean 0.99974, p1
+    0.99927, min 0.99739 (rule: >= 0.999 on average); **sign flips over the first 256 dimensions:
+    mean 2.35, p99 7, max 9** (per month 2.24 / 2.39 / 2.41).
+  - **Repeatability:** the same 1,200 prompts again on 4 CPU streams, in reverse order: 1,200/1,200
+    bit-identical.
+  So one dynamic int8 IR serves queries and documents (the plan's default; no second IR).
+- **P4 step 5 — deadline (opt-in) and self-check of the embedding chain** (`rerank.rs`, `api.rs`,
+  `engine.rs`, `embed.rs`; [09-rerank.md](09-rerank.md)):
+  - `search(…, deadline_ms=N)` / `hnz search --deadline-ms N` (the user's decision: no deadline by
+    default). If it passes while decoding, the pending decodes are cancelled in the shared LM
+    service and the answer is stage 1's (`rerank.degraded = "decode"`); if it passes while
+    re-embedding, the candidates keep R0's order (`"embed"`); both with a warning. The embedding
+    worker now hands its vectors over as they are made, so the search can stop waiting at the
+    deadline (the worker finishes the document it is on). Checked with the CLI: 1 ms → stage 1;
+    2,500 ms with the CPU busy → 2,487 tokens decoded, then stage 1; 600,000 ms → results identical
+    to no deadline.
+  - When the library loads a block's embedder, the 4 short canaries are decoded as prefixes,
+    their v2 prompts rebuilt and re-embedded, and the signs of their first 256 dimensions compared
+    with the stored codes; a mean above 32 flips (E33a: healthy 2.35 on average, at most 9; a broken
+    chain ~128) fails the load with `IncompatibleBlockError`. Reported as `check_flips`.
+  - Python: `SearchResult.rerank` and `.warning`; tests for both features. Rust: 32 tests pass.

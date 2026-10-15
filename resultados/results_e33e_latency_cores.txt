@@ -1,0 +1,8 @@
+20 queries, cold, C:\Desarrollo\Odoo\AI\HNTurboVec\work\p3\hn-sample-v3.hnz
+streams LM thr emb thr      cores search p50     p90  stage1  decode embed tail  fetch  tokens embedded
+      1      8       -          -       3486    4463       5    2946        366     38    6348     62.0
+      1      8       4          -       3453    4462       5    2883        448     40    6348     61.8
+      1      8       8          -       3635    4605       4    2882        588     39    6348     59.9
+      1      8       - ECORE_ONLY       3825    4804       4    2773        962     41    6348     56.5
+      1      8       - PCORE_ONLY       3504    4372       5    2990        389     38    6348     62.1
+      2      8       - ECORE_ONLY       4874    6493       5    3501        920     57    6348     59.2

@@ -544,6 +544,40 @@ impl Engine {
         Ok(n)
     }
 
+    /// P4: the document prompts of the block's short canaries that have a vector, each with the
+    /// stage-1 bytes of its stored code. Re-embedding them checks the whole reranking chain (LM
+    /// prefix, prompt, tokenizer, IR) against what was packed (`crate::embed::sign_flips`).
+    /// Empty if the block's vectors are not of prompt version 2.
+    pub fn embed_checks(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let Some(block) = &self.block else { return Ok(Vec::new()) };
+        if block.manifest()["vec"]["prompt_version"].as_u64() != Some(2) {
+            return Ok(Vec::new());
+        }
+        let sg = &self.segs[0];
+        let (TextSource::Lm(lm), Some(vi)) = (&sg.s.text, &sg.vec) else { return Ok(Vec::new()) };
+        let docs: Vec<usize> = block.manifest()["canaries"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|c| c["kind"] == "short")
+                    .filter_map(|c| c["doc"].as_u64().map(|d| d as usize))
+                    .filter(|&d| d < self.total_docs && vi.has(d))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let want = Want::Prefix { body: crate::prompt::PREFIX_TOKENS, mark: SNIPPET_TOKENS };
+        let jobs: Vec<Job> = docs.iter().map(|&d| Ok(Job { rec: lm.raw(d)?.into_owned(), has_check: lm.rec_check(), want })).collect::<Result<_>>()?;
+        let dec = self.lm_service("block")?.run(jobs, Prio::Interactive).map_err(|e| crate::block::incompatible(format!("canarios del embedder: {e:#}")))?;
+        let mut out = Vec::new();
+        for (&d, x) in docs.iter().zip(dec) {
+            if let Decoded::Prefix(p) = x {
+                let prompt = crate::prompt::doc_prompt(&crate::prompt::prefix_string(&p.bytes), p.flags as u64);
+                out.push((prompt, vi.try_code(d)?[..vi.nbytes.min(32)].to_vec()));
+            }
+        }
+        Ok(out)
+    }
+
     /// The query embedder: the block's own (IR next to the container, tokenizer inside it) or,
     /// for a folder of segments, the one in `models`.
     pub fn embedder(&self, models: &Path, ov_libs: &Path) -> Result<crate::embed::Embedder> {

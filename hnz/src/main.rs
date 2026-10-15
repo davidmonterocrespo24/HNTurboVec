@@ -74,6 +74,10 @@ struct SearchArgs {
     /// texto completo también para el nivel LM (por defecto: fragmento de 64 tokens)
     #[arg(long)]
     full: bool,
+    /// P4: answer within this many milliseconds from the start of the search; a reranking not
+    /// done by then gives way to stage 1's results, or to the cheap score's order (degraded)
+    #[arg(long)]
+    deadline_ms: Option<f64>,
 }
 
 #[derive(Subcommand)]
@@ -520,7 +524,7 @@ fn cmd_eval_rerank(root: &Path, file: &Path, k: usize, m: &ModelArgs, emb: Optio
         let (mut p, mut mrr, mut dec, mut emb_n) = (0f64, 0f64, 0usize, 0usize);
         for (i, (text, story)) in qs.iter().enumerate() {
             let q = Query { text: text.clone(), ..tmpl.clone() };
-            let out = hnz::rerank::search(&eng, &q, &vecs[i], cfg, oracle.as_ref())?;
+            let out = hnz::rerank::search(&eng, &q, &vecs[i], cfg, oracle.as_ref(), None)?;
             dec += out.report.decoded;
             emb_n += out.report.embedded;
             let (r, f) = score_hits(&eng, &out.hits, *story, k)?;
@@ -964,7 +968,8 @@ fn main() -> Result<()> {
             let t2 = Instant::now();
             let (hits, prefixes) = match (s.rerank, &qv, emb) {
                 (true, Some(v), Some(e)) => {
-                    let o = hnz::rerank::search(&eng, &q, v, &hnz::rerank::RerankCfg::default(), &std::sync::Mutex::new(e))?;
+                    let deadline = s.deadline_ms.map(|d| t2 + std::time::Duration::from_secs_f64(d / 1e3));
+                    let o = hnz::rerank::search(&eng, &q, v, &hnz::rerank::RerankCfg::default(), &std::sync::Mutex::new(e), deadline)?;
                     eprintln!("[reordenado: {} candidatos, {} prefijos decodificados ({} tokens), {} re-embebidos; etapa 1 {:.0} ms, decodificación {:.0} ms, embebido y fusión {:.0} ms]{}",
                         o.report.candidates, o.report.decoded, o.report.tokens, o.report.embedded, o.report.ms_stage1, o.report.ms_decode, o.report.ms_embed,
                         o.warning.map(|w| format!(" aviso: {w}")).unwrap_or_default());
@@ -1026,6 +1031,7 @@ fn main() -> Result<()> {
                             w_bm25: 0.15,
                             c_bm25: 20.0,
                             full: query_param(&url, "full").is_some_and(|x| x == "1" || x == "true"),
+                            deadline_ms: None,
                         };
                         let q = make_query(&text, &s)?;
                         let t0 = Instant::now();

@@ -51,6 +51,29 @@ Each document prompt is embedded alone at its canonical shape `[1, tokens rounde
 on how many streams run; the LM decodes every sequence identically in any batch. Results are
 identical with 1 or 4 embedding streams and with or without the overlap (checked byte for byte).
 
+## Deadline (opt-in)
+
+`search(…, deadline_ms=N)` (CLI: `hnz search --rerank --deadline-ms N`) answers within N ms of
+the call (the CLI: of the start of the search), the user's decision: no deadline by default.
+- The deadline passes while prefixes are still being decoded: the decodes not done yet are
+  cancelled (the shared LM service drops them) and the answer is stage 1's, as without reranking;
+  `rerank.degraded = "decode"` and a warning.
+- It passes while the top 50 are being re-embedded: the candidates keep the cheap score's (R0)
+  order; `rerank.degraded = "embed"` and a warning. That order is better than stage 1's (P@10
+  0.217 vs 0.211 in E33e).
+- The prefixes decoded before the deadline stay in the cache, so a repeated query goes further.
+- Fetching the k results' text comes after the deadline (its own cost, ~40-60 ms cold).
+
+## Self-check of the embedding chain
+
+When the library loads the embedder of a block with prompt v2 vectors, it decodes the prefixes of
+the block's 4 short canaries (records of 24-64 LM tokens chosen at pack time), rebuilds their
+document prompts, embeds them and compares the signs of their first 256 dimensions with the codes
+stored in the block. A matching chain (LM, prompt, tokenizer, IR) flips 2.35 of 256 on average and
+at most 9 (E33a, 1,200 prompts); a broken one flips about 128, so a mean above 32 makes the load
+fail with `IncompatibleBlockError`. The
+mean is reported as `memory()["embedder"]["measured"]["check_flips"]`. It costs ~0.1-0.2 s, once.
+
 ## Requirements
 
 - A block with **prompt v2** vectors and an **embedder IR with dynamic shapes**

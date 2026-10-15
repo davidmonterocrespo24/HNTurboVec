@@ -45,6 +45,14 @@ def test_rerank_on_by_default(hn):
     assert 'rerank' not in p3 and len(p3['results']) == 10
 
 
+def test_embedder_reproduces_the_packed_vectors(hn):
+    """At load, the block's short canaries are decoded, re-embedded and compared with their stored
+    codes: only a few of 256 signs differ (a broken chain would flip about 128)."""
+    m = hn.memory()['embedder']['measured']
+    assert m['docs'] and m['check_flips'] is not None
+    assert m['check_flips'] <= 32, m
+
+
 def test_keyword_mode_finds_frequent_words(hn):
     """Today's P3 block returns nothing for these (frequent words have no postings)."""
     for q in ('rust async runtime', 'postgres vs mysql'):
@@ -92,7 +100,44 @@ def test_results_reuse_the_decoded_prefixes(hn):
             assert it.text.replace('\n', ' ').startswith(h['text'][:40].replace('\n', ' ')[:20]) or h['text'] == ''
 
 
+def test_deadline_degrades_but_answers(hn):
+    """A deadline is opt-in: missed, the answer still comes (stage 1's, or the cheap score's
+    order) and says it is degraded; generous, it changes nothing."""
+    q = 'which compiler optimizations matter for a hobby kernel'
+    r = hn.search(q, k=10, raw=True, deadline_ms=1)
+    assert r['rerank']['degraded'] in ('decode', 'embed')
+    assert len(r['results']) == 10 and 'warning' in r
+    full = hn.search(q, k=10, raw=True)
+    assert full['rerank']['degraded'] is None and 'warning' not in full
+    assert ids_scores(hn.search(q, k=10, raw=True, deadline_ms=600_000)) == ids_scores(full)
+    # the prefixes are cached now: nothing to decode, so a missed deadline leaves R0's order
+    r = hn.search(q, k=10, raw=True, deadline_ms=1)
+    assert r['rerank']['degraded'] == 'embed' and len(r['results']) == 10 and 'warning' in r
+    res = hn.search(q, k=10, deadline_ms=600_000)
+    assert res.rerank is not None and res.rerank['degraded'] is None and res.warning is None
+    for bad in (0, -5, float('nan')):
+        with pytest.raises(ValueError):
+            hn.search(q, deadline_ms=bad)
+
+
 def test_filters_hold(hn):
     r = hn.search(QUERIES[0], k=20, types='comment', since='2015-06-10', until='2015-06-20')
     assert len(r) > 0
     assert all(h.kind == 'comment' and '2015-06-10' <= h.date[:10] <= '2015-06-20' for h in r)
+
+
+def test_process_memory_with_reranks(floor):
+    """8 clients for 60 s (their searches are reranked) at the floor + 64 MiB: no errors, process
+    growth <= 1.03 x ram and the ledger <= ram."""
+    import json
+    import subprocess
+    import sys
+    ram = floor + 64 * MiB
+    worker = os.path.join(os.path.dirname(__file__), 'mem_worker.py')
+    out = subprocess.run([sys.executable, worker, BLOCK, str(ram), '8', '60'], cwd=ROOT,
+                         capture_output=True, text=True, encoding='utf-8', check=True).stdout
+    r = json.loads(out.strip().splitlines()[-1])
+    assert not r['errors'], r['errors']
+    assert r['ops'] > 8, r
+    assert r['end']['peak_working_set'] - r['base']['working_set'] <= 1.03 * ram, r
+    assert r['budget']['peak'] <= ram
