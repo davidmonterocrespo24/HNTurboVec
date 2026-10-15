@@ -363,7 +363,8 @@ impl Archive {
             Some(b) => {
                 let bin = b.external().iter().find(|e| e.name == "embed.bin").map_or(0, |e| e.len);
                 let tok = b.part("model/embed.tok").map_or(0, |p| p.raw_len);
-                bin * 7 / 5 + 4 * tok + 32 * MB
+                // + what embedding document prompts can add (P4: one request per stream)
+                bin * 7 / 5 + 4 * tok + 32 * MB + crate::embed::doc_streams() as u64 * crate::embed::DOC_REQUEST_BYTES
             }
             None => embedder_estimate(&models),
         };

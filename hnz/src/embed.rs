@@ -9,6 +9,16 @@ use tokenizers::Tokenizer;
 
 pub use crate::prompt::QUERY_PROMPT;
 
+/// CPU streams for document prompts (HNZ_EMBED_STREAMS, 1 to 16; default 1): that many documents
+/// are embedded at the same time.
+pub fn doc_streams() -> usize {
+    std::env::var("HNZ_EMBED_STREAMS").ok().and_then(|x| x.parse().ok()).unwrap_or(1).clamp(1, 16)
+}
+
+/// Memory a document request may add on top of the model (activations of a 256-token prompt,
+/// with margin; E33a measures it).
+pub const DOC_REQUEST_BYTES: u64 = 64 << 20;
+
 pub struct Embedder {
     // orden de campos = orden de destrucción (request antes que el modelo y el core)
     req: InferRequest,
@@ -80,7 +90,7 @@ impl Embedder {
         // not depend on the machine
         core.set_property(&DeviceType::CPU, &RwPropertyKey::Other("INFERENCE_PRECISION_HINT".into()), "f32").map_err(ov)?;
         // documents can be embedded several at a time (HNZ_EMBED_STREAMS CPU streams; default 1)
-        let streams: usize = std::env::var("HNZ_EMBED_STREAMS").ok().and_then(|x| x.parse().ok()).unwrap_or(1).clamp(1, 16);
+        let streams = doc_streams();
         if streams > 1 {
             core.set_property(&DeviceType::CPU, &RwPropertyKey::NumStreams, &streams.to_string()).map_err(ov)?;
         }
