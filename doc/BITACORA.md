@@ -751,3 +751,27 @@ Full description and API: [07-ram.md](07-ram.md). Everything hnz holds in the pr
   cache already holds in full (`partial=False`) where the library decoded a snippet — existing
   behavior, exposed because the library no longer locks the CLI's cache file.
 - **P2 done.** Next: P3 (compact block: container, `hnz pack`, global index of rare terms).
+
+### E32 — P3 (compact block v1), in progress
+Plan from a design panel (3 architects + a judge, against the current code; full output kept in the
+session scratchpad): one container file `hn.hnzb` + the embedder IR next to it; global docnums,
+global author table, LM text copied byte for byte from per-month segments, sparse 256-bit codes,
+one global word index (df of every term; postings only for rare terms, without tf), integrity
+checks and canaries, `hnz pack` / `verify-block` / `inspect`. User decisions (2026-10-15): retrain
+the LM on 5 % of HN first and adopt it only if it saves >= 2 % of text; store the order of `kids`;
+the multi-day all-HN runs (P5) start after P3.
+- **E30e — global document frequencies** (`hnz dfpass`, 582 s, all 239 Parquet files): 49,324,111
+  items, 4,223,195 distinct index terms, 1,165,413,683 (item, term) pairs. Rare terms at
+  df <= 0.02 % (9,865 items): 4,212,294 terms (99.75 %), 2,562,172 of them with df = 1, carrying
+  119,574,577 pairs (10.3 %); 10,901 frequent terms carry the rest. At 0.01 %: 83.1 M pairs; at
+  0.005 %: 58.5 M. The df dictionary of every term (FST) takes 35.4 MB.
+- **Sample re-compressed with the HN LM** (`hnz build --tier lm --lm models/lm-hn-70m.hnzlm`,
+  `work/p3/seg-*`): 2010-06 55.6 B/rec (8 zstd fallbacks), 2015-06 57.2 B/rec (24), 2024-01
+  55.0 B/rec (32), as E29 predicted. Speed 34-103 rec/s: the laptop was on battery and the CPU was
+  shared with the design agents (122-129 rec/s alone, E24).
+- **Container** (`hnz/src/block.rs`): 4 KiB superblock, 4 KiB-aligned parts, zstd JSON TOC, 64-byte
+  trailer; XXH3-128 per part and for the TOC (= snapshot id), XXH3-64 for superblock and trailer;
+  `CorruptBlockError` / `IncompatibleBlockError`. Tests: round trip, byte-identical output for the
+  same inputs, and a corruption matrix (superblock, TOC, trailer, truncation, extension, part bytes,
+  magic, major version, unknown feature). Reads go through a pool of file handles (Windows
+  serializes I/O on one synchronous handle).

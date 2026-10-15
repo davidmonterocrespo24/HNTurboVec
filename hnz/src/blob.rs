@@ -1,15 +1,67 @@
-//! Bytes of an archive file: resident in RAM (private copy, charged to the budget) or on disk
-//! (positional reads on demand, which go through the OS file cache and not through the process's
-//! memory). Replaces mmap: touched mapped pages enter the process working set with nobody
-//! controlling them (P2, doc/06-libreria.md).
+//! Bytes of an archive file, or of one part of a block file: resident in RAM (private copy,
+//! charged to the budget) or on disk (positional reads on demand, which go through the OS file
+//! cache and not through the process's memory). Replaces mmap: touched mapped pages enter the
+//! process working set with nobody controlling them (P2, doc/06-libreria.md).
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::fs::File;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+/// Several read handles on one file. Windows serializes I/O on one synchronous handle, so a
+/// parallel scan over one big file needs one handle per worker thread.
+pub struct FilePool {
+    files: Vec<File>,
+    next: AtomicUsize,
+    pub len: u64,
+}
+
+impl FilePool {
+    /// `n` handles (at least 1). With `deny_write`, other processes cannot open the file for
+    /// writing while it is open (renaming or deleting it stays possible).
+    pub fn open(path: &Path, n: usize, deny_write: bool) -> Result<Arc<Self>> {
+        let mut files = Vec::with_capacity(n.max(1));
+        for _ in 0..n.max(1) {
+            let mut oo = std::fs::OpenOptions::new();
+            oo.read(true);
+            #[cfg(windows)]
+            if deny_write {
+                use std::os::windows::fs::OpenOptionsExt;
+                oo.share_mode(1 | 4); // FILE_SHARE_READ | FILE_SHARE_DELETE
+            }
+            #[cfg(not(windows))]
+            let _ = deny_write;
+            files.push(oo.open(path).with_context(|| format!("{}", path.display()))?);
+        }
+        let len = files[0].metadata()?.len();
+        Ok(Arc::new(Self { files, next: AtomicUsize::new(0), len }))
+    }
+
+    /// Handles for parallel readers: one per worker thread plus a few for other threads.
+    pub fn default_handles() -> usize {
+        rayon::current_num_threads() + 4
+    }
+
+    fn pick(&self) -> &File {
+        let n = self.files.len();
+        let i = match rayon::current_thread_index() {
+            Some(t) => t % n,
+            None => self.next.fetch_add(1, Ordering::Relaxed) % n,
+        };
+        &self.files[i]
+    }
+
+    /// Full positional read of `buf.len()` bytes at `off`.
+    pub fn read_at(&self, buf: &mut [u8], off: u64) -> Result<()> {
+        read_at(self.pick(), buf, off)
+    }
+}
 
 pub enum Blob {
     Resident(Vec<u8>),
-    Disk { file: File, len: usize },
+    /// `len` bytes starting at `base` of a file read through `pool`
+    Disk { pool: Arc<FilePool>, base: u64, len: usize },
 }
 
 impl Blob {
@@ -18,9 +70,14 @@ impl Blob {
         if resident {
             return Ok(Blob::Resident(std::fs::read(path).with_context(|| format!("{}", path.display()))?));
         }
-        let file = File::open(path).with_context(|| format!("{}", path.display()))?;
-        let len = file.metadata()?.len() as usize;
-        Ok(Blob::Disk { file, len })
+        let pool = FilePool::open(path, 1, false)?;
+        let len = pool.len as usize;
+        Ok(Blob::Disk { pool, base: 0, len })
+    }
+
+    /// A slice [base, base+len) of a file (a part of a block), read on demand.
+    pub fn part(pool: Arc<FilePool>, base: u64, len: usize) -> Self {
+        Blob::Disk { pool, base, len }
     }
 
     pub fn len(&self) -> usize {
@@ -46,15 +103,16 @@ impl Blob {
         matches!(self, Blob::Resident(_))
     }
 
-    /// Bytes [off, off+len) (clipped at the end of the file): borrowed if resident; read if not.
+    /// Bytes [off, off+len) (clipped at the end of the file or part): borrowed if resident; read
+    /// if not.
     pub fn get(&self, off: usize, len: usize) -> Result<Cow<'_, [u8]>> {
         let end = (off + len).min(self.len());
         let off = off.min(end);
         match self {
             Blob::Resident(v) => Ok(Cow::Borrowed(&v[off..end])),
-            Blob::Disk { file, .. } => {
+            Blob::Disk { pool, base, .. } => {
                 let mut buf = vec![0u8; end - off];
-                read_at(file, &mut buf, off as u64)?;
+                pool.read_at(&mut buf, base + off as u64)?;
                 Ok(Cow::Owned(buf))
             }
         }

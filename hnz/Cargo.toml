@@ -26,6 +26,8 @@ openvino = { version = "0.11", features = ["runtime-linking"] }
 # carga explícita de openvino_c.dll desde ov_libs (embed.rs)
 openvino-sys = { version = "0.11", features = ["runtime-linking"] }
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
+# XXH3 hashes of the block container (block.rs); already in the tree via parquet
+twox-hash = { version = "2.1", default-features = false, features = ["std", "xxhash3_64", "xxhash3_128"] }
 
 [profile.release]
 opt-level = 3

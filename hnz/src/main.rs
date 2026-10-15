@@ -113,6 +113,14 @@ enum Cmd {
         #[arg(long, default_value = "models/lm-pythia-70m.hnzlm")]
         lm: PathBuf,
     },
+    /// E30e: global document frequency of every index term (title + url host + plain text, the
+    /// BM25 tokenizer) over the given Parquet files; writes <out>/df.fst (term -> df) and
+    /// <out>/df.json (totals and rare-term counts per threshold)
+    Dfpass {
+        #[arg(long)]
+        out: PathBuf,
+        parquet: Vec<PathBuf>,
+    },
     /// Reconstruye el índice BM25 de un segmento con otras opciones (para medir tamaño/calidad)
     Rebm25 {
         #[arg(long)]
@@ -278,6 +286,87 @@ fn rand_docs(n: usize, max: usize, seed: u64) -> Vec<usize> {
             (x % max as u64) as usize
         })
         .collect()
+}
+
+/// One pass over all the Parquet files: per file (in parallel) the distinct terms of each item's
+/// index text, merged into one global term -> df table as the files finish.
+fn cmd_dfpass(out: &Path, parquet: &[PathBuf]) -> Result<()> {
+    use std::collections::HashMap;
+    use std::sync::mpsc;
+    if parquet.is_empty() {
+        bail!("no Parquet files given");
+    }
+    std::fs::create_dir_all(out)?;
+    let t0 = Instant::now();
+    let (tx, rx) = mpsc::sync_channel::<Result<(PathBuf, usize, Vec<(String, u32)>)>>(4);
+    let files = parquet.to_vec();
+    let worker = std::thread::spawn(move || {
+        files.par_iter().for_each_with(tx, |tx, p| {
+            let r = (|| -> Result<(PathBuf, usize, Vec<(String, u32)>)> {
+                let items = hnz::item::read_parquet(p)?.items;
+                let mut df: HashMap<String, u32> = HashMap::new();
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for it in &items {
+                    seen.clear();
+                    hnz::tokenize::for_each_term(&segment::index_text(&it.title, &it.url, &it.text), |t| {
+                        if !seen.contains(t) {
+                            seen.insert(t.to_string());
+                        }
+                    });
+                    for t in seen.drain() {
+                        *df.entry(t).or_insert(0) += 1;
+                    }
+                }
+                Ok((p.clone(), items.len(), df.into_iter().collect()))
+            })();
+            let _ = tx.send(r);
+        });
+    });
+    let mut global: HashMap<String, u64> = HashMap::new();
+    let (mut n_docs, mut done) = (0u64, 0usize);
+    for r in rx {
+        let (p, n, part) = r?;
+        n_docs += n as u64;
+        for (t, d) in part {
+            *global.entry(t).or_insert(0) += d as u64;
+        }
+        done += 1;
+        eprintln!(
+            "  {done}/{} {} ({} docs, {} terms so far, {:.0} s)",
+            parquet.len(),
+            p.display(),
+            n,
+            global.len(),
+            t0.elapsed().as_secs_f64()
+        );
+    }
+    worker.join().map_err(|_| anyhow::anyhow!("dfpass worker panicked"))?;
+    let mut terms: Vec<(String, u64)> = global.into_iter().collect();
+    terms.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let mut fb = fst::MapBuilder::new(std::io::BufWriter::new(std::fs::File::create(out.join("df.fst"))?))?;
+    for (t, d) in &terms {
+        fb.insert(t.as_bytes(), *d)?;
+    }
+    fb.finish()?;
+    // rare-term counts per threshold (fraction of all items): terms kept and their postings
+    let total_postings: u64 = terms.iter().map(|x| x.1).sum();
+    let ratios = [0.00005f64, 0.0001, 0.0002, 0.0005, 0.001, 0.01];
+    let thresholds: Vec<serde_json::Value> = ratios
+        .iter()
+        .map(|&r| {
+            let max_df = (r * n_docs as f64).ceil() as u64;
+            let (nt, np, n1) = terms.iter().filter(|x| x.1 <= max_df).fold((0u64, 0u64, 0u64), |a, x| (a.0 + 1, a.1 + x.1, a.2 + (x.1 == 1) as u64));
+            serde_json::json!({"ratio": r, "max_df": max_df, "terms": nt, "postings": np, "df1_terms": n1})
+        })
+        .collect();
+    let fst_bytes = std::fs::metadata(out.join("df.fst"))?.len();
+    let summary = serde_json::json!({
+        "files": parquet.len(), "n_docs": n_docs, "n_terms": terms.len(), "total_postings": total_postings,
+        "df_fst_bytes": fst_bytes, "thresholds": thresholds, "seconds": t0.elapsed().as_secs_f64(),
+    });
+    std::fs::write(out.join("df.json"), serde_json::to_string_pretty(&summary)?)?;
+    println!("{}", serde_json::to_string_pretty(&summary)?);
+    Ok(())
 }
 
 fn cmd_lmtest(seg: &Path, lm: &Path, n: usize, batch: usize) -> Result<()> {
@@ -634,6 +723,7 @@ fn main() -> Result<()> {
                 );
             }
         }
+        Cmd::Dfpass { out, parquet } => cmd_dfpass(&out, &parquet)?,
         Cmd::Rebm25 { seg, no_tf, max_df, models } => {
             let t0 = Instant::now();
             let s = Segment::open(&seg)?;

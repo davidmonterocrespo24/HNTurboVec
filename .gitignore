@@ -21,6 +21,7 @@ target_*/
 # Salidas del sistema construido (almacén comprimido, índices) — se regeneran con el build
 out/
 out_*/
+work/
 _dl/
 store/
 *.building/
