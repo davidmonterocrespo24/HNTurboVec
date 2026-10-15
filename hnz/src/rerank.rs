@@ -48,6 +48,12 @@ impl Default for RerankCfg {
 pub trait DocEmbed: Sync {
     /// `docs`: (HN id, prompt) of each document.
     fn embed(&self, docs: &[(u32, String)]) -> Result<Vec<Vec<f32>>>;
+    /// As `embed`, but giving up at `deadline`: Ok(None) when it passes first. By default the
+    /// call is short enough (one round of documents in this thread) to just finish it.
+    fn embed_until(&self, docs: &[(u32, String)], deadline: Option<Instant>) -> Result<Option<Vec<Vec<f32>>>> {
+        let _ = deadline;
+        self.embed(docs).map(Some)
+    }
     /// How many documents to hand over at a time: the embedder's parallelism (smaller hand-overs
     /// keep the reranker's priorities fresh).
     fn batch(&self) -> usize {
@@ -203,8 +209,8 @@ impl Drop for WorkerEnded<'_> {
 
 /// The embedding worker of one reranked search: up to `emb.batch()` pending candidates at a time,
 /// the best R0 first, until nothing more will come and nothing is pending. The vectors go to the
-/// queue's `got` as they are made.
-fn embed_worker(q: &SharedQueue, emb: &dyn DocEmbed) -> Result<()> {
+/// queue's `got` as they are made; at the deadline it stops waiting and ends.
+fn embed_worker(q: &SharedQueue, emb: &dyn DocEmbed, deadline: Option<Instant>) -> Result<()> {
     let _ended = WorkerEnded(q);
     let batch = emb.batch().max(1);
     loop {
@@ -226,7 +232,7 @@ fn embed_worker(q: &SharedQueue, emb: &dyn DocEmbed) -> Result<()> {
             g.pending.drain(..n).collect()
         };
         let (cis, docs): (Vec<usize>, Vec<(u32, String)>) = take.into_iter().map(|(ci, _, id, p)| (ci, (id, p))).unzip();
-        let vecs = emb.embed(&docs)?;
+        let Some(vecs) = emb.embed_until(&docs, deadline)? else { return Ok(()) };
         lock_queue(q).got.extend(cis.into_iter().zip(vecs));
         q.1.notify_all();
     }
@@ -248,14 +254,25 @@ fn ms(t: Instant) -> f64 {
 /// the answer is stage 1's; if the top candidates are not all re-embedded by then, they keep the
 /// cheap score's order. Either way `report.degraded` says so; without a deadline the result never
 /// depends on timing.
-pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn DocEmbed, deadline: Option<Instant>) -> Result<Outcome> {
+///
+/// `grow`: asked before stage 1 widens its rounds (the caller's admission turn; `&|_| true`
+/// without one).
+pub fn search(
+    eng: &Engine,
+    q: &Query,
+    qvec: &[f32],
+    cfg: &RerankCfg,
+    emb: &dyn DocEmbed,
+    deadline: Option<Instant>,
+    grow: &(dyn Fn(u64) -> bool + Sync),
+) -> Result<Outcome> {
     let t0 = Instant::now();
     let k = q.k.clamp(1, MAX_K);
     let terms = eng.query_terms(&q.text)?;
     let frequent = terms.iter().any(|t| t.post == TermPost::Frequent);
     if q.text.trim().is_empty() || (q.mode == Mode::Keyword && !frequent) {
         // a listing, or a keyword query whose words all have postings: stage 1 is exact
-        let hits = eng.search(q, if q.mode == Mode::Keyword { None } else { Some(qvec) })?;
+        let hits = eng.search_with(q, if q.mode == Mode::Keyword { None } else { Some(qvec) }, grow)?;
         return Ok(Outcome { hits, prefixes: HashMap::new(), report: Report::default(), warning: None });
     }
     let rare: Vec<(TermPost, f32)> = terms.iter().filter(|t| t.post != TermPost::Frequent).map(|t| (t.post, t.idf)).collect();
@@ -264,10 +281,10 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
         Mode::Keyword => cfg.kb_keyword,
         Mode::Hybrid => cfg.kb,
     };
-    let cands = eng.candidates(q, Some(qvec), &rare, cfg.kv, kb, &|_| true)?;
+    let cands = eng.candidates(q, Some(qvec), &rare, cfg.kv, kb, grow)?;
     let n = cands.len();
     let mut report = Report { candidates: n, ms_stage1: ms(t0), ..Default::default() };
-    let sg = &eng.segs[0];
+    let sg = eng.segs.first().context("el reordenado necesita un bloque compacto")?;
     let TextSource::Lm(lm) = &sg.s.text else { bail!("el reordenado necesita un bloque compacto") };
     let bm = sg.bm25.as_ref().context("el bloque no tiene índice de palabras")?;
 
@@ -319,7 +336,9 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
                 b += bm.score_tf(t.idf, m, c.doc);
             }
         }
-        Feat { doc: c.doc, s1: c.s1, b, r0: c.s1 + cfg.r0_w * b / (b + cfg.r0_c), prompt }
+        // vector mode: no word bonus (R0 only orders the embedding, or the answer at a deadline)
+        let r0 = if q.mode == Mode::Vector { c.s1 } else { c.s1 + cfg.r0_w * b / (b + cfg.r0_c) };
+        Feat { doc: c.doc, s1: c.s1, b, r0, prompt }
     };
 
     // prefixes: cached, stored (LM-less records), or decoded by the shared LM service
@@ -331,13 +350,14 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
         let mut cache = eng.prefixes.lock().unwrap_or_else(|e| e.into_inner());
         for (ci, c) in cands.iter().enumerate() {
             if let Some(p) = cache.get(&c.doc) {
+                feats[ci] = Some(feat_of(ci, Some(p.as_ref()), None));
                 prefixes.insert(c.doc, p);
             } else if let Some((flags, p)) = eng.fallback_prefix(c.doc) {
-                prefixes.insert(c.doc, std::sync::Arc::new(Prefix { bytes: p.as_bytes().to_vec(), flags, complete: false, snippet_end: p.len() }));
-            } else {
-                continue;
+                // a record stored without LM tokens: its stored prefix gives the features, and
+                // the results take its whole text from its zstd record (`fetch_with`)
+                let p = Prefix { bytes: p.as_bytes().to_vec(), flags, complete: false, snippet_end: p.len() };
+                feats[ci] = Some(feat_of(ci, Some(&p), None));
             }
-            feats[ci] = Some(feat_of(ci, prefixes.get(&c.doc).map(|p| p.as_ref()), None));
         }
     }
     for (ci, c) in cands.iter().enumerate() {
@@ -358,7 +378,7 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
     // re-embedding
     type Scoped = Option<(HashMap<usize, Vec<f32>>, bool)>;
     let scoped: Scoped = std::thread::scope(|sc| -> Result<Scoped> {
-        let worker = (n_e > 0).then(|| sc.spawn(|| embed_worker(&queue, emb)));
+        let worker = (n_e > 0).then(|| sc.spawn(|| embed_worker(&queue, emb, deadline)));
         let _stop = StopWorker(&queue);
         let mut sent = vec![false; n];
         // queue every decoded candidate whose R0 is among the n_e best lower bounds; the bound
@@ -404,7 +424,9 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
                 feats[ci] = Some(match r? {
                     Decoded::Prefix(p) => {
                         report.tokens += p.tokens as u64;
-                        let p = std::sync::Arc::new(Prefix { bytes: p.bytes, flags: p.flags, complete: p.complete, snippet_end: p.snippet_end });
+                        let mut bytes = p.bytes;
+                        bytes.shrink_to_fit();
+                        let p = std::sync::Arc::new(Prefix { bytes, flags: p.flags, complete: p.complete, snippet_end: p.snippet_end });
                         eng.prefixes.lock().unwrap_or_else(|e| e.into_inner()).put(d, p.clone());
                         let f = feat_of(ci, Some(&p), None);
                         prefixes.insert(d, p);
@@ -451,7 +473,12 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
             let mut g = lock_queue(&queue);
             loop {
                 let have: std::collections::HashSet<usize> = g.got.iter().map(|x| x.0).collect();
-                if g.ended || need.iter().all(|i| have.contains(i)) {
+                if need.iter().all(|i| have.contains(i)) {
+                    break;
+                }
+                if g.ended {
+                    // it gave up at the deadline (an error of its own comes from the join)
+                    late = true;
                     break;
                 }
                 g = match deadline {
@@ -481,7 +508,7 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
         // the deadline passed while decoding: stage 1's answer (decoded prefixes still serve the
         // results' text)
         report.degraded = Some("decode");
-        let mut hits = eng.search(q, if q.mode == Mode::Keyword { None } else { Some(qvec) })?;
+        let mut hits = eng.search_with(q, if q.mode == Mode::Keyword { None } else { Some(qvec) }, grow)?;
         hits.truncate(k);
         let warning = Some("se agotó el plazo durante la decodificación: resultados de la etapa 1, sin reordenar".to_string());
         return Ok(Outcome { hits, prefixes, report, warning });
@@ -529,7 +556,7 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
     // beyond the candidates: stage 1's order
     if hits.len() < k && q.mode != Mode::Keyword {
         let have: std::collections::HashSet<u32> = hits.iter().map(|h| h.doc).collect();
-        let more = eng.search(q, Some(qvec))?;
+        let more = eng.search_with(q, Some(qvec), grow)?;
         hits.extend(more.into_iter().filter(|h| !have.contains(&h.doc)));
     }
     hits.truncate(k);
@@ -568,7 +595,7 @@ mod tests {
             g.done = true;
         }
         let emb = Rec(Mutex::new(Vec::new()));
-        embed_worker(&q, &emb).unwrap();
+        embed_worker(&q, &emb, None).unwrap();
         assert_eq!(*emb.0.lock().unwrap(), vec![101, 103, 100, 104]);
         let g = lock_queue(&q);
         assert!(g.ended);
@@ -580,7 +607,7 @@ mod tests {
         let q = new_queue();
         let emb = Rec(Mutex::new(Vec::new()));
         std::thread::scope(|sc| {
-            let w = sc.spawn(|| embed_worker(&q, &emb));
+            let w = sc.spawn(|| embed_worker(&q, &emb, None));
             lock_queue(&q).pending.push((0, 1.0, 7, String::new()));
             q.1.notify_all();
             // an early return: the guard ends the worker (what is still pending is dropped)

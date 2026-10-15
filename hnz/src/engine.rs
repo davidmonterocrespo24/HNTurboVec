@@ -47,8 +47,8 @@ fn round_cost(kc: usize, c1: usize) -> u64 {
     c1 as u64 * 24 + kc as u64 * 64
 }
 
-/// Un solo lote del LM a la vez en todo el proceso: su pool de hilos es global y dos lotes a la vez
-/// solo competirían por los mismos núcleos. Lo demás (metadatos, nivel zstd, cachés) va en paralelo.
+// LM decoding goes through one shared service per LM model (`lm::service`): its continuous batch
+// serves every query at once, within that model's share of the LM pool.
 use crate::lm::jobs::{Decoded, Want};
 use crate::lm::service::{Job, LmService, Prio};
 
@@ -62,7 +62,8 @@ fn title_weight(t: &String) -> u64 {
 }
 
 fn prefix_weight(p: &Arc<crate::rerank::Prefix>) -> u64 {
-    96 + p.bytes.len() as u64
+    // the Arc and the buffer's allocation headers, a hash-table slot with slack, the buffer
+    128 + p.bytes.capacity() as u64
 }
 
 pub struct Seg {
@@ -592,7 +593,9 @@ impl Engine {
 
     /// RAM of what is always loaded, in all segments (incl. the flag columns).
     pub fn fixed_bytes(&self) -> u64 {
-        self.segs.iter().map(|sg| sg.fixed_bytes() as u64).sum::<u64>() + self.flags.iter().map(|f| f.capacity() as u64).sum::<u64>()
+        self.segs.iter().map(|sg| sg.fixed_bytes() as u64).sum::<u64>()
+            + self.flags.iter().map(|f| f.capacity() as u64).sum::<u64>()
+            + self._prefix_charge.bytes()
     }
 
     /// RAM of the LM models (measured when loading them).
@@ -624,10 +627,21 @@ impl Engine {
         Ok(n)
     }
 
-    /// The LM batch never needs less than this (the longest record of any loaded model, plus
-    /// the batch's fixed sampling scratch).
+    /// The LM batches never need less than this: each loaded model's longest record plus its
+    /// batch's fixed sampling scratch (every model has its own service and batch, run at once).
     pub fn lm_min(&self) -> u64 {
-        self.lms.values().map(|c| c.min_pool()).max().unwrap_or(0)
+        self.lms.values().map(|c| c.min_pool()).sum()
+    }
+
+    /// The pool of model `name`'s service: its share of the LM pool, by the models' minimums (all
+    /// the services together stay within the pool charged to the budget).
+    fn lm_share(&self, name: &str) -> u64 {
+        if self.lm_pool == u64::MAX {
+            return u64::MAX;
+        }
+        let total = self.lm_min().max(1);
+        let min = self.lms.get(name).map_or(0, |c| c.min_pool());
+        ((self.lm_pool as u128 * min as u128 / total as u128) as u64).max(min)
     }
 
     /// Attaches the persistent disk cache (its RAM index is charged to the budget).
@@ -647,8 +661,8 @@ impl Engine {
     pub fn set_lm_pool(&mut self, bytes: u64) {
         self.lm_pool = bytes;
         self.lm_charge.resize(if bytes == u64::MAX { 0 } else { bytes });
-        for s in self.lm_svc.lock().unwrap_or_else(|e| e.into_inner()).values() {
-            s.set_pool(bytes);
+        for (name, s) in self.lm_svc.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            s.set_pool(self.lm_share(name));
         }
     }
 
@@ -659,7 +673,7 @@ impl Engine {
             return Ok(s.clone());
         }
         let codec = self.lms.get(name).with_context(|| format!("falta el modelo LM {name}"))?.clone();
-        let s = Arc::new(LmService::new(codec, self.lm_pool)?);
+        let s = Arc::new(LmService::new(codec, self.lm_share(name))?);
         m.insert(name.to_string(), s.clone());
         Ok(s)
     }
@@ -1024,7 +1038,7 @@ impl Engine {
     /// by the rare-term score (`rare`: postings and idf), among those that pass the query's
     /// filters, without repeats. A round is widened (x4, up to x16) while filters leave too few.
     pub fn candidates(&self, q: &Query, qvec: Option<&[f32]>, rare: &[(TermPost, f32)], kv: usize, kb: usize, grow: &(dyn Fn(u64) -> bool + Sync)) -> Result<Vec<Cand>> {
-        let sg = &self.segs[0];
+        let sg = self.segs.first().context("no hay segmentos")?;
         let n_docs = sg.s.man.n_docs;
         let lo = match q.from {
             Some(t) => sg.s.meta.try_doc_at_time(t)?,

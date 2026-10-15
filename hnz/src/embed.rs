@@ -25,10 +25,32 @@ pub fn sign_flips(v: &[f32], code: &[u8]) -> u32 {
     (0..(code.len() * 8).min(v.len())).filter(|&d| (v[d] > 0.0) != (code[d / 8] >> (d % 8) & 1 == 1)).count() as u32
 }
 
-/// Mean sign flips (of 256) between re-embedded canaries and their stored codes above which the
-/// reranking chain is taken as broken: a matching chain flips 2.35 on average and at most 9
-/// (E33a, 1,200 prompts), an unrelated vector about 128.
-pub const MAX_MEAN_FLIPS: f64 = 32.0;
+/// Share of compared signs that may differ, on average, between re-embedded canaries and their
+/// stored codes before the reranking chain is taken as broken: a matching chain flips 2.35 of 256
+/// on average and at most 9 (E33a, 1,200 prompts), an unrelated vector half of them.
+pub const MAX_FLIP_RATE: f64 = 0.125;
+
+/// The reranking chain (LM prefix -> prompt -> tokenizer -> IR) reproduces a block's packed
+/// vectors: embeds the canaries of `Engine::embed_checks` and compares their stage-1 signs with
+/// the stored codes. Returns the mean flips scaled to 256 signs (None without canaries, or with an
+/// embedder that cannot embed documents); `IncompatibleBlockError` above `MAX_FLIP_RATE`.
+pub fn check_chain(e: &mut Embedder, checks: &[(String, Vec<u8>)]) -> Result<Option<f64>> {
+    if checks.is_empty() || !e.can_embed_docs() {
+        return Ok(None);
+    }
+    let v = e.embed_docs(&checks.iter().map(|c| c.0.clone()).collect::<Vec<_>>())?;
+    let flips: Vec<u32> = v.iter().zip(checks).map(|(v, c)| sign_flips(v, &c.1)).collect();
+    let signs = checks.iter().map(|c| (c.1.len() * 8).min(v[0].len())).sum::<usize>().max(1) as f64;
+    let rate = flips.iter().sum::<u32>() as f64 / signs;
+    if rate > MAX_FLIP_RATE {
+        return Err(crate::block::incompatible(format!(
+            "el embedder no reproduce los vectores del bloque: {:.0} % de los signos distintos en {} canarios ({flips:?})",
+            rate * 100.0,
+            flips.len()
+        )));
+    }
+    Ok(Some(rate * 256.0))
+}
 
 pub struct Embedder {
     // orden de campos = orden de destrucción (request antes que el modelo y el core)

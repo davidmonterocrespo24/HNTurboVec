@@ -9,8 +9,9 @@
 //! - The query embedder (OpenVINO) lives in its own thread: its objects cannot be shared between
 //!   threads, so no `unsafe` is needed; queries ask it for vectors through a channel. Until it is
 //!   loaded, its load peak is reserved in the budget; once loaded, its measured size is charged.
-//! - The LM decompresses one batch at a time in the whole process (a lock inside `Engine`, only
-//!   while decompressing): zstd-tier or cached queries do not wait for LM-tier ones.
+//! - LM decompression goes through one shared service per LM model (`lm::service`): one
+//!   continuous batch serves every concurrent query within that model's share of the LM pool;
+//!   zstd-tier or cached queries do not wait for LM-tier ones.
 use crate::blob::Residency;
 use crate::dates;
 use crate::embed::Embedder;
@@ -91,8 +92,10 @@ pub struct SearchRequest {
     /// texto completo también en el nivel LM (si no, fragmento de 64 tokens)
     pub full: bool,
     pub include_dead: bool,
-    pub w_bm25: f32,
-    pub c_bm25: f32,
+    /// weight and saturation of BM25 in the fusion `vector + w·b/(b + c)`; None = the defaults
+    /// (0.15 and 20 in stage 1, 0.15 and 40 when reranked)
+    pub w_bm25: Option<f32>,
+    pub c_bm25: Option<f32>,
     /// P4: rerank the candidates by their prefix (compact blocks); None = whenever possible
     pub rerank: Option<bool>,
     /// P4: answer within this many milliseconds from the call (opt-in): a reranking not done by
@@ -114,8 +117,8 @@ impl Default for SearchRequest {
             mode: "hybrid".into(),
             full: false,
             include_dead: false,
-            w_bm25: 0.15,
-            c_bm25: 20.0,
+            w_bm25: None,
+            c_bm25: None,
             rerank: None,
             deadline_ms: None,
         }
@@ -175,8 +178,8 @@ pub fn make_query(r: &SearchRequest) -> Result<Query> {
     if r.k == 0 || r.k > MAX_K {
         return Err(bad(format!("k debe estar entre 1 y {MAX_K} (es {})", r.k)));
     }
-    if !(r.c_bm25.is_finite() && r.c_bm25 > 0.0 && r.w_bm25.is_finite() && r.w_bm25 >= 0.0) {
-        return Err(bad(format!("c_bm25 debe ser > 0 y w_bm25 >= 0 (son {} y {})", r.c_bm25, r.w_bm25)));
+    if r.c_bm25.is_some_and(|c| !(c.is_finite() && c > 0.0)) || r.w_bm25.is_some_and(|w| !(w.is_finite() && w >= 0.0)) {
+        return Err(bad(format!("c_bm25 debe ser > 0 y w_bm25 >= 0 (son {:?} y {:?})", r.c_bm25, r.w_bm25)));
     }
     if r.deadline_ms.is_some_and(|d| !(d.is_finite() && d > 0.0 && d <= 3.6e6)) {
         return Err(bad(format!("deadline_ms debe estar entre 0 y 3.600.000 (es {:?})", r.deadline_ms)));
@@ -224,16 +227,17 @@ pub fn make_query(r: &SearchRequest) -> Result<Query> {
         types,
         by: r.author.clone(),
         include_dead: r.include_dead,
-        w_bm25: r.w_bm25,
-        c_bm25: r.c_bm25,
+        w_bm25: r.w_bm25.unwrap_or(0.15),
+        c_bm25: r.c_bm25.unwrap_or(20.0),
         vec_cand: None,
     })
 }
 
-/// Work for the embedder's thread: a query (always answered first), or document prompts (P4).
+/// Work for the embedder's thread: a query (answered before the next round of documents), or
+/// document prompts (P4) with a flag their search sets when it stops waiting for them.
 enum EmbedJob {
     Query(String, mpsc::Sender<Result<Vec<f32>>>),
-    Docs(Vec<String>, mpsc::Sender<Result<Vec<Vec<f32>>>>),
+    Docs(Vec<String>, mpsc::Sender<Result<Vec<Vec<f32>>>>, Arc<std::sync::atomic::AtomicBool>),
 }
 
 /// Minimum working memory for queries (on top of the vector read windows).
@@ -512,25 +516,14 @@ impl Archive {
                 };
                 e.and_then(|mut e| {
                     e.embed_query("warm up")?;
-                    let mut flips = None;
                     if e.can_embed_docs() {
-                        // the longest document shape, so the measured size includes its buffers
-                        e.embed_doc(&"warm up ".repeat(200))?;
-                        // the chain LM prefix -> prompt -> tokenizer -> IR must give back the
-                        // vectors packed in the block (their stage-1 signs)
-                        if !checks.is_empty() {
-                            let v = e.embed_docs(&checks.iter().map(|c| c.0.clone()).collect::<Vec<_>>())?;
-                            let f: Vec<u32> = v.iter().zip(&checks).map(|(v, c)| crate::embed::sign_flips(v, &c.1)).collect();
-                            let mean = f.iter().sum::<u32>() as f64 / f.len() as f64;
-                            if mean > crate::embed::MAX_MEAN_FLIPS {
-                                return Err(crate::block::incompatible(format!(
-                                    "el embedder no reproduce los vectores del bloque: {mean:.0} de 256 signos distintos de media en {} canarios ({f:?})",
-                                    f.len()
-                                )));
-                            }
-                            flips = Some(mean);
-                        }
+                        // the longest document shape on every stream, so the measured size
+                        // includes all their buffers
+                        e.embed_docs(&vec!["warm up ".repeat(200); e.doc_parallelism()])?;
                     }
+                    // the chain LM prefix -> prompt -> tokenizer -> IR must give back the
+                    // vectors packed in the block (their stage-1 signs)
+                    let flips = crate::embed::check_chain(&mut e, &checks)?;
                     Ok((e, flips))
                 })
             });
@@ -544,10 +537,11 @@ impl Archive {
                     return;
                 }
             };
-            // queries go first: between them, documents advance one round at a time (one document
-            // per CPU stream, the oldest jobs first); the thread ends when the archive is closed
-            // (all senders dropped) and nothing is pending
-            type DocJob = (Vec<String>, Vec<Vec<f32>>, mpsc::Sender<Result<Vec<Vec<f32>>>>);
+            // the queries queued go first (not those arriving meanwhile, so a stream of queries
+            // cannot hold documents back); then documents advance one round (one document per CPU
+            // stream, the oldest jobs first, jobs nobody waits for any more dropped); the thread
+            // ends when the archive is closed (all senders dropped) and nothing is pending
+            type DocJob = (Vec<String>, Vec<Vec<f32>>, mpsc::Sender<Result<Vec<Vec<f32>>>>, Arc<std::sync::atomic::AtomicBool>);
             let par = emb.doc_parallelism();
             let mut docs: std::collections::VecDeque<DocJob> = std::collections::VecDeque::new();
             loop {
@@ -559,14 +553,16 @@ impl Archive {
                 } else {
                     None
                 };
-                for job in first.into_iter().chain(rx.try_iter()) {
+                let queued: Vec<EmbedJob> = first.into_iter().chain(rx.try_iter()).collect();
+                for job in queued {
                     match job {
                         EmbedJob::Query(t, reply) => {
                             let _ = reply.send(emb.embed_query(&t));
                         }
-                        EmbedJob::Docs(p, reply) => docs.push_back((p, Vec::new(), reply)),
+                        EmbedJob::Docs(p, reply, cancel) => docs.push_back((p, Vec::new(), reply, cancel)),
                     }
                 }
+                docs.retain(|j| !j.3.load(std::sync::atomic::Ordering::Relaxed));
                 if docs.is_empty() {
                     continue;
                 }
@@ -590,14 +586,14 @@ impl Archive {
                     Err(e) => {
                         // every job with a document in the failed round fails
                         for _ in 0..owners.last().map_or(0, |&j| j + 1) {
-                            let (_, _, reply) = docs.pop_front().unwrap();
+                            let (_, _, reply, _) = docs.pop_front().unwrap();
                             let _ = reply.send(Err(anyhow!("{e:#}")));
                         }
                         continue;
                     }
                 }
                 while docs.front().is_some_and(|j| j.1.len() == j.0.len()) {
-                    let (_, out, reply) = docs.pop_front().unwrap();
+                    let (_, out, reply, _) = docs.pop_front().unwrap();
                     let _ = reply.send(Ok(out));
                 }
             }
@@ -612,14 +608,27 @@ impl Archive {
         rrx.recv().map_err(|_| anyhow!("el embedder no respondió"))?
     }
 
-    /// The vectors of document prompts (P4 reranking).
-    fn embed_docs(&self, prompts: Vec<String>) -> Result<Vec<Vec<f32>>> {
+    /// The vectors of document prompts (P4 reranking), waiting at most until `deadline`: Ok(None)
+    /// when it passes first (the embedder then drops what is left of the job).
+    fn embed_docs(&self, prompts: Vec<String>, deadline: Option<Instant>) -> Result<Option<Vec<Vec<f32>>>> {
         if prompts.is_empty() {
-            return Ok(Vec::new());
+            return Ok(Some(Vec::new()));
         }
         let (rtx, rrx) = mpsc::channel();
-        self.embedder()?.send(EmbedJob::Docs(prompts, rtx)).map_err(|_| anyhow!("el embedder no está disponible"))?;
-        rrx.recv().map_err(|_| anyhow!("el embedder no respondió"))?
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.embedder()?.send(EmbedJob::Docs(prompts, rtx, cancel.clone())).map_err(|_| anyhow!("el embedder no está disponible"))?;
+        let got = match deadline {
+            Some(d) => match rrx.recv_timeout(d.saturating_duration_since(Instant::now())) {
+                Ok(r) => r,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return Ok(None);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(anyhow!("el embedder no respondió")),
+            },
+            None => rrx.recv().map_err(|_| anyhow!("el embedder no respondió"))?,
+        };
+        got.map(Some)
     }
 
     /// Searches of this archive can be reranked (P4): a compact block with prompt v2 and an
@@ -643,7 +652,22 @@ impl Archive {
     pub fn search(&self, req: &SearchRequest) -> Result<SearchResponse> {
         let q = make_query(req)?;
         let t0 = Instant::now();
-        let turn = self.adm.enter(search_cost(q.k, req.full) + self.eng.search_cost(&q))?;
+        // the deadline counts from the call: waiting for a turn gives up at it too (BusyError)
+        let deadline = req.deadline_ms.map(|d| t0 + Duration::from_secs_f64(d / 1e3));
+        let cfg = {
+            let d = crate::rerank::RerankCfg::default();
+            crate::rerank::RerankCfg { w: req.w_bm25.unwrap_or(d.w), c: req.c_bm25.unwrap_or(d.c), ..d }
+        };
+        // a search that may be reranked declares the reranker's first round of stage 1 and the
+        // prefixes, prompts and vectors of its candidates (about 8 KiB each)
+        let may_rerank = req.rerank != Some(false) && self.eng.block.as_ref().is_some_and(|b| b.manifest()["vec"]["prompt_version"].as_u64() == Some(2));
+        let cost = if may_rerank {
+            let wide = Query { k: q.k.max(cfg.kv), ..q.clone() };
+            search_cost(q.k, req.full) + self.eng.search_cost(&wide) + (cfg.kv + cfg.kb_keyword) as u64 * (8 << 10)
+        } else {
+            search_cost(q.k, req.full) + self.eng.search_cost(&q)
+        };
+        let turn = self.adm.enter_until(cost, deadline)?;
         let t_q = t0.elapsed();
         let has_text = !q.text.trim().is_empty();
         // P4: rerank when asked (or by default when the archive can); a keyword query needs the
@@ -664,8 +688,7 @@ impl Archive {
         let t_emb = t0.elapsed();
         let (hits, prefixes, report, warning) = match (&qv, rerank) {
             (Some(v), true) => {
-                let deadline = req.deadline_ms.map(|d| t0 + Duration::from_secs_f64(d / 1e3));
-                let o = crate::rerank::search(&self.eng, &q, v, &crate::rerank::RerankCfg::default(), self, deadline)?;
+                let o = crate::rerank::search(&self.eng, &q, v, &cfg, self, deadline, &|extra| turn.try_grow(extra))?;
                 (o.hits, o.prefixes, Some(o.report), o.warning)
             }
             _ => (self.eng.search_with(&q, qv.as_deref(), &|extra| turn.try_grow(extra))?, Default::default(), None, None),
@@ -748,7 +771,11 @@ impl Archive {
 
 impl crate::rerank::DocEmbed for Archive {
     fn embed(&self, docs: &[(u32, String)]) -> Result<Vec<Vec<f32>>> {
-        self.embed_docs(docs.iter().map(|d| d.1.clone()).collect())
+        Ok(self.embed_docs(docs.iter().map(|d| d.1.clone()).collect(), None)?.unwrap_or_default())
+    }
+
+    fn embed_until(&self, docs: &[(u32, String)], deadline: Option<Instant>) -> Result<Option<Vec<Vec<f32>>>> {
+        self.embed_docs(docs.iter().map(|d| d.1.clone()).collect(), deadline)
     }
 
     fn batch(&self) -> usize {

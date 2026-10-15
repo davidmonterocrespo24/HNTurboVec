@@ -216,8 +216,14 @@ impl Admission {
     /// Enters with `bytes` of working memory (at most the whole pool: a bigger operation runs
     /// alone).
     pub fn enter(&self, bytes: u64) -> Result<Ticket<'_>, BusyError> {
+        self.enter_until(bytes, None)
+    }
+
+    /// As `enter`, but giving up at `until` too (a search's deadline) when it comes first.
+    pub fn enter_until(&self, bytes: u64, until: Option<Instant>) -> Result<Ticket<'_>, BusyError> {
         let bytes = bytes.min(self.pool);
-        let deadline = Instant::now() + self.timeout;
+        let start = Instant::now();
+        let deadline = until.map_or(start + self.timeout, |u| u.min(start + self.timeout));
         let fits = |g: &AdmState| g.running < self.max && g.in_use + bytes <= self.pool;
         let mut g = self.st.lock().unwrap_or_else(|e| e.into_inner());
         let me = g.next;
@@ -235,12 +241,13 @@ impl Admission {
                     g.queue.retain(|&x| x != me);
                     self.rejected.fetch_add(1, Ordering::Relaxed);
                     let msg = format!(
-                        "hnz ocupado: {} operaciones en curso (máximo {}) y {} de {} de memoria de trabajo en uso; se esperó {:.1} s",
+                        "hnz ocupado: {} operaciones en curso (máximo {}) y {} de {} de memoria de trabajo en uso; se esperó {:.1} s{}",
                         g.running,
                         self.max,
                         human(g.in_use),
                         human(self.pool),
-                        self.timeout.as_secs_f64()
+                        start.elapsed().as_secs_f64(),
+                        if until.is_some_and(|u| u < start + self.timeout) { " (el plazo de la búsqueda)" } else { "" }
                     );
                     drop(g);
                     self.cv.notify_all(); // the next in line may go now

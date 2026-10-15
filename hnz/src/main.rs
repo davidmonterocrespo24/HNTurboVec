@@ -67,10 +67,12 @@ struct SearchArgs {
     /// incluir ítems "dead"
     #[arg(long)]
     dead: bool,
-    #[arg(long, default_value_t = 0.15)]
-    w_bm25: f32,
-    #[arg(long, default_value_t = 20.0)]
-    c_bm25: f32,
+    /// BM25's weight in the fusion `vector + w·b/(b + c)` (default 0.15)
+    #[arg(long)]
+    w_bm25: Option<f32>,
+    /// BM25's saturation in the fusion (default 20 in stage 1, 40 when reranked)
+    #[arg(long)]
+    c_bm25: Option<f32>,
     /// texto completo también para el nivel LM (por defecto: fragmento de 64 tokens)
     #[arg(long)]
     full: bool,
@@ -78,6 +80,12 @@ struct SearchArgs {
     /// done by then gives way to stage 1's results, or to the cheap score's order (degraded)
     #[arg(long)]
     deadline_ms: Option<f64>,
+    /// P4: vector candidates to rerank (default 100)
+    #[arg(long)]
+    rerank_kv: Option<usize>,
+    /// P4: candidates re-embedded in hybrid mode, the top of the cheap score (default 50)
+    #[arg(long)]
+    rerank_top: Option<usize>,
 }
 
 #[derive(Subcommand)]
@@ -322,8 +330,11 @@ enum Cmd {
 }
 
 fn make_query(text: &str, s: &SearchArgs) -> Result<Query> {
-    if !(s.c_bm25.is_finite() && s.c_bm25 > 0.0 && s.w_bm25.is_finite() && s.w_bm25 >= 0.0) {
-        bail!("--c-bm25 debe ser > 0 y --w-bm25 >= 0 (son {} y {})", s.c_bm25, s.w_bm25);
+    if s.c_bm25.is_some_and(|c| !(c.is_finite() && c > 0.0)) || s.w_bm25.is_some_and(|w| !(w.is_finite() && w >= 0.0)) {
+        bail!("--c-bm25 debe ser > 0 y --w-bm25 >= 0 (son {:?} y {:?})", s.c_bm25, s.w_bm25);
+    }
+    if s.deadline_ms.is_some_and(|d| !(d.is_finite() && d > 0.0 && d <= 3.6e6)) {
+        bail!("--deadline-ms debe estar entre 0 y 3.600.000 (es {:?})", s.deadline_ms);
     }
     let types = s
         .r#type
@@ -356,8 +367,8 @@ fn make_query(text: &str, s: &SearchArgs) -> Result<Query> {
         types,
         by: s.by.clone(),
         include_dead: s.dead,
-        w_bm25: s.w_bm25,
-        c_bm25: s.c_bm25,
+        w_bm25: s.w_bm25.unwrap_or(0.15),
+        c_bm25: s.c_bm25.unwrap_or(20.0),
         vec_cand: None,
     })
 }
@@ -484,6 +495,21 @@ fn check_bits(bits: usize) -> Result<()> {
     Ok(())
 }
 
+/// The embedder for reranking with the CLI, checked as the library checks it: a compact block
+/// with prompt v2 vectors, an IR with dynamic shapes, and the self-check of the chain.
+fn rerank_embedder(eng: &Engine, m: &ModelArgs) -> Result<hnz::embed::Embedder> {
+    let ok = eng.block.as_ref().is_some_and(|b| b.manifest()["vec"]["prompt_version"].as_u64() == Some(2));
+    if !ok {
+        bail!("rerank no disponible: hace falta un bloque compacto con prompts v2");
+    }
+    let mut e = eng.embedder(&m.models, &m.ov_libs)?;
+    if !e.can_embed_docs() {
+        bail!("rerank no disponible: el embedder del bloque tiene formas fijas");
+    }
+    hnz::embed::check_chain(&mut e, &eng.embed_checks()?)?;
+    Ok(e)
+}
+
 /// `hnz eval --rerank`: P@k and MRR of reranked searches (P4) with several settings.
 fn cmd_eval_rerank(root: &Path, file: &Path, k: usize, m: &ModelArgs, emb: Option<&str>, months: Option<&str>, quick: bool) -> Result<()> {
     use hnz::rerank::{OracleEmbed, RerankCfg};
@@ -494,7 +520,7 @@ fn cmd_eval_rerank(root: &Path, file: &Path, k: usize, m: &ModelArgs, emb: Optio
     drop(qemb);
     // the document embedder: stored vectors (oracle:<base with {m}>) or the block's own (ov)
     let oracle: Box<dyn hnz::rerank::DocEmbed> = match emb {
-        Some("ov") => Box::new(std::sync::Mutex::new(eng.embedder(&m.models, &m.ov_libs)?)),
+        Some("ov") => Box::new(std::sync::Mutex::new(rerank_embedder(&eng, m)?)),
         Some(e) if e.starts_with("oracle:") => {
             let pat = &e["oracle:".len()..];
             let bases: Vec<PathBuf> = months.context("--months")?.split(',').map(|mm| PathBuf::from(pat.replace("{m}", mm.trim()))).collect();
@@ -524,7 +550,7 @@ fn cmd_eval_rerank(root: &Path, file: &Path, k: usize, m: &ModelArgs, emb: Optio
         let (mut p, mut mrr, mut dec, mut emb_n) = (0f64, 0f64, 0usize, 0usize);
         for (i, (text, story)) in qs.iter().enumerate() {
             let q = Query { text: text.clone(), ..tmpl.clone() };
-            let out = hnz::rerank::search(&eng, &q, &vecs[i], cfg, oracle.as_ref(), None)?;
+            let out = hnz::rerank::search(&eng, &q, &vecs[i], cfg, oracle.as_ref(), None, &|_| true)?;
             dec += out.report.decoded;
             emb_n += out.report.embedded;
             let (r, f) = score_hits(&eng, &out.hits, *story, k)?;
@@ -957,7 +983,11 @@ fn main() -> Result<()> {
             let t0 = Instant::now();
             let eng = Engine::open(&root, &m.models)?;
             let t_open = t0.elapsed();
-            let mut emb = if (s.rerank || q.mode != Mode::Keyword) && !text.trim().is_empty() { Some(eng.embedder(&m.models, &m.ov_libs)?) } else { None };
+            let mut emb = match (s.rerank, q.mode != Mode::Keyword && !text.trim().is_empty()) {
+                (true, _) if !text.trim().is_empty() => Some(rerank_embedder(&eng, &m)?),
+                (_, true) => Some(eng.embedder(&m.models, &m.ov_libs)?),
+                _ => None,
+            };
             let t_load = t0.elapsed();
             let t1 = Instant::now();
             let qv = match emb.as_mut() {
@@ -969,7 +999,15 @@ fn main() -> Result<()> {
             let (hits, prefixes) = match (s.rerank, &qv, emb) {
                 (true, Some(v), Some(e)) => {
                     let deadline = s.deadline_ms.map(|d| t2 + std::time::Duration::from_secs_f64(d / 1e3));
-                    let o = hnz::rerank::search(&eng, &q, v, &hnz::rerank::RerankCfg::default(), &std::sync::Mutex::new(e), deadline)?;
+                    let d = hnz::rerank::RerankCfg::default();
+                    let cfg = hnz::rerank::RerankCfg {
+                        w: s.w_bm25.unwrap_or(d.w),
+                        c: s.c_bm25.unwrap_or(d.c),
+                        kv: s.rerank_kv.unwrap_or(d.kv).clamp(1, 1000),
+                        embed_top: Some(s.rerank_top.or(d.embed_top).unwrap_or(50)),
+                        ..d
+                    };
+                    let o = hnz::rerank::search(&eng, &q, v, &cfg, &std::sync::Mutex::new(e), deadline, &|_| true)?;
                     eprintln!("[reordenado: {} candidatos, {} prefijos decodificados ({} tokens), {} re-embebidos; etapa 1 {:.0} ms, decodificación {:.0} ms, embebido y fusión {:.0} ms]{}",
                         o.report.candidates, o.report.decoded, o.report.tokens, o.report.embedded, o.report.ms_stage1, o.report.ms_decode, o.report.ms_embed,
                         o.warning.map(|w| format!(" aviso: {w}")).unwrap_or_default());
@@ -1002,7 +1040,13 @@ fn main() -> Result<()> {
         }
         Cmd::Serve { root, port, m } => {
             let eng = Engine::open(&root, &m.models)?;
-            let emb = std::sync::Mutex::new(eng.embedder(&m.models, &m.ov_libs)?);
+            // rerank like the library whenever the block allows it (P4)
+            let (emb, rerank) = match rerank_embedder(&eng, &m) {
+                Ok(e) => (e, true),
+                Err(e) if eng.block.is_some() && e.downcast_ref::<hnz::block::IncompatibleBlockError>().is_some() => return Err(e),
+                Err(_) => (eng.embedder(&m.models, &m.ov_libs)?, false),
+            };
+            let emb = std::sync::Mutex::new(emb);
             let server = tiny_http::Server::http(("127.0.0.1", port)).map_err(|e| anyhow::anyhow!("{e}"))?;
             eprintln!("hnz: {} docs en {} segmentos — http://127.0.0.1:{port}/", eng.total_docs, eng.segs.len());
             let json_hdr = || "Content-Type: application/json; charset=utf-8".parse::<tiny_http::Header>().unwrap();
@@ -1028,18 +1072,26 @@ fn main() -> Result<()> {
                             r#type: query_param(&url, "type").filter(|x| !x.is_empty()).map(|x| x.split(',').map(String::from).collect()).unwrap_or_default(),
                             by: query_param(&url, "by").filter(|x| !x.is_empty()),
                             dead: false,
-                            w_bm25: 0.15,
-                            c_bm25: 20.0,
+                            w_bm25: None,
+                            c_bm25: None,
                             full: query_param(&url, "full").is_some_and(|x| x == "1" || x == "true"),
                             deadline_ms: None,
+                            rerank_kv: None,
+                            rerank_top: None,
                         };
                         let q = make_query(&text, &s)?;
                         let t0 = Instant::now();
                         let qv = if q.mode != Mode::Keyword && !text.trim().is_empty() { Some(emb.lock().unwrap().embed_query(&text)?) } else { None };
                         let t_emb = t0.elapsed();
-                        let hits = eng.search(&q, qv.as_deref())?;
+                        let (hits, prefixes) = match (&qv, rerank) {
+                            (Some(v), true) => {
+                                let o = hnz::rerank::search(&eng, &q, v, &hnz::rerank::RerankCfg::default(), &emb, None, &|_| true)?;
+                                (o.hits, o.prefixes)
+                            }
+                            _ => (eng.search(&q, qv.as_deref())?, Default::default()),
+                        };
                         let t_s = t0.elapsed();
-                        let res = eng.fetch(&hits, s.full)?;
+                        let res = eng.fetch_with(&hits, s.full, &prefixes)?;
                         let t_all = t0.elapsed();
                         Ok(serde_json::to_string(&serde_json::json!({
                             "query": text, "k": q.k, "results": res,

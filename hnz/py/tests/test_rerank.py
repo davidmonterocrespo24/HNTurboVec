@@ -121,6 +121,52 @@ def test_deadline_degrades_but_answers(hn):
             hn.search(q, deadline_ms=bad)
 
 
+def test_fusion_parameters_reach_the_reranker(hn):
+    """w_bm25 / c_bm25 weigh BM25 in the reranked fusion too (None = its defaults 0.15 / 40)."""
+    q = 'postgres replication lag monitoring'
+    base = ids_scores(hn.search(q, k=10, raw=True))
+    assert ids_scores(hn.search(q, k=10, raw=True, w_bm25=0.15, c_bm25=40.0)) == base
+    assert any(ids_scores(hn.search(q, k=10, raw=True, w_bm25=w)) != base for w in (0.0, 2.0))
+    with pytest.raises(ValueError):
+        hn.search(q, w_bm25=-1.0)
+
+
+def test_reranking_progresses_under_query_and_get_streams(hn):
+    """Streams of query embeddings and of interactive LM decodes (get) slow a reranked search but
+    never stall it, and a deadline still bounds it."""
+    import threading
+    import time
+    ids = [h['id'] for h in hn.search('', k=300, since='2010-06-01', until='2010-06-03', raw=True)['results']]
+    stop = threading.Event()
+
+    def embeds():
+        while not stop.is_set():
+            hn.embed('a steady stream of query embeddings')
+
+    def gets():
+        for i in ids:
+            if stop.is_set():
+                return
+            hn.get(i)
+
+    ts = [threading.Thread(target=f) for f in (embeds, embeds, gets)]
+    for t in ts:
+        t.start()
+    try:
+        t0 = time.perf_counter()
+        r = hn.search('database index structures like btrees and lsm trees', k=10, raw=True, deadline_ms=4000)
+        assert len(r['results']) == 10
+        assert time.perf_counter() - t0 < 6.0
+        t0 = time.perf_counter()
+        r = hn.search('garbage collectors in managed runtimes', k=10, raw=True)
+        assert len(r['results']) == 10 and r['rerank']['degraded'] is None
+        assert time.perf_counter() - t0 < 60.0
+    finally:
+        stop.set()
+        for t in ts:
+            t.join()
+
+
 def test_filters_hold(hn):
     r = hn.search(QUERIES[0], k=20, types='comment', since='2015-06-10', until='2015-06-20')
     assert len(r) > 0

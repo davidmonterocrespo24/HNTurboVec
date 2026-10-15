@@ -129,6 +129,11 @@ struct Waiting {
 /// Bulk jobs a waiting bulk job lets pass before nothing younger is admitted ahead of it.
 const MAX_WAIT_STEPS: u64 = 64;
 
+/// While interactive sequences run, the bulk ones sit out the steps, but never for longer than
+/// this: then they take part in one step. A long interactive decode, or a stream of them, slows
+/// the reranker's prefixes without stopping them (the interactive ones keep >= ~2/3 of their speed).
+const BULK_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
+
 fn serve(codec: &LmCodec, pool: u64, rx: mpsc::Receiver<Msg>) {
     let _fp = super::fpenv::FpGuard::new();
     let mut run = Runner::new(codec, pool);
@@ -137,6 +142,7 @@ fn serve(codec: &LmCodec, pool: u64, rx: mpsc::Receiver<Msg>) {
     let mut next_id = 0u64;
     let mut admitted = 0u64;
     let mut scratch: Option<super::math::ScratchRelease> = None;
+    let mut paused_since: Option<std::time::Instant> = None;
     let deliver = |subs: &mut HashMap<u64, Sub>, tag: u64, r: Result<Decoded>| {
         let id = tag >> 32;
         if let Some(s) = subs.get_mut(&id) {
@@ -241,9 +247,15 @@ fn serve(codec: &LmCodec, pool: u64, rx: mpsc::Receiver<Msg>) {
         if scratch.is_none() {
             scratch = Some(super::math::ScratchRelease);
         }
-        // one step: only the interactive sequences while there are any
+        // one step: only the interactive sequences while there are any, but the bulk ones join
+        // one step after BULK_PAUSE
         let any_i = run.running.iter().any(|s| s.interactive);
-        let pick = move |s: &Seq| !any_i || s.interactive;
+        let any_b = run.running.iter().any(|s| !s.interactive);
+        let only_i = any_i && any_b && paused_since.get_or_insert_with(std::time::Instant::now).elapsed() < BULK_PAUSE;
+        if !only_i {
+            paused_since = None;
+        }
+        let pick = move |s: &Seq| !only_i || s.interactive;
         match catch_unwind(AssertUnwindSafe(|| run.step(true, &pick))) {
             Ok(done) => {
                 for (tag, r) in done {

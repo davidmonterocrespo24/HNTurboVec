@@ -4,7 +4,9 @@ state (a laptop's clocks and temperature drift between runs of a whole setting).
 For each eval query, `hnz search --rerank` runs once with each binary (in alternating order), each
 in a new process; prints the medians of search time, decoding, wait after decoding and documents
 embedded, and the median of the paired differences.
-Usage: python experimentos/bench_ab_latency.py A.exe B.exe [n_queries] [block]
+Usage: python experimentos/bench_ab_latency.py A B [n_queries] [block]
+A and B: an hnz.exe, optionally followed by extra search arguments after a '|'
+(e.g. "work/bin/hnz.exe|--rerank-kv 60 --rerank-top 40").
 """
 import json
 import os
@@ -16,7 +18,13 @@ import sys
 import hnz
 
 sys.stdout.reconfigure(line_buffering=True)
-A, B = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
+
+def spec(s):
+    exe, _, extra = s.partition('|')
+    return os.path.abspath(exe), extra.split()
+
+
+(A, A_ARGS), (B, B_ARGS) = spec(sys.argv[1]), spec(sys.argv[2])
 N = int(sys.argv[3]) if len(sys.argv) > 3 else 30
 BLOCK = os.path.abspath(sys.argv[4] if len(sys.argv) > 4 else 'work/p3/hn-sample-v3.hnz')
 qs = []
@@ -27,8 +35,8 @@ qs = qs[:N]
 env = dict(os.environ, HNZ_OV_LIBS=hnz._ov_libs() or '')
 
 
-def run(exe, q):
-    r = subprocess.run([exe, 'search', '--root', BLOCK, '--rerank', '--json', '-k', '10', q], env=env,
+def run(exe, extra, q):
+    r = subprocess.run([exe, 'search', '--root', BLOCK, '--rerank', '--json', '-k', '10', *extra, q], env=env,
                        capture_output=True, text=True, encoding='utf-8')
     m1 = re.search(r'(\d+) re-embebidos; etapa 1 (\d+) ms, decodificación (\d+) ms, embebido y fusión (\d+) ms', r.stderr)
     m2 = re.search(r'búsqueda ([\d.]+) ms', r.stderr)
@@ -43,12 +51,12 @@ for i, q in enumerate(qs):
     order = ('A', 'B') if i % 2 == 0 else ('B', 'A')
     got = {}
     for w in order:
-        got[w] = run(A if w == 'A' else B, q)
+        got[w] = run(*((A, A_ARGS) if w == 'A' else (B, B_ARGS)), q)
     if got['A']['out'] != got['B']['out']:
         print(f'results differ: {q}')
     for w in 'AB':
         res[w].append(got[w])
-print(f'{len(qs)} queries, cold, interleaved; A = {os.path.basename(A)}, B = {os.path.basename(B)}')
+print(f'{len(qs)} queries, cold, interleaved; A = {os.path.basename(A)} {" ".join(A_ARGS)}, B = {os.path.basename(B)} {" ".join(B_ARGS)}')
 for key in ('search', 'decode', 'tail', 'embedded'):
     a = [r[key] for r in res['A']]
     b = [r[key] for r in res['B']]

@@ -987,9 +987,11 @@ the multi-day all-HN runs (P5) start after P3.
 |---|---|---|---|
 | 2024-01 | 0.281 / 0.574 | 0.282 / 0.573 | 0.229 (the same) |
 | 2010-06 | 0.194 / 0.466 | 0.193 / 0.465 | 0.152 (the same) |
-| 2015-06 | (run stopped; repeated below) | 0.241 / 0.493 | 0.187 |
+| 2015-06 | 0.243 / 0.492 | 0.241 / 0.493 | 0.187 (the same) |
+| **mean** | **0.239** | 0.239 | 0.189 |
   Within the plan's ±0.003 per month: re-embedding on the CPU with the int8 dynamic IR gives the
-  quality of the fp16 vectors computed on the iGPU at pack time.
+  quality of the fp16 vectors computed on the iGPU at pack time. (The 2015 month had in fact
+  finished before the system stopped the run; a repeat started later was stopped as redundant.)
 - **E33e step 4 — cold latency on a free machine** (`experimentos/bench_p4_latency.py` →
   `resultados/results_e33e_latency.txt`): 20 eval queries, each in a new `hnz search --rerank`
   process (hnz's caches empty, the OS file cache warm, model loading not counted), k = 10, sample
@@ -1084,3 +1086,41 @@ the multi-day all-HN runs (P5) start after P3.
     8 concurrent reranks = sequential, results reusing the prefixes, the deadline's two degraded
     paths, filters). One assertion was out of date: since the overlap, `embedded` counts the
     speculative embeddings too (64 for a query that needs 50), so the test now asks for >= 50.
+- **E33e step 1b — fewer vector candidates** (`hnz eval --rerank` with the stored v2 vectors, the
+  same 900 queries → `resultados/results_e33e_kv.txt`): fewer candidates mean fewer prefixes to
+  decode, and decoding is ~78 % of a cold query. P@10 / MRR:
+| Setting | 2024-01 | 2010-06 | 2015-06 | mean P@10 | prefixes decoded |
+|---|---|---|---|---|---|
+| kv 100 + 20 rare, cascade 50 (default) | 0.282 / 0.573 | 0.193 / 0.465 | 0.241 / 0.493 | 0.2387 | ~96 |
+| kv 80 + 20, cascade 50 | 0.279 / 0.573 | 0.193 / 0.466 | 0.242 / 0.493 | 0.2380 | ~80 |
+| **kv 60 + 20, cascade 40** | 0.281 / 0.574 | 0.193 / 0.467 | 0.243 / 0.496 | **0.2390** | ~65 |
+  **60 vector candidates with a cascade of 40 give the same quality as 100 with 50** (every month
+  within ±0.002, MRR equal or better): the vector candidates ranked 61-100 by the 256-bit codes
+  almost never reach the top 10 after reranking. That cuts the decoded prefixes by about a third
+  and the re-embedded ones by a fifth; its latency is measured in step 4c.
+- **P4 adversarial review** (workflow of 8 agents, read-only: one reviewer per dimension —
+  concurrency, ranking, memory, errors — and one skeptic per dimension trying to refute each
+  finding): **18 confirmed (15 distinct after merging duplicates), 2 refuted.** All fixed:
+| # | Finding | Fix |
+|---|---|---|
+| 1 | The embedder thread answered every query arriving while it worked before any document round: a steady stream of `embed()` calls could stall a rerank forever, deadline included | it answers only the queries queued at that moment, then runs one round |
+| 2 | Past the deadline, a search still waited for its in-flight document job, queued behind other searches' jobs | the worker's wait stops at the deadline (`DocEmbed::embed_until`); the job is flagged and the embedder drops it |
+| 3 | The deadline did not bound the wait for an admission turn | `Admission::enter_until`: the wait gives up at the deadline (`BusyError`, saying so) |
+| 4 | While any interactive LM sequence ran (a long `get()`), the reranker's prefixes were not stepped at all | after 100 ms of interactive-only steps, the bulk sequences join one step |
+| 5 | `w_bm25` / `c_bm25` were ignored by the reranker | optional everywhere (None = the defaults: 0.15 / 20 in stage 1, 0.15 / 40 reranked) and passed to the reranker |
+| 6 | Vector mode at an embedding deadline was ordered with a word bonus | in vector mode R0 = s1 |
+| 7 | Reranked searches declared stage 1's memory for k, not for 100 candidates, and widened without asking the turn | the turn declares the reranker's first round plus ~8 KiB per candidate; widening asks it (`grow`) |
+| 8 | Cached prefixes kept a doubled buffer but were weighed by length | buffer shrunk; weight = capacity + 128 B |
+| 9 | With several embedding streams, only one was warmed at the longest shape when measured | every stream warmed at [1, 256] |
+| 10 | One LM service per model, each with the whole LM pool (several LM models = several pools) | each service gets its share; the planner's minimum is the sum |
+| 11 | `text/prefix_fallback` was charged but not in the planner's fixed bytes | counted in `fixed_bytes` |
+| 12 | The self-check's threshold assumed 256 compared signs | a rate (12.5 % of the compared signs) |
+| 13 | `--deadline-ms nan` (or negative, infinite) panicked in the CLI | validated as in the library |
+| 14 | The CLI reranked without the library's checks (prompt v2, dynamic IR, self-check); a folder without segments panicked; `hnz serve` never reranked | `rerank_embedder` shared check; `segs.first()`; `serve` reranks when the block allows it |
+| 15 | Records stored with zstd came back as a prefix snippet when reranked (whole without reranking) | their stored prefix only gives features; the text comes whole from zstd |
+  Refuted: a panic inside `finish()` (nothing in it can panic) and the self-check skipped for lack
+  of canaries with vectors (pack requires a vector for every prompt). Checks after the fixes: Rust
+  32 tests; 12 CLI searches with identical ids and scores before and after; `test_rerank.py`
+  **11 passed** (5.6 min, without the memory soak), including two new tests: the fusion parameters
+  change the reranked order, and a rerank keeps progressing (and meets its deadline) while two
+  threads call `embed()` in a loop and a third decodes 300 records with `get()`.

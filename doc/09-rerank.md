@@ -27,6 +27,12 @@ A cold search of a compact block (hybrid mode, the default):
 6. **Results** reuse the decoded prefixes: a record that fits in its prefix (~84 % of them) comes
    back whole, the others as the same 64-token snippet as before.
 
+The shared LM service steps interactive work (results' snippets, `get()`) first and pauses the
+reranker's prefixes meanwhile, but never for more than 100 ms in a row: then the prefixes take
+part in one step, so a long `get()` or a stream of them slows a reranked search without stalling it.
+The embedder's thread answers the queries queued at each moment and then runs one round of
+documents, so a stream of `embed()` calls cannot hold the reranking back either.
+
 Other modes:
 - **Vector:** the 100 vector candidates, all re-embedded, by cosine.
 - **Keyword:** if every query word is rare, the P3 path (exhaustive postings). If one is frequent
@@ -62,7 +68,10 @@ the call (the CLI: of the start of the search), the user's decision: no deadline
   order; `rerank.degraded = "embed"` and a warning. That order is better than stage 1's (P@10
   0.217 vs 0.211 in E33e).
 - The prefixes decoded before the deadline stay in the cache, so a repeated query goes further.
-- Fetching the k results' text comes after the deadline (its own cost, ~40-60 ms cold).
+- Waiting for an admission turn also ends at the deadline, with `BusyError` (no answer can be
+  computed without a turn).
+- Not interrupted: the first semantic search's load of the embedder (seconds; `preload=True` does
+  it at open) and fetching the k results' text after the reranking (~40-60 ms cold).
 
 ## Self-check of the embedding chain
 
@@ -83,6 +92,10 @@ mean is reported as `memory()["embedder"]["measured"]["check_flips"]`. It costs 
   `ValueError` if it cannot; `rerank=False` gives the P3 results. The response reports
   `rerank: {candidates, decoded, tokens, embedded, ms_stage1, ms_decode, ms_embed}` and, in keyword
   mode with frequent words, `warning`. CLI: `hnz search --rerank`, `hnz eval --rerank`.
+- `w_bm25`, `c_bm25` (optional): BM25's weight and saturation in the final fusion
+  `cos + w·b/(b + c)` (None: 0.15 and 40; stage 1 without reranking: 0.15 and 20).
+- CLI: `hnz search --rerank [--deadline-ms N] [--rerank-kv N] [--rerank-top N]` (the same checks as
+  the library: prompt v2, dynamic IR, self-check); `hnz serve` reranks whenever the block allows it.
 - `HNZ_EMBED_STREAMS` (default 1): documents embedded at the same time; the embedder's memory
   reservation grows by 64 MiB per stream. More than 1 was slower on the measured laptop (below).
 - `HNZ_EMBED_THREADS`, `HNZ_EMBED_CORES` (`ANY_CORE`, `PCORE_ONLY`, `ECORE_ONLY`): the embedder's
@@ -103,7 +116,19 @@ mean is reported as `memory()["embedder"]["measured"]["check_flips"]`. It costs 
 
 Quality gate (user's decision): mean >= 0.235 and every month >= today − 0.02: **met** (with the
 stored document vectors standing in for re-embedding). With the real CPU re-embedding (E33e step
-3): 2024-01 0.281 (stored vectors: 0.282), 2010-06 0.194 (0.193); keyword search identical.
+3): 2024-01 0.281 (stored vectors: 0.282), 2010-06 0.194 (0.193), 2015-06 0.243 (0.241), mean
+0.239; keyword search identical.
+
+Fewer vector candidates (E33e step 1b, stored vectors):
+
+| Setting | 2024-01 | 2010-06 | 2015-06 | mean | prefixes decoded |
+|---|---|---|---|---|---|
+| kv 100 + 20 rare, cascade 50 (default) | 0.282 | 0.193 | 0.241 | 0.2387 | ~96 |
+| kv 80 + 20, cascade 50 | 0.279 | 0.193 | 0.242 | 0.2380 | ~80 |
+| kv 60 + 20, cascade 40 | 0.281 | 0.193 | 0.243 | 0.2390 | ~65 |
+
+60 vector candidates with a cascade of 40 keep the quality of 100 with 50 and decode about a third
+fewer prefixes.
 
 ## Latency (cold, sample block)
 

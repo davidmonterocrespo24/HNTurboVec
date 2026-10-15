@@ -190,7 +190,7 @@ class Archive:
                until: Optional[DateLike] = None, types: Union[str, Iterable[str], None] = None,
                author: Optional[str] = None, mode: Literal['hybrid', 'vector', 'keyword'] = 'hybrid',
                text: Literal['snippet', 'full'] = 'snippet', include_dead: bool = False, raw: bool = False,
-               w_bm25: float = 0.15, c_bm25: float = 20.0, rerank: Optional[bool] = None,
+               w_bm25: Optional[float] = None, c_bm25: Optional[float] = None, rerank: Optional[bool] = None,
                deadline_ms: Optional[float] = None) -> Union[SearchResult, dict]:
         """Searches all of HN (or the range [since, until], both inclusive: "2015", "2015-06", a date,
         or a datetime for an exact instant in UTC).
@@ -199,6 +199,8 @@ class Archive:
         - `types`: "story", "comment", "job", "poll", "pollopt" (one or several).
         - `text="full"`: full text also for items of the LM-compressed tier (slower).
         - `raw=True`: returns the JSON dict as is (the same format as the HTTP server).
+        - `w_bm25`, `c_bm25`: BM25's weight and saturation in the fusion `vector + w·b/(b + c)`;
+          None = the defaults (0.15 / 20 in stage 1, 0.15 / 40 when reranked).
         - `rerank` (compact blocks with an embedder of dynamic shapes): rerank the candidates by
           their prefix (P4); None = whenever possible.
         - `deadline_ms` (opt-in): answer within this many milliseconds from the call. A reranking
@@ -216,7 +218,8 @@ class Archive:
         req = {'query': query or '', 'k': int(k), 'since': since_s, 'until': until_s,
                'since_ts': since_ts, 'until_ts': until_ts,
                'types': list(types or []), 'author': author, 'mode': mode, 'full': text == 'full',
-               'include_dead': bool(include_dead), 'w_bm25': float(w_bm25), 'c_bm25': float(c_bm25),
+               'include_dead': bool(include_dead),
+               'w_bm25': None if w_bm25 is None else float(w_bm25), 'c_bm25': None if c_bm25 is None else float(c_bm25),
                'rerank': rerank, 'deadline_ms': None if deadline_ms is None else float(deadline_ms)}
         d = json.loads(self._live().search_json(json.dumps(req)))
         if raw:
