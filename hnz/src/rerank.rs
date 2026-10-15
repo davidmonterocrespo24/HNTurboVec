@@ -95,7 +95,7 @@ impl DocEmbed for OracleEmbed {
 impl DocEmbed for std::sync::Mutex<crate::embed::Embedder> {
     fn embed(&self, docs: &[(u32, String)]) -> Result<Vec<Vec<f32>>> {
         let mut e = self.lock().unwrap_or_else(|p| p.into_inner());
-        docs.iter().map(|d| e.embed_doc(&d.1)).collect()
+        e.embed_docs(&docs.iter().map(|d| d.1.clone()).collect::<Vec<_>>())
     }
 }
 
@@ -116,7 +116,9 @@ pub struct Report {
     pub tokens: u64,
     pub embedded: usize,
     pub ms_stage1: f64,
+    /// until the last prefix is decoded (re-embedding overlaps it)
     pub ms_decode: f64,
+    /// waiting for the re-embedding after the last prefix
     pub ms_embed: f64,
 }
 
@@ -141,6 +143,12 @@ fn ms(t: Instant) -> f64 {
 }
 
 /// A reranked search of a block (see the module doc). `qvec`: the query's embedding.
+///
+/// Decoding and re-embedding overlap: each candidate's features are computed as soon as its
+/// prefix is there, and a candidate whose R0 is already among the `embed_top` best lower bounds
+/// (R0 when known, s1 while it is being decoded: b >= 0) is embedded at once, while the LM
+/// decodes the rest. The final choice uses every R0, so the result never depends on timing; at
+/// worst a few speculative embeddings are wasted.
 pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn DocEmbed) -> Result<Outcome> {
     let t0 = Instant::now();
     let k = q.k.clamp(1, MAX_K);
@@ -158,56 +166,14 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
         Mode::Hybrid => cfg.kb,
     };
     let cands = eng.candidates(q, Some(qvec), &rare, cfg.kv, kb, &|_| true)?;
-    let mut report = Report { candidates: cands.len(), ms_stage1: ms(t0), ..Default::default() };
-
-    // prefixes: the stored ones of LM-less records, the rest decoded by the shared LM service
-    let t1 = Instant::now();
+    let n = cands.len();
+    let mut report = Report { candidates: n, ms_stage1: ms(t0), ..Default::default() };
     let sg = &eng.segs[0];
     let TextSource::Lm(lm) = &sg.s.text else { bail!("el reordenado necesita un bloque compacto") };
-    let mut prefixes: HashMap<u32, std::sync::Arc<Prefix>> = HashMap::new();
-    let mut texts: HashMap<u32, String> = HashMap::new();
-    let (mut jobs, mut job_doc) = (Vec::new(), Vec::new());
-    {
-        let mut cache = eng.prefixes.lock().unwrap_or_else(|e| e.into_inner());
-        for c in &cands {
-            if let Some(p) = cache.get(&c.doc) {
-                prefixes.insert(c.doc, p);
-            }
-        }
-    }
-    for c in &cands {
-        if prefixes.contains_key(&c.doc) {
-            continue;
-        }
-        if let Some((flags, p)) = eng.fallback_prefix(c.doc) {
-            prefixes.insert(c.doc, std::sync::Arc::new(Prefix { bytes: p.as_bytes().to_vec(), flags, complete: false, snippet_end: p.len() }));
-            continue;
-        }
-        jobs.push(Job { rec: lm.raw(c.doc as usize)?.into_owned(), has_check: lm.rec_check(), want: Want::Prefix { body: PREFIX_TOKENS, mark: SNIPPET_TOKENS } });
-        job_doc.push(c.doc);
-    }
-    report.decoded = jobs.len();
-    let dec = if jobs.is_empty() { Vec::new() } else { eng.lm_service("block")?.run(jobs, Prio::Bulk)? };
-    for (&d, r) in job_doc.iter().zip(dec) {
-        match r {
-            Decoded::Prefix(p) => {
-                report.tokens += p.tokens as u64;
-                let p = std::sync::Arc::new(Prefix { bytes: p.bytes, flags: p.flags, complete: p.complete, snippet_end: p.snippet_end });
-                eng.prefixes.lock().unwrap_or_else(|e| e.into_inner()).put(d, p.clone());
-                prefixes.insert(d, p);
-            }
-            // an empty record, or a zstd record without a vector: BM25 over its whole text
-            Decoded::Text(t, _) => {
-                texts.insert(d, crate::segment::index_text(&t.title, &t.url, &t.text));
-            }
-        }
-    }
-    report.ms_decode = ms(t1);
-
-    // b over each prefix (every query word, global idf, the document's full-length norm), R0
     let bm = sg.bm25.as_ref().context("el bloque no tiene índice de palabras")?;
+
+    // keyword mode: a rare word counts once in a document of its postings, even past the prefix
     let in_rare: Vec<Vec<bool>> = if q.mode == Mode::Keyword {
-        // keyword mode: a rare word counts once in a document of its postings, even past the prefix
         let mut sorted: Vec<u32> = cands.iter().map(|c| c.doc).collect();
         sorted.sort_unstable();
         let pos: HashMap<u32, usize> = sorted.iter().enumerate().map(|(i, &d)| (d, i)).collect();
@@ -215,7 +181,7 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
             .iter()
             .map(|t| {
                 if t.post == TermPost::Frequent {
-                    return Ok(vec![false; cands.len()]);
+                    return Ok(vec![false; n]);
                 }
                 let s = bm.score_docs(&[(t.post, t.idf)], &sorted)?;
                 Ok(cands.iter().map(|c| s[pos[&c.doc]] > 0.0).collect())
@@ -224,43 +190,159 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
     } else {
         Vec::new()
     };
-    let feats: Vec<Feat> = cands
-        .iter()
-        .enumerate()
-        .map(|(ci, c)| {
-            let (text, prompt) = match prefixes.get(&c.doc) {
-                Some(p) => {
-                    let s = prefix_string(&p.bytes);
-                    let mut parts = s.splitn(3, '\n');
-                    let (title, url, body) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-                    let host = url.split("://").nth(1).unwrap_or("").split('/').next().unwrap_or("");
-                    (format!("{title} {host} {}", body_text(body, p.flags as u64)), c.has_vec.then(|| doc_prompt(&s, p.flags as u64)))
+    // a candidate's features from its prefix (or, without one, the whole text of its record):
+    // b = BM25 of every query word over that text, R0, and its document prompt
+    let feat_of = |ci: usize, p: Option<&Prefix>, whole: Option<&str>| -> Feat {
+        let c = &cands[ci];
+        let (text, prompt) = match p {
+            Some(p) => {
+                let s = prefix_string(&p.bytes);
+                let mut parts = s.splitn(3, '\n');
+                let (title, url, body) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+                let host = url.split("://").nth(1).unwrap_or("").split('/').next().unwrap_or("");
+                (format!("{title} {host} {}", body_text(body, p.flags as u64)), c.has_vec.then(|| doc_prompt(&s, p.flags as u64)))
+            }
+            None => (whole.unwrap_or("").to_string(), None),
+        };
+        let mut tf: HashMap<&str, u32> = HashMap::new();
+        for w in crate::tokenize::terms(&text) {
+            if let Some(t) = terms.iter().find(|t| t.text == w) {
+                *tf.entry(t.text.as_str()).or_default() += 1;
+            }
+        }
+        let mut b = 0f32;
+        for (ti, t) in terms.iter().enumerate() {
+            let mut m = tf.get(t.text.as_str()).copied().unwrap_or(0);
+            if q.mode == Mode::Keyword && m == 0 && in_rare[ti][ci] {
+                m = 1;
+            }
+            if m > 0 {
+                b += bm.score_tf(t.idf, m, c.doc);
+            }
+        }
+        Feat { doc: c.doc, s1: c.s1, b, r0: c.s1 + cfg.r0_w * b / (b + cfg.r0_c), prompt }
+    };
+
+    // prefixes: cached, stored (LM-less records), or decoded by the shared LM service
+    let t1 = Instant::now();
+    let mut prefixes: HashMap<u32, std::sync::Arc<Prefix>> = HashMap::new();
+    let mut feats: Vec<Option<Feat>> = (0..n).map(|_| None).collect();
+    let (mut jobs, mut job_ci) = (Vec::new(), Vec::new());
+    {
+        let mut cache = eng.prefixes.lock().unwrap_or_else(|e| e.into_inner());
+        for (ci, c) in cands.iter().enumerate() {
+            if let Some(p) = cache.get(&c.doc) {
+                prefixes.insert(c.doc, p);
+            } else if let Some((flags, p)) = eng.fallback_prefix(c.doc) {
+                prefixes.insert(c.doc, std::sync::Arc::new(Prefix { bytes: p.as_bytes().to_vec(), flags, complete: false, snippet_end: p.len() }));
+            } else {
+                continue;
+            }
+            feats[ci] = Some(feat_of(ci, prefixes.get(&c.doc).map(|p| p.as_ref()), None));
+        }
+    }
+    for (ci, c) in cands.iter().enumerate() {
+        if feats[ci].is_none() {
+            jobs.push(Job { rec: lm.raw(c.doc as usize)?.into_owned(), has_check: lm.rec_check(), want: Want::Prefix { body: PREFIX_TOKENS, mark: SNIPPET_TOKENS } });
+            job_ci.push(ci);
+        }
+    }
+    report.decoded = jobs.len();
+    let n_e = match q.mode {
+        Mode::Vector => n,
+        Mode::Hybrid => cfg.embed_top.unwrap_or(n).min(n),
+        Mode::Keyword => 0,
+    };
+    let ids: Vec<u32> = cands.iter().map(|c| sg.s.meta.try_row(c.doc as usize).map(|r| r.id)).collect::<Result<_>>()?;
+    let embedded: HashMap<usize, Vec<f32>> = std::thread::scope(|sc| -> Result<HashMap<usize, Vec<f32>>> {
+        // the embedding worker: candidates as they are sent, a few at a time
+        let (tx, rx) = std::sync::mpsc::channel::<(usize, (u32, String))>();
+        let worker = (n_e > 0).then(|| {
+            sc.spawn(move || -> Result<Vec<(usize, Vec<f32>)>> {
+                let mut out = Vec::new();
+                while let Ok(first) = rx.recv() {
+                    let mut buf = vec![first];
+                    while buf.len() < 8 {
+                        match rx.try_recv() {
+                            Ok(x) => buf.push(x),
+                            Err(_) => break,
+                        }
+                    }
+                    let vecs = emb.embed(&buf.iter().map(|b| b.1.clone()).collect::<Vec<_>>())?;
+                    out.extend(buf.into_iter().map(|b| b.0).zip(vecs));
                 }
-                None => (texts.get(&c.doc).cloned().unwrap_or_default(), None),
-            };
-            let mut tf: HashMap<&str, u32> = HashMap::new();
-            let words = crate::tokenize::terms(&text);
-            for w in &words {
-                if let Some(t) = terms.iter().find(|t| t.text == *w) {
-                    *tf.entry(t.text.as_str()).or_default() += 1;
+                Ok(out)
+            })
+        });
+        let mut sent = vec![false; n];
+        // send every decoded candidate whose R0 is among the n_e best lower bounds
+        let speculate = |feats: &[Option<Feat>], sent: &mut [bool]| {
+            if n_e == 0 {
+                return;
+            }
+            let mut lb: Vec<f32> = (0..n).map(|i| feats[i].as_ref().map_or(cands[i].s1, |f| f.r0)).collect();
+            let theta = *lb.select_nth_unstable_by(n_e - 1, |a, b| b.total_cmp(a)).1;
+            for i in 0..n {
+                if let (false, Some(f)) = (sent[i], &feats[i]) {
+                    if f.r0 >= theta {
+                        if let Some(p) = &f.prompt {
+                            let _ = tx.send((i, (ids[i], p.clone())));
+                        }
+                        sent[i] = true;
+                    }
                 }
             }
-            let mut b = 0f32;
-            for (ti, t) in terms.iter().enumerate() {
-                let mut n = tf.get(t.text.as_str()).copied().unwrap_or(0);
-                if q.mode == Mode::Keyword && n == 0 && in_rare[ti][ci] {
-                    n = 1;
-                }
-                if n > 0 {
-                    b += bm.score_tf(t.idf, n, c.doc);
-                }
+        };
+        speculate(&feats, &mut sent);
+        if !jobs.is_empty() {
+            let ticket = eng.lm_service("block")?.submit(jobs, Prio::Bulk);
+            for _ in 0..ticket.n {
+                let (j, r) = ticket.recv().context("el decodificador LM se detuvo")?;
+                let ci = job_ci[j];
+                let d = cands[ci].doc;
+                feats[ci] = Some(match r? {
+                    Decoded::Prefix(p) => {
+                        report.tokens += p.tokens as u64;
+                        let p = std::sync::Arc::new(Prefix { bytes: p.bytes, flags: p.flags, complete: p.complete, snippet_end: p.snippet_end });
+                        eng.prefixes.lock().unwrap_or_else(|e| e.into_inner()).put(d, p.clone());
+                        let f = feat_of(ci, Some(&p), None);
+                        prefixes.insert(d, p);
+                        f
+                    }
+                    // an empty record, or a zstd record without a vector: BM25 over its whole text
+                    Decoded::Text(t, _) => feat_of(ci, None, Some(&crate::segment::index_text(&t.title, &t.url, &t.text))),
+                });
+                speculate(&feats, &mut sent);
             }
-            Feat { doc: c.doc, s1: c.s1, b, r0: c.s1 + cfg.r0_w * b / (b + cfg.r0_c), prompt }
-        })
-        .collect();
+        }
+        report.ms_decode = ms(t1);
+        let t_tail = Instant::now();
+        // the final choice: the top n_e by R0, embedding those not sent yet
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| {
+            let (fa, fb) = (feats[a].as_ref().unwrap(), feats[b].as_ref().unwrap());
+            fb.r0.total_cmp(&fa.r0).then(fb.doc.cmp(&fa.doc))
+        });
+        for &i in &order[..n_e] {
+            if !sent[i] {
+                if let Some(p) = &feats[i].as_ref().unwrap().prompt {
+                    let _ = tx.send((i, (ids[i], p.clone())));
+                }
+                sent[i] = true;
+            }
+        }
+        drop(tx);
+        let got = match worker {
+            Some(w) => w.join().map_err(|_| anyhow::anyhow!("fallo interno al embeber documentos"))??,
+            None => Vec::new(),
+        };
+        report.ms_embed = ms(t_tail);
+        Ok(got.into_iter().collect())
+    })?;
+    report.embedded = embedded.len();
+    let feats: Vec<Feat> = feats.into_iter().map(|f| f.expect("every candidate has its features")).collect();
 
     // the final order
-    let t2 = Instant::now();
     let desc = |a: f32, b: f32, da: u32, db: u32| b.total_cmp(&a).then(db.cmp(&da));
     let mut scored: Vec<(u32, f32, f32, f32)> = Vec::new(); // (doc, score, v, b)
     let mut warning = None;
@@ -272,26 +354,15 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
             warning = Some("las palabras frecuentes solo se buscan entre los documentos más cercanos a la consulta, en su comienzo".to_string());
         }
         Mode::Vector | Mode::Hybrid => {
-            let mut order: Vec<usize> = (0..feats.len()).collect();
+            let mut order: Vec<usize> = (0..n).collect();
             order.sort_by(|&a, &b| desc(feats[a].r0, feats[b].r0, feats[a].doc, feats[b].doc));
-            let n_e = if q.mode == Mode::Vector { order.len() } else { cfg.embed_top.unwrap_or(order.len()).min(order.len()) };
             let (top, rest) = order.split_at(n_e);
-            let ids: Vec<(usize, (u32, String))> = top
-                .iter()
-                .filter_map(|&i| Some((i, (sg.s.meta.try_row(feats[i].doc as usize).ok()?.id, feats[i].prompt.clone()?))))
-                .collect();
-            let vecs = emb.embed(&ids.iter().map(|x| x.1.clone()).collect::<Vec<_>>())?;
-            report.embedded = ids.len();
-            let mut cos: HashMap<usize, f32> = HashMap::new();
-            for ((i, _), v) in ids.iter().zip(&vecs) {
-                cos.insert(*i, v.iter().zip(qvec).map(|(a, b)| a * b).sum());
-            }
             let w = if q.mode == Mode::Vector { 0.0 } else { cfg.w };
             let mut head: Vec<(u32, f32, f32, f32)> = top
                 .iter()
                 .map(|&i| {
                     let f = &feats[i];
-                    let c = cos.get(&i).copied().unwrap_or(0.0);
+                    let c = embedded.get(&i).map_or(0.0, |v| v.iter().zip(qvec).map(|(a, b)| a * b).sum());
                     (f.doc, c + w * f.b / (f.b + cfg.c), c, f.b)
                 })
                 .collect();
@@ -300,7 +371,6 @@ pub fn search(eng: &Engine, q: &Query, qvec: &[f32], cfg: &RerankCfg, emb: &dyn 
             scored.extend(rest.iter().map(|&i| (feats[i].doc, feats[i].r0, feats[i].s1, feats[i].b)));
         }
     }
-    report.ms_embed = ms(t2);
     let mut hits: Vec<Hit> = scored.into_iter().map(|(doc, score, v, b)| Hit { seg: 0, doc, score, v, b }).collect();
     // beyond the candidates: stage 1's order
     if hits.len() < k && q.mode != Mode::Keyword {

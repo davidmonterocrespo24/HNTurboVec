@@ -538,8 +538,9 @@ impl Archive {
                 }
                 let Some(job) = docs.front_mut() else { continue };
                 if job.1.len() < job.0.len() {
-                    match emb.embed_doc(&job.0[job.1.len()]) {
-                        Ok(v) => job.1.push(v),
+                    let end = (job.1.len() + 4).min(job.0.len());
+                    match emb.embed_docs(&job.0[job.1.len()..end]) {
+                        Ok(v) => job.1.extend(v),
                         Err(e) => {
                             let (_, _, reply) = docs.pop_front().unwrap();
                             let _ = reply.send(Err(e));

@@ -12,6 +12,8 @@ pub use crate::prompt::QUERY_PROMPT;
 pub struct Embedder {
     // orden de campos = orden de destrucción (request antes que el modelo y el core)
     req: InferRequest,
+    /// more requests for documents, run at the same time (one per CPU stream)
+    doc_reqs: Vec<InferRequest>,
     _model: CompiledModel,
     _core: Core,
     tok: Tokenizer,
@@ -77,11 +79,17 @@ impl Embedder {
         // f32 everywhere: the CPU plugin would choose bf16 on AMX servers, and the vectors must
         // not depend on the machine
         core.set_property(&DeviceType::CPU, &RwPropertyKey::Other("INFERENCE_PRECISION_HINT".into()), "f32").map_err(ov)?;
+        // documents can be embedded several at a time (HNZ_EMBED_STREAMS CPU streams; default 1)
+        let streams: usize = std::env::var("HNZ_EMBED_STREAMS").ok().and_then(|x| x.parse().ok()).unwrap_or(1).clamp(1, 16);
+        if streams > 1 {
+            core.set_property(&DeviceType::CPU, &RwPropertyKey::NumStreams, &streams.to_string()).map_err(ov)?;
+        }
         let model = core.read_model_from_file(&xml.to_string_lossy(), &bin.to_string_lossy()).map_err(ov)?;
         let dynamic = model.is_dynamic();
         let mut compiled = core.compile_model(&model, DeviceType::CPU).map_err(ov)?;
         let req = compiled.create_infer_request().map_err(ov)?;
-        Ok(Self { req, _model: compiled, _core: core, tok, seq: 64, dynamic })
+        let doc_reqs = if dynamic { (1..streams).map(|_| compiled.create_infer_request().map_err(ov)).collect::<Result<_>>()? } else { Vec::new() };
+        Ok(Self { req, doc_reqs, _model: compiled, _core: core, tok, seq: 64, dynamic })
     }
 
     /// The IR takes any shape: it can embed document prompts (P4).
@@ -93,12 +101,43 @@ impl Embedder {
     /// most `prompt::MAX_SEQ` tokens, computed at its own canonical shape [1, tokens rounded up to
     /// 16]: it never depends on what else is embedded. Needs an IR with dynamic shapes.
     pub fn embed_doc(&mut self, prompt: &str) -> Result<Vec<f32>> {
+        Ok(self.embed_docs(std::slice::from_ref(&prompt.to_string()))?.remove(0))
+    }
+
+    /// The vectors of several document prompts (as `embed_doc`, each at its own shape), up to one
+    /// per CPU stream at the same time.
+    pub fn embed_docs(&mut self, prompts: &[String]) -> Result<Vec<Vec<f32>>> {
         if !self.dynamic {
             bail!("el embedder de este bloque tiene formas fijas: no puede embeber documentos");
         }
-        let enc = self.tok.encode(prompt, true).map_err(|e| anyhow!("tokenizer: {e}"))?;
-        let ids: Vec<u32> = enc.get_ids().iter().take(crate::prompt::MAX_SEQ).copied().collect();
-        self.infer(&ids, ids.len().div_ceil(16).max(1) * 16)
+        let mut ids: Vec<Vec<u32>> = Vec::with_capacity(prompts.len());
+        for p in prompts {
+            let enc = self.tok.encode(p.as_str(), true).map_err(|e| anyhow!("tokenizer: {e}"))?;
+            ids.push(enc.get_ids().iter().take(crate::prompt::MAX_SEQ).copied().collect());
+        }
+        let mut out: Vec<Vec<f32>> = vec![Vec::new(); ids.len()];
+        let mut reqs: Vec<&mut InferRequest> = std::iter::once(&mut self.req).chain(self.doc_reqs.iter_mut()).collect();
+        let mut next = 0;
+        while next < ids.len() {
+            // one document on each request, then collect them in order
+            let mut started = Vec::new();
+            for (slot, r) in reqs.iter_mut().enumerate() {
+                if next == ids.len() {
+                    break;
+                }
+                let (ti, tm) = tensors(&ids[next], ids[next].len().div_ceil(16).max(1) * 16)?;
+                r.set_input_tensor_by_index(0, &ti).map_err(ov)?;
+                r.set_input_tensor_by_index(1, &tm).map_err(ov)?;
+                r.infer_async().map_err(ov)?;
+                started.push((slot, next, ti, tm));
+                next += 1;
+            }
+            for (slot, i, _ti, _tm) in started {
+                reqs[slot].wait(600_000).map_err(ov)?;
+                out[i] = normalized(reqs[slot])?;
+            }
+        }
+        Ok(out)
     }
 
     /// Vector normalizado (768d) de la consulta.
@@ -110,28 +149,39 @@ impl Embedder {
 
     /// Runs the model on `ids` padded (or cut) to `len` tokens; returns the normalized vector.
     fn infer(&mut self, ids: &[u32], len: usize) -> Result<Vec<f32>> {
-        let n = ids.len().min(len);
-        let shape = Shape::new(&[1, len as i64]).map_err(ov)?;
-        let mut ti = Tensor::new(ElementType::I64, &shape).map_err(ov)?;
-        let mut tm = Tensor::new(ElementType::I64, &shape).map_err(ov)?;
-        {
-            let d = ti.get_data_mut::<i64>().map_err(ov)?;
-            for (i, x) in d.iter_mut().enumerate() {
-                *x = if i < n { ids[i] as i64 } else { 0 };
-            }
-        }
-        {
-            let d = tm.get_data_mut::<i64>().map_err(ov)?;
-            for (i, x) in d.iter_mut().enumerate() {
-                *x = (i < n) as i64;
-            }
-        }
+        let (ti, tm) = tensors(ids, len)?;
         self.req.set_input_tensor_by_index(0, &ti).map_err(ov)?;
         self.req.set_input_tensor_by_index(1, &tm).map_err(ov)?;
         self.req.infer().map_err(ov)?;
-        let out = self.req.get_output_tensor_by_index(0).map_err(ov)?;
-        let v: Vec<f32> = out.get_data::<f32>().map_err(ov)?.to_vec();
-        let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
-        Ok(v.iter().map(|x| x / norm).collect())
+        normalized(&self.req)
     }
+}
+
+/// The input tensors of one sequence: `ids` padded (or cut) to `len` tokens, and its mask.
+fn tensors(ids: &[u32], len: usize) -> Result<(Tensor, Tensor)> {
+    let n = ids.len().min(len);
+    let shape = Shape::new(&[1, len as i64]).map_err(ov)?;
+    let mut ti = Tensor::new(ElementType::I64, &shape).map_err(ov)?;
+    let mut tm = Tensor::new(ElementType::I64, &shape).map_err(ov)?;
+    {
+        let d = ti.get_data_mut::<i64>().map_err(ov)?;
+        for (i, x) in d.iter_mut().enumerate() {
+            *x = if i < n { ids[i] as i64 } else { 0 };
+        }
+    }
+    {
+        let d = tm.get_data_mut::<i64>().map_err(ov)?;
+        for (i, x) in d.iter_mut().enumerate() {
+            *x = (i < n) as i64;
+        }
+    }
+    Ok((ti, tm))
+}
+
+/// A finished request's output, L2-normalized.
+fn normalized(req: &InferRequest) -> Result<Vec<f32>> {
+    let out = req.get_output_tensor_by_index(0).map_err(ov)?;
+    let v: Vec<f32> = out.get_data::<f32>().map_err(ov)?.to_vec();
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
+    Ok(v.iter().map(|x| x / norm).collect())
 }
