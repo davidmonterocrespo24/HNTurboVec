@@ -344,6 +344,7 @@ pub struct Block {
     by_name: BTreeMap<String, usize>,
     /// TOC hash: identifies this exact content (cache keys, reports)
     pub snapshot: u128,
+    toc_off: u64,
     pub n_docs: u64,
     pub math_version: u32,
     pub writer: String,
@@ -374,6 +375,14 @@ impl Block {
             pool.read_at(&mut head, 0)?;
         }
         if head != MAGIC {
+            // a damaged block still has its trailer; anything else is not a block at all
+            let mut t = [0u8; TRAILER_LEN];
+            if flen >= TRAILER_LEN as u64 {
+                pool.read_at(&mut t, flen - TRAILER_LEN as u64)?;
+                if t[0..8] == TRAILER_MAGIC && XxHash3_64::oneshot(&t[..56]) == le_u64(&t, 56) {
+                    return Err(corrupt("superbloque (magic)"));
+                }
+            }
             return Err(incompatible(format!("{} no es un bloque hnz", file.display())));
         }
         if flen < (SB_LEN + TRAILER_LEN) as u64 {
@@ -449,7 +458,7 @@ impl Block {
             return Err(corrupt(format!("las partes {} y {} se solapan", w[0].2, w[1].2)));
         }
         let writer = String::from_utf8_lossy(&sb[104..168]).trim_end_matches('\0').to_string();
-        Ok(Arc::new(Self { path: file, pool, toc, by_name, snapshot: toc_hash, n_docs: le_u64(&sb, 88), math_version: le_u32(&sb, 96), writer }))
+        Ok(Arc::new(Self { path: file, pool, toc, by_name, snapshot: toc_hash, toc_off, n_docs: le_u64(&sb, 88), math_version: le_u32(&sb, 96), writer }))
     }
 
     pub fn manifest(&self) -> &serde_json::Value {
@@ -467,6 +476,11 @@ impl Block {
     /// The folder that holds the container (and the external files).
     pub fn dir(&self) -> PathBuf {
         self.path.parent().map(|p| p.to_path_buf()).unwrap_or_default()
+    }
+
+    /// Offset and length of the TOC in the container.
+    pub fn toc_range(&self) -> (u64, u64) {
+        (self.toc_off, self.pool.len - TRAILER_LEN as u64 - self.toc_off)
     }
 
     pub fn snapshot_hex(&self) -> String {
@@ -515,7 +529,7 @@ impl Block {
         if resident || p.codec != Codec::Raw {
             return Ok(Blob::Resident(self.read_part(name)?));
         }
-        Ok(Blob::part(self.pool.clone(), p.off, p.len as usize))
+        Ok(Blob::part(self.pool.clone(), p.off, p.len as usize, parse_hash(&p.hash)))
     }
 
     /// Checks one part's hash, streaming (without holding it in memory).
@@ -535,15 +549,107 @@ impl Block {
         Ok(())
     }
 
-    /// `full` check: every part's hash (in parallel) and the external files next to the container.
+    /// `full` check: every part's hash (in parallel), the zero padding between parts, and the
+    /// external files next to the container.
     pub fn verify_full(&self) -> Result<()> {
         use rayon::prelude::*;
         self.toc.parts.par_iter().try_for_each(|p| self.verify_part(p))?;
+        let mut spans: Vec<(u64, u64)> = self.toc.parts.iter().map(|p| (p.off, p.off + p.len)).collect();
+        spans.sort_unstable();
+        let toc_off = self.toc_off;
+        let mut gaps = Vec::new();
+        let mut at = SB_LEN as u64;
+        for (s, e) in spans {
+            gaps.push((at, s));
+            at = e;
+        }
+        gaps.push((at, toc_off));
+        for (s, e) in gaps {
+            if e > s {
+                let mut buf = vec![0u8; (e - s) as usize];
+                self.pool.read_at(&mut buf, s)?;
+                if buf.iter().any(|&b| b != 0) {
+                    return Err(corrupt(format!("relleno no nulo en {s}..{e}")));
+                }
+            }
+        }
+        self.check_externals()
+    }
+
+    /// Checks the external files next to the container (size and hash).
+    pub fn check_externals(&self) -> Result<()> {
         for e in &self.toc.external {
             let path = self.dir().join(&e.name);
             let (len, hash) = hash_file(&path).map_err(|_| corrupt(format!("falta el fichero externo {}", e.name)))?;
             if len != e.len || Some(hash) != parse_hash(&e.hash) {
                 return Err(corrupt(format!("fichero externo {}: tamaño o hash", e.name)));
+            }
+        }
+        Ok(())
+    }
+
+    /// The query embedder's files: its IR next to the container (checked against the hashes in
+    /// the TOC) and its tokenizer, stored inside the block.
+    pub fn embedder_files(&self) -> Result<(PathBuf, PathBuf, Vec<u8>)> {
+        self.check_externals()?;
+        let by_role = |r: &str| {
+            self.toc.external.iter().find(|e| e.role == r).map(|e| self.dir().join(&e.name)).ok_or_else(|| incompatible(format!("falta el fichero externo de tipo {r}")))
+        };
+        Ok((by_role("query_ir")?, by_role("query_ir_weights")?, self.read_part("model/embed.tok")?))
+    }
+
+    /// Refuses a block with a required part this binary does not know, or in a version it does
+    /// not read (`IncompatibleBlockError`); `known` = (name, versions read). Unknown optional parts
+    /// are ignored.
+    pub fn check_parts(&self, known: &[(&str, &[u32])]) -> Result<()> {
+        for p in &self.toc.parts {
+            match known.iter().find(|k| k.0 == p.name) {
+                Some((_, vers)) if vers.contains(&p.ver) => {}
+                Some((_, vers)) => return Err(incompatible(format!("parte {} en la versión {} (este binario lee {vers:?})", p.name, p.ver))),
+                None if p.required => return Err(incompatible(format!("parte obligatoria desconocida {}", p.name))),
+                None => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+/// How much of a block is checked when it is opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VerifyLevel {
+    /// superblock, trailer, TOC, part bounds and definition versions (always done)
+    Header,
+    /// + the always-loaded parts' hashes as they load and the canaries (default)
+    Quick,
+    /// + every part's hash, the padding and the external files
+    Full,
+}
+
+/// One versioned definition the bytes depend on, as recorded in the manifest
+/// (`manifest[section][key]`), and the versions this binary reads.
+pub struct Definition<'a> {
+    pub section: &'a str,
+    pub key: &'a str,
+    pub supported: &'a [u64],
+}
+
+impl Block {
+    /// Refuses a block whose bytes were made with a definition this binary does not implement
+    /// (`IncompatibleBlockError`); also checks the superblock's copy of the LM math version.
+    pub fn check_compat(&self, defs: &[Definition]) -> Result<()> {
+        let m = self.manifest();
+        for d in defs {
+            let v = m.get(d.section).and_then(|s| s.get(d.key)).and_then(|v| v.as_u64());
+            match v {
+                Some(v) if d.supported.contains(&v) => {}
+                Some(v) => return Err(incompatible(format!("{}.{} = {v} (este binario lee {:?})", d.section, d.key, d.supported))),
+                None => return Err(incompatible(format!("el manifiesto no indica {}.{}", d.section, d.key))),
+            }
+        }
+        if let Some(v) = m.get("text").and_then(|s| s.get("math_version")).and_then(|v| v.as_u64()) {
+            if v != self.math_version as u64 {
+                return Err(corrupt(format!("versión numérica del LM: superbloque {}, manifiesto {v}", self.math_version)));
             }
         }
         Ok(())
@@ -602,6 +708,14 @@ mod tests {
         assert_eq!(disk.get(3990, 100).unwrap().len(), 10, "reads clip at the end of the part");
         assert!(b.require("missing").unwrap_err().downcast_ref::<IncompatibleBlockError>().is_some());
         b.verify_full().unwrap();
+        // definition versions: supported, unsupported, missing
+        let ok = [Definition { section: "x", key: "v", supported: &[1] }];
+        assert!(b.check_compat(&[]).is_ok());
+        let e = b.check_compat(&ok).unwrap_err();
+        assert!(e.downcast_ref::<IncompatibleBlockError>().is_some(), "{e}");
+        // a disk blob of a part checks its hash when loaded whole
+        let mut blob = b.blob("c/stream", false).unwrap();
+        assert_eq!(blob.make_resident().unwrap(), 4000);
         // a folder holding hn.hnzb opens too
         std::fs::rename(&p2, d.join(FILE_NAME)).unwrap();
         assert_eq!(Block::open(&d).unwrap().snapshot, s1);
@@ -656,7 +770,14 @@ mod tests {
         check("part", &|v| v[a.off as usize + 17] ^= 1, "ok");
         let z = part("b/zstd");
         check("zstd part", &|v| v[z.off as usize + 5] ^= 0x40, "ok");
-        check("magic", &|v| v[0] = b'X', "incompatible");
+        check("magic", &|v| v[0] = b'X', "corrupt"); // the trailer is intact: a damaged block
+        check("not a block", &|v| {
+            v[0] = b'X';
+            let n = v.len();
+            v[n - 64] = b'X'
+        }, "incompatible");
+        let pad_at = (part("a/raw").off + part("a/raw").len) as usize + 5;
+        check("padding", &|v| v[pad_at] = 7, "ok");
         // a newer major version or an unknown incompatible feature, with a valid superblock hash
         let rehash = |v: &mut Vec<u8>| {
             let h = XxHash3_64::oneshot(&v[..SB_LEN - 8]);

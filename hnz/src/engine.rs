@@ -6,7 +6,7 @@ use crate::blob::{Blob, Residency};
 use crate::bm25::{Bm25, TermPost};
 use crate::cache::GenCache;
 use crate::item::Item;
-use crate::lm::store::LmCodec;
+use crate::lm::store::{LmCodec, LmStore};
 use crate::mem::{Budget, Charge, Class, MB};
 use crate::meta::{MetaRow, META_BLOCK};
 use crate::plan::Part;
@@ -31,13 +31,13 @@ pub const MAX_TERMS: usize = 64;
 
 /// Candidates of one search round in a segment with `n` documents in range: (kc = scored
 /// candidates, c1 = stage-1 vector candidates). `mult` widens the round (x4 each time).
-fn round_sizes(q: &Query, k: usize, n: usize, mult: usize) -> (usize, usize) {
+fn round_sizes(q: &Query, k: usize, n: usize, mult: usize, c1_min: usize) -> (usize, usize) {
     let mut kc = (k * 20).max(200) * mult;
     if !q.types.is_empty() {
         kc *= 5; // stories ~14 % de los ítems
     }
     let kc = kc.min(n);
-    let c1 = q.vec_cand.unwrap_or((kc * 10).max(2000)).max(kc).min(n);
+    let c1 = q.vec_cand.unwrap_or((kc * 10).max(c1_min)).max(kc).min(n);
     (kc, c1)
 }
 
@@ -145,6 +145,10 @@ pub struct Engine {
     lm_charge: Charge,
     index_charge: Charge,
     model_charge: Charge,
+    /// minimum stage-1 vector candidates (2,000 for segments; the block's manifest says its own)
+    c1_min: usize,
+    /// the compact block this engine reads, if it is one (P3)
+    pub block: Option<Arc<crate::block::Block>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,10 +244,49 @@ pub fn kind_name(t: u8) -> &'static str {
     }
 }
 
+/// The versioned definitions a block's bytes depend on (`manifest[section][key]`), and the
+/// versions this binary reads.
+pub const BLOCK_DEFS: &[crate::block::Definition<'static>] = &[
+    crate::block::Definition { section: "text", key: "math_version", supported: &[crate::lm::model::MATH_VERSION as u64] },
+    crate::block::Definition { section: "text", key: "transform_version", supported: &[1] },
+    crate::block::Definition { section: "text", key: "rec_check", supported: &[1] },
+    crate::block::Definition { section: "text", key: "framing", supported: &[1] },
+    crate::block::Definition { section: "meta", key: "row_encoding", supported: &[2] },
+    crate::block::Definition { section: "lex", key: "value_layout", supported: &[1] },
+    crate::block::Definition { section: "lex", key: "tokenizer_version", supported: &[1] },
+    crate::block::Definition { section: "vec", key: "sign_rule", supported: &[1] },
+    crate::block::Definition { section: "kids", key: "encoding", supported: &[1] },
+];
+
+/// The parts of a block this binary knows, with the versions it reads.
+pub const BLOCK_PARTS: &[(&str, &[u32])] = &[
+    ("meta/index", &[1]),
+    ("meta/flags", &[1]),
+    ("meta/late", &[1]),
+    ("meta/authors", &[1]),
+    ("meta/blocks", &[1]),
+    ("meta/kids", &[1]),
+    ("meta/kids.idx", &[1]),
+    ("text/idx", &[1]),
+    ("text/gsum", &[1]),
+    ("text/groups", &[1]),
+    ("vec/has", &[1]),
+    ("vec/codes", &[1]),
+    ("lex/fst", &[1]),
+    ("lex/norms", &[1]),
+    ("lex/post", &[1]),
+    ("model/lm", &[1]),
+    ("model/lm.tok", &[1]),
+    ("model/embed.tok", &[1]),
+];
+
 impl Engine {
     /// Opens all segments in `root` (ignoring half-built ones and `retier` leftovers) and loads every
     /// distinct LM model used by cold-tier segments. CLI defaults (`EngineOptions::cli`).
     pub fn open(root: &Path, models: &Path) -> Result<Self> {
+        if let Some(p) = crate::block::Block::locate(root) {
+            return Self::open_block(crate::block::Block::open(&p)?, EngineOptions::cli(root));
+        }
         Self::open_with(root, models, EngineOptions::cli(root))
     }
 
@@ -294,7 +337,6 @@ impl Engine {
                 l.check_model(&lms[f]).with_context(|| format!("segmento {}", sg.s.man.name))?;
             }
         }
-        let total_docs = segs.iter().map(|x| x.s.man.n_docs).sum();
         let l2 = match (&opts.l2, lms.is_empty()) {
             (Some((path, cap)), false) => match crate::cache::L2::open(path, *cap) {
                 Ok(c) => {
@@ -308,18 +350,100 @@ impl Engine {
             },
             _ => None,
         };
+        // columna de banderas en RAM (1 B/doc), construida en paralelo una vez al abrir
+        let flags: Vec<Vec<u8>> = segs.iter().map(|sg| crate::meta::load_flags(&sg.s.dir, &sg.s.meta)).collect::<Result<_>>()?;
+        Ok(Self::assemble(segs, lms, model_bytes, flags, l2, opts, 2000, None))
+    }
+
+    /// Opens a compact block (P3) as one segment: checks the versions of every definition its bytes
+    /// depend on, builds the readers over its parts (each part in RAM or read from disk, per
+    /// `opts.residency`), and loads the LM model stored in the block.
+    pub fn open_block(block: Arc<crate::block::Block>, opts: EngineOptions) -> Result<Self> {
+        use crate::block::incompatible;
+        block.check_parts(BLOCK_PARTS)?;
+        block.check_compat(BLOCK_DEFS)?;
+        let res = opts.residency;
+        let m = block.manifest().clone();
+        let n = block.n_docs as usize;
+        let num = |v: &serde_json::Value| v.as_u64().unwrap_or(0);
+        let authors = crate::meta::Authors::from_text(String::from_utf8(block.read_part("meta/authors")?).map_err(|_| crate::block::corrupt("meta/authors"))?);
+        let meta = crate::meta::MetaStore::from_parts(block.blob("meta/blocks", res.meta)?, &block.read_part("meta/index")?, authors, &block.read_part("meta/late")?, n)?;
+        let t = &m["text"];
+        let info = crate::lm::store::LmInfo {
+            math: num(&t["math_version"]) as u32,
+            model_id: t["model_id"].as_str().unwrap_or_default().to_string(),
+            n_docs: n,
+            group: num(&t["group"]) as usize,
+            lm_records: num(&t["lm_records"]) as usize,
+            zstd_records: num(&t["zstd_records"]) as usize,
+            tokens: num(&t["tokens"]),
+            rec_check: true,
+        };
+        let lm = LmStore::from_parts(block.blob("text/groups", res.text)?, &block.read_part("text/idx")?, &block.read_part("text/gsum")?, info)?;
+        let (codec, steady, _) = crate::mem::measure(|| -> Result<LmCodec> { LmCodec::from_parts(block.read_part("model/lm")?, None) });
+        let codec = codec?;
+        if codec.model.id != lm.info.model_id {
+            return Err(incompatible(format!("el modelo LM del bloque es {} y el manifiesto dice {}", codec.model.id, lm.info.model_id)));
+        }
+        let model_bytes = steady.max(block.require("model/lm")?.len);
+        let li: crate::bm25::Bm25Info = serde_json::from_value(m["lex"]["info"].clone()).map_err(|e| crate::block::corrupt(format!("lex: {e}")))?;
+        let bm25 = Bm25::from_parts(block.read_part("lex/fst")?, block.blob("lex/post", res.postings)?, block.read_part("lex/norms")?, li)?;
+        let bits = num(&m["vec"]["bits"]) as usize;
+        let vec = VecIndex::from_parts(&block.read_part("vec/has")?, block.blob("vec/codes", res.vectors)?, bits, n)?;
+        let flags = block.read_part("meta/flags")?;
+        if flags.len() != n {
+            return Err(crate::block::corrupt("meta/flags: tamaño"));
+        }
+        let s = &m["snapshot"];
+        let man = crate::segment::Manifest {
+            version: 3,
+            name: "block".into(),
+            n_docs: n,
+            deleted_skipped: num(&s["n_deleted"]) as usize,
+            build_id: block.snapshot as u64,
+            id_min: num(&s["id_min"]) as u32,
+            id_max: num(&s["id_max"]) as u32,
+            time_min: s["time_min"].as_i64().unwrap_or(0),
+            time_max: s["time_max"].as_i64().unwrap_or(0),
+            text_tier: "lm".into(),
+            text_block: 0,
+            text_level: 0,
+            lm_model: Some("block".into()),
+            transformed_pct: 0.0,
+            has_bm25: true,
+            vec_bits: bits,
+        };
+        let seg = Segment { dir: block.dir(), man, meta, text: TextSource::Lm(lm) };
+        let mut lms = HashMap::new();
+        lms.insert("block".to_string(), codec);
+        let c1 = num(&m["search"]["c1"]).max(2000) as usize;
+        let mut opts = opts;
+        opts.l2 = None; // the block folder is read-only data: no disk cache written next to it
+        Ok(Self::assemble(vec![Seg { s: seg, bm25: Some(bm25), vec: Some(vec) }], lms, model_bytes, vec![flags], None, opts, c1, Some(block)))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(
+        segs: Vec<Seg>,
+        lms: HashMap<String, LmCodec>,
+        model_bytes: u64,
+        flags: Vec<Vec<u8>>,
+        l2: Option<crate::cache::L2>,
+        opts: EngineOptions,
+        c1_min: usize,
+        block: Option<Arc<crate::block::Block>>,
+    ) -> Self {
+        let total_docs = segs.iter().map(|x| x.s.man.n_docs).sum();
         // clave de la L2: nombre + identificador de construcción + nº de docs (si el segmento se
         // reconstruye, sus entradas antiguas dejan de coincidir)
         let seg_keys = segs
             .iter()
             .map(|s| crate::cache::seg_key(&s.s.man.name) ^ s.s.man.build_id.rotate_left(13) ^ (s.s.man.n_docs as u64).rotate_left(41))
             .collect();
-        // columna de banderas en RAM (1 B/doc), construida en paralelo una vez al abrir
-        let flags: Vec<Vec<u8>> = segs.iter().map(|sg| crate::meta::load_flags(&sg.s.dir, &sg.s.meta)).collect::<Result<_>>()?;
         let b = &opts.budget;
         let index = segs.iter().map(|sg| sg.ram_bytes() as u64).sum::<u64>() + flags.iter().map(|f| f.capacity() as u64).sum::<u64>();
         let (titles_cap, records_cap) = (opts.cache_bytes / 8, opts.cache_bytes - opts.cache_bytes / 8);
-        Ok(Self {
+        Self {
             segs,
             total_docs,
             lms,
@@ -332,8 +456,58 @@ impl Engine {
             lm_charge: b.charge(Class::Working, if opts.lm_pool == u64::MAX { 0 } else { opts.lm_pool }),
             index_charge: b.charge(Class::Index, index),
             model_charge: b.charge(Class::Model, model_bytes),
+            c1_min,
+            block,
             budget: opts.budget,
-        })
+        }
+    }
+
+    /// Checks the block's canaries of the given kinds ("short", "long", "fallback", "empty"):
+    /// their stored bytes (else `CorruptBlockError`) and, decoded in one batch, their text (else
+    /// `IncompatibleBlockError`: intact bytes that this binary or CPU decodes differently).
+    pub fn check_canaries(&self, kinds: &[&str]) -> Result<usize> {
+        let Some(block) = &self.block else { return Ok(0) };
+        let xxh = |b: &[u8]| format!("xxh3-64:{:016x}", twox_hash::XxHash3_64::oneshot(b));
+        let cans: Vec<&serde_json::Value> = block.manifest()["canaries"]
+            .as_array()
+            .map(|a| a.iter().filter(|c| c["kind"].as_str().is_some_and(|k| kinds.contains(&k))).collect())
+            .unwrap_or_default();
+        let TextSource::Lm(lm) = &self.segs[0].s.text else { return Ok(0) };
+        let mut wants = Vec::new();
+        for c in &cans {
+            let d = c["doc"].as_u64().unwrap_or(u64::MAX) as usize;
+            if d >= self.total_docs || lm.raw(d).map(|r| xxh(&r)).ok().as_deref() != c["rec"].as_str() {
+                return Err(crate::block::corrupt(format!("canario {}: bytes del registro", c["id"])));
+            }
+            wants.push((0usize, d, None::<usize>, false));
+        }
+        let codec = self.lms.get("block").context("block LM")?;
+        let raws: Vec<std::borrow::Cow<[u8]>> = wants.iter().map(|w| lm.raw(w.1)).collect::<Result<_>>()?;
+        let refs: Vec<&[u8]> = raws.iter().map(|c| c.as_ref()).collect();
+        let n = refs.len();
+        let dec = {
+            let _g = LM_GATE.lock().unwrap_or_else(|e| e.into_inner());
+            codec.decode_records_pool(&refs, true, &vec![None; n], &vec![false; n], &vec![true; n], self.lm_pool)
+        };
+        let dec = dec.map_err(|e| crate::block::incompatible(format!("canarios: {e:#}")))?;
+        for (c, (r, _)) in cans.iter().zip(dec) {
+            if xxh(format!("{}\0{}\0{}", r.title, r.url, r.text).as_bytes()).as_str() != c["text"].as_str().unwrap_or_default() {
+                return Err(crate::block::incompatible(format!("canario {}: el texto descomprimido no coincide (¿binario o CPU distintos?)", c["id"])));
+            }
+        }
+        Ok(n)
+    }
+
+    /// The query embedder: the block's own (IR next to the container, tokenizer inside it) or,
+    /// for a folder of segments, the one in `models`.
+    pub fn embedder(&self, models: &Path, ov_libs: &Path) -> Result<crate::embed::Embedder> {
+        match &self.block {
+            Some(b) => {
+                let (xml, bin, tok) = b.embedder_files()?;
+                crate::embed::Embedder::from_files(&xml, &bin, &tok, ov_libs)
+            }
+            None => crate::embed::Embedder::new(models, ov_libs),
+        }
     }
 
     /// RAM of what is always loaded, in all segments (incl. the flag columns).
@@ -493,7 +667,7 @@ impl Engine {
     ///   estaba recortada, se amplía SOLO ese segmento (4x, hasta 16x).
     /// Las fechas se comprueban exactamente en los bloques extremos del rango; en el interior se
     /// usa el orden temporal de los ids.
-    pub fn search(&self, q: &Query, qvec: Option<&[f32]>) -> Vec<Hit> {
+    pub fn search(&self, q: &Query, qvec: Option<&[f32]>) -> Result<Vec<Hit>> {
         self.search_with(q, qvec, &|_| true)
     }
 
@@ -512,7 +686,7 @@ impl Engine {
                 m.n_docs > 0 && !q.from.is_some_and(|f| m.time_max < f) && !q.to.is_some_and(|t| m.time_min >= t)
             })
             .map(|sg| {
-                let (kc, c1) = round_sizes(q, k, sg.s.man.n_docs, 1);
+                let (kc, c1) = round_sizes(q, k, sg.s.man.n_docs, 1, self.c1_min);
                 round_cost(kc, c1)
             })
             .collect();
@@ -523,7 +697,8 @@ impl Engine {
 
     /// Like `search`; before widening a segment's round (x4) it asks `grow` for the extra working
     /// memory, and without it returns what it has (possibly fewer than k for very selective filters).
-    pub fn search_with(&self, q: &Query, qvec: Option<&[f32]>, grow: &(dyn Fn(u64) -> bool + Sync)) -> Vec<Hit> {
+    /// Damaged data it reads is a `CorruptBlockError`.
+    pub fn search_with(&self, q: &Query, qvec: Option<&[f32]>, grow: &(dyn Fn(u64) -> bool + Sync)) -> Result<Vec<Hit>> {
         let k = q.k.clamp(1, MAX_K);
         let mut terms = tokenize::terms(&q.text);
         terms.sort();
@@ -548,7 +723,7 @@ impl Engine {
         // vacías en modo palabras, o sin vector de consulta): ningún resultado
         let listing = !has_text;
         if has_text && !use_bm25 && !use_vec {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let only_rare_types = !q.types.is_empty() && q.types.iter().all(|t| matches!(t, 3..=5));
         let scan = q.by.is_some() || only_rare_types;
@@ -557,22 +732,31 @@ impl Engine {
             Mode::Keyword => b,
             Mode::Hybrid => v + q.w_bm25 * b / (b + q.c_bm25),
         };
-        let per_seg: Vec<Vec<Hit>> = self
+        let per_seg: Vec<Option<Vec<Hit>>> = self
             .segs
             .par_iter()
             .enumerate()
-            .filter_map(|(si, sg)| {
+            .map(|(si, sg)| -> Result<Option<Vec<Hit>>> {
                 let m = &sg.s.man;
                 if m.n_docs == 0 || q.from.is_some_and(|f| m.time_max < f) || q.to.is_some_and(|t| m.time_min >= t) {
-                    return None;
+                    return Ok(None);
                 }
-                let lo = q.from.map(|t| sg.s.meta.doc_at_time(t)).unwrap_or(0) as u32;
-                let hi = q.to.map(|t| sg.s.meta.doc_at_time(t)).unwrap_or(m.n_docs) as u32;
+                let lo = match q.from {
+                    Some(t) => sg.s.meta.try_doc_at_time(t)?,
+                    None => 0,
+                } as u32;
+                let hi = match q.to {
+                    Some(t) => sg.s.meta.try_doc_at_time(t)?,
+                    None => m.n_docs,
+                } as u32;
                 if lo >= hi {
-                    return None;
+                    return Ok(None);
                 }
                 let author = match &q.by {
-                    Some(by) => Some(sg.s.meta.authors.position(by)? as u32),
+                    Some(by) => match sg.s.meta.authors.position(by) {
+                        Some(a) => Some(a as u32),
+                        None => return Ok(None),
+                    },
                     None => None,
                 };
                 let (b0, b1) = (lo as usize / META_BLOCK, (hi as usize - 1) / META_BLOCK);
@@ -580,7 +764,7 @@ impl Engine {
                     // sin señal de texto: lo más reciente primero, con parada temprana
                     let mut out = Vec::with_capacity(k);
                     'blocks: for b in (b0..=b1).rev() {
-                        let rows = sg.s.meta.block(b);
+                        let rows = sg.s.meta.try_block(b)?;
                         for kk in (0..rows.len()).rev() {
                             let d = b * META_BLOCK + kk;
                             if d >= lo as usize && d < hi as usize && self.passes(q, si, &rows[kk], author) {
@@ -591,7 +775,7 @@ impl Engine {
                             }
                         }
                     }
-                    return Some(out);
+                    return Ok(Some(out));
                 }
                 let tps: Vec<(TermPost, f32)> = match (&sg.bm25, use_bm25) {
                     (Some(b), true) => terms.iter().zip(&idf).filter_map(|(t, &w)| b.lookup(t).map(|x| (x.0, w))).collect(),
@@ -601,16 +785,17 @@ impl Engine {
                     (Some(v), true) => Some(QueryLut::new(qvec.unwrap(), v.nbytes)),
                     _ => None,
                 };
-                let score = |cand: &[u32]| -> Vec<Hit> {
+                let score = |cand: &[u32]| -> Result<Vec<Hit>> {
                     let vs = match (&sg.vec, &lut) {
                         (Some(v), Some(l)) => v.score_docs(l, cand),
                         _ => vec![f32::NEG_INFINITY; cand.len()],
                     };
                     let bs = match (&sg.bm25, tps.is_empty()) {
-                        (Some(b), false) => b.score_docs(&tps, cand),
+                        (Some(b), false) => b.score_docs(&tps, cand)?,
                         _ => vec![0.0; cand.len()],
                     };
-                    cand.iter()
+                    Ok(cand
+                        .iter()
                         .enumerate()
                         // solo documentos con alguna señal de la consulta: término (palabras) o vector
                         .filter(|&(i, _)| match q.mode {
@@ -622,27 +807,27 @@ impl Engine {
                             let v = if vs[i].is_finite() { vs[i] } else { 0.0 };
                             Hit { seg: si, doc: d, v, b: bs[i], score: fuse(v, bs[i]) }
                         })
-                        .collect()
+                        .collect())
                 };
                 if scan {
                     // recorrido exacto de los metadatos del rango (autor / tipos raros)
                     let mut cand: Vec<u32> = Vec::new();
                     for b in b0..=b1 {
-                        for (kk, row) in sg.s.meta.block(b).iter().enumerate() {
+                        for (kk, row) in sg.s.meta.try_block(b)?.iter().enumerate() {
                             let d = b * META_BLOCK + kk;
                             if d >= lo as usize && d < hi as usize && self.passes(q, si, row, author) {
                                 cand.push(d as u32);
                             }
                         }
                     }
-                    let mut hs = score(&cand);
+                    let mut hs = score(&cand)?;
                     hs.sort_by(|a, b| b.score.total_cmp(&a.score).then(b.doc.cmp(&a.doc)));
                     hs.truncate(k);
-                    return Some(hs);
+                    return Ok(Some(hs));
                 }
                 // filas de los bloques extremos (para la comprobación exacta de fechas)
                 let edge: HashMap<usize, Vec<MetaRow>> = if q.from.is_some() || q.to.is_some() {
-                    [b0, b1].iter().map(|&b| (b, sg.s.meta.block(b))).collect()
+                    [b0, b1].iter().map(|&b| Ok((b, sg.s.meta.try_block(b)?))).collect::<Result<_>>()?
                 } else {
                     HashMap::new()
                 };
@@ -657,7 +842,7 @@ impl Engine {
                 };
                 let mut mult = 1;
                 loop {
-                    let (kc, c1) = round_sizes(q, k, (hi - lo) as usize, mult);
+                    let (kc, c1) = round_sizes(q, k, (hi - lo) as usize, mult, self.c1_min);
                     let mut raw: Vec<u32> = Vec::new();
                     let mut saturated = false;
                     if let (Some(v), Some(l)) = (&sg.vec, &lut) {
@@ -666,13 +851,13 @@ impl Engine {
                         raw.extend(r.into_iter().map(|x| x.0));
                     }
                     if let (Some(b), false) = (&sg.bm25, tps.is_empty()) {
-                        let r = b.top_k(&tps, lo, hi, kc);
+                        let r = b.top_k(&tps, lo, hi, kc)?;
                         saturated |= r.len() >= kc && kc < (hi - lo) as usize;
                         raw.extend(r.into_iter().map(|x| x.0));
                     }
                     raw.sort_unstable();
                     raw.dedup();
-                    let mut hs = score(&raw);
+                    let mut hs = score(&raw)?;
                     hs.sort_by(|a, b| b.score.total_cmp(&a.score).then(b.doc.cmp(&a.doc)));
                     // filtrar en orden de puntuación hasta tener k válidos
                     let mut out = Vec::with_capacity(k);
@@ -685,33 +870,33 @@ impl Engine {
                         }
                     }
                     if out.len() >= k || !saturated || mult >= 16 {
-                        return Some(out);
+                        return Ok(Some(out));
                     }
                     // widening needs more working memory: ask first (never waits)
-                    let (kc4, c14) = round_sizes(q, k, (hi - lo) as usize, mult * 4);
+                    let (kc4, c14) = round_sizes(q, k, (hi - lo) as usize, mult * 4, self.c1_min);
                     if !grow(round_cost(kc4, c14).saturating_sub(round_cost(kc, c1))) {
-                        return Some(out);
+                        return Ok(Some(out));
                     }
                     mult *= 4;
                 }
             })
-            .collect();
-        let mut hits: Vec<Hit> = per_seg.into_iter().flatten().collect();
+            .collect::<Result<_>>()?;
+        let mut hits: Vec<Hit> = per_seg.into_iter().flatten().flatten().collect();
         // a igual puntuación (p.ej. listado sin texto), lo más reciente primero
         hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(b.seg.cmp(&a.seg)).then(b.doc.cmp(&a.doc)));
         hits.truncate(k);
-        hits
+        Ok(hits)
     }
 
     /// Busca un id de HN en todo el archivo: (segmento, doc, metadatos).
-    pub fn find_meta(&self, id: u32) -> Option<(usize, usize, MetaRow)> {
-        let si = self.segs.partition_point(|s| s.s.man.id_min <= id).checked_sub(1)?;
+    pub fn find_meta(&self, id: u32) -> Result<Option<(usize, usize, MetaRow)>> {
+        let Some(si) = self.segs.partition_point(|s| s.s.man.id_min <= id).checked_sub(1) else { return Ok(None) };
         let sg = &self.segs[si];
         if id > sg.s.man.id_max {
-            return None;
+            return Ok(None);
         }
-        let doc = sg.s.meta.doc_of_id(id)?;
-        Some((si, doc, sg.s.meta.row(doc)))
+        let Some(doc) = sg.s.meta.try_doc_of_id(id)? else { return Ok(None) };
+        Ok(Some((si, doc, sg.s.meta.try_row(doc)?)))
     }
 
     /// Textos de varios documentos: zstd directo, LM en un único lote (con cachés L1/L2).
@@ -816,7 +1001,7 @@ impl Engine {
     }
 
     pub fn get(&self, id: u32) -> Result<Option<Item>> {
-        match self.find_meta(id) {
+        match self.find_meta(id)? {
             Some((si, doc, m)) => {
                 let (t, _) = self.texts(&[(si, doc)], None, false)?.remove(0);
                 Ok(Some(crate::segment::join(&m, t, &self.segs[si].s.meta.authors)))
@@ -827,36 +1012,36 @@ impl Engine {
 
     /// id de la story raíz del hilo de un documento (él mismo si no tiene padre).
     /// `None` si la cadena de padres sale del archivo (padre en un mes no cargado).
-    pub fn root_id(&self, seg: usize, doc: u32) -> Option<u32> {
-        let row = self.segs[seg].s.meta.row(doc as usize);
+    pub fn root_id(&self, seg: usize, doc: u32) -> Result<Option<u32>> {
+        let row = self.segs[seg].s.meta.try_row(doc as usize)?;
         let (mut id, mut parent) = (row.id, row.parent);
         for _ in 0..1024 {
             if parent == 0 {
-                return Some(id);
+                return Ok(Some(id));
             }
-            let (_, _, r) = self.find_meta(parent)?;
+            let Some((_, _, r)) = self.find_meta(parent)? else { return Ok(None) };
             id = r.id;
             parent = r.parent;
         }
-        None
+        Ok(None)
     }
 
     /// Resultados completos. `full=false`: en el nivel LM solo se decodifica un fragmento.
     pub fn fetch(&self, hits: &[Hit], full: bool) -> Result<Vec<ResultItem>> {
-        let rows: Vec<MetaRow> = hits.iter().map(|h| self.segs[h.seg].s.meta.row(h.doc as usize)).collect();
+        let rows: Vec<MetaRow> = hits.iter().map(|h| self.segs[h.seg].s.meta.try_row(h.doc as usize)).collect::<Result<_>>()?;
         // contexto del hilo: story raíz de cada comentario (títulos en un solo lote)
         let roots: Vec<Option<u32>> = hits
             .iter()
             .zip(&rows)
-            .map(|(h, r)| if r.parent == 0 { None } else { self.root_id(h.seg, h.doc) })
-            .collect();
+            .map(|(h, r)| if r.parent == 0 { Ok(None) } else { self.root_id(h.seg, h.doc) })
+            .collect::<Result<_>>()?;
         let mut root_docs: Vec<(usize, usize)> = Vec::new();
         let mut root_pos: HashMap<u32, usize> = HashMap::new();
         for r in roots.iter().flatten() {
             if root_pos.contains_key(r) {
                 continue;
             }
-            if let Some((si, doc, _)) = self.find_meta(*r) {
+            if let Some((si, doc, _)) = self.find_meta(*r)? {
                 root_pos.insert(*r, root_docs.len());
                 root_docs.push((si, doc));
             }

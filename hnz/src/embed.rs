@@ -56,8 +56,15 @@ fn load_openvino(ov_libs: &Path) -> Result<()> {
 
 impl Embedder {
     pub fn new(models: &Path, ov_libs: &Path) -> Result<Self> {
+        let name = if models.join("gemma2_text_b1_s64_int8.xml").exists() { "gemma2_text_b1_s64_int8" } else { "gemma2_text_b1_s64" };
+        let tok = std::fs::read(models.join("gemma2_tokenizer.json")).context("gemma2_tokenizer.json")?;
+        Self::from_files(&models.join(format!("{name}.xml")), &models.join(format!("{name}.bin")), &tok, ov_libs)
+    }
+
+    /// From the IR files and the tokenizer's JSON (a compact block keeps the tokenizer inside).
+    pub fn from_files(xml: &Path, bin: &Path, tokenizer_json: &[u8], ov_libs: &Path) -> Result<Self> {
         // the tokenizer first, so its temporary copy below does not add to OpenVINO's compile peak
-        let mut tok = Tokenizer::from_file(models.join("gemma2_tokenizer.json")).map_err(|e| anyhow!("tokenizer: {e}"))?;
+        let mut tok = Tokenizer::from_bytes(tokenizer_json).map_err(|e| anyhow!("tokenizer: {e}"))?;
         // no BPE cache: Gemma's pre-tokenizer makes each whole query one BPE sequence, so the
         // per-thread cache would only keep up to 10,000 past queries in memory nobody accounts for
         let mut bpe = tok.get_model().clone();
@@ -65,10 +72,6 @@ impl Embedder {
         tok.with_model(bpe);
         load_openvino(ov_libs)?;
         let mut core = Core::new().map_err(ov)?;
-        // preferir la versión con pesos int8 (NNCF): mitad de tamaño, ~2,5x más rápida, coseno 0,9998
-        let name = if models.join("gemma2_text_b1_s64_int8.xml").exists() { "gemma2_text_b1_s64_int8" } else { "gemma2_text_b1_s64" };
-        let xml = models.join(format!("{name}.xml"));
-        let bin = models.join(format!("{name}.bin"));
         let model = core.read_model_from_file(&xml.to_string_lossy(), &bin.to_string_lossy()).map_err(ov)?;
         let mut compiled = core.compile_model(&model, DeviceType::CPU).map_err(ov)?;
         let req = compiled.create_infer_request().map_err(ov)?;

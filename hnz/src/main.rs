@@ -1,7 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use hnz::bm25;
-use hnz::embed::Embedder;
 use hnz::engine::{Engine, Mode, Query};
 use hnz::lm::store::LmCodec;
 use hnz::segment::{self, Segment, TextSource, Tier};
@@ -113,12 +112,63 @@ enum Cmd {
         #[arg(long, default_value = "models/lm-pythia-70m.hnzlm")]
         lm: PathBuf,
     },
-    /// E30e: global document frequency of every index term (title + url host + plain text, the
-    /// BM25 tokenizer) over the given Parquet files; writes <out>/df.fst (term -> df) and
-    /// <out>/df.json (totals and rare-term counts per threshold)
-    Dfpass {
+    /// Global statistics of all the Parquet files (E30e, P3): document frequency of every index
+    /// term, the global author table and per-file counts -> <out>/df.fst, authors.zst, globals.json
+    Globals {
         #[arg(long)]
         out: PathBuf,
+        /// download registry to copy each file's SHA-256 from
+        #[arg(long, default_value = "data/_descargas.json")]
+        registry: PathBuf,
+        parquet: Vec<PathBuf>,
+    },
+    /// Builds a compact block (P3) from a JSON spec (see hnz::pack::PackSpec) into <out>/
+    Pack {
+        #[arg(long)]
+        spec: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Checks a compact block (P3) at a chosen depth: header; quick (what opening checks); full
+    /// (every part hash, the padding, the external files, every canary); deep (full + everything
+    /// against the sources named in its pack spec). Exit code: 0 ok, 2 corrupt, 3 incompatible,
+    /// 4 the block differs from its sources, 1 any other error
+    VerifyBlock {
+        /// the block folder (or its hn.hnzb)
+        path: PathBuf,
+        #[arg(long, default_value = "full")]
+        level: String,
+        /// deep: the pack spec (default: the one recorded in the block)
+        #[arg(long)]
+        spec: Option<PathBuf>,
+        /// deep: records decoded with the LM and compared with the Parquet text: a fraction of
+        /// the documents ("0.02"), "all" or "none"
+        #[arg(long, default_value = "0.02")]
+        decode: String,
+    },
+    /// Describes a compact block: parts, sizes and bytes per document; optionally projected to N
+    /// documents (49324111 = all of HN)
+    Inspect {
+        path: PathBuf,
+        #[arg(long)]
+        project: Option<u64>,
+        /// exact word-index sizes for the projection (the lex.json of `hnz lexicon`)
+        #[arg(long)]
+        lex: Option<PathBuf>,
+        /// where this HN item's bytes are (document, metadata block, text group)
+        #[arg(long)]
+        id: Option<u32>,
+    },
+    /// The word index of all the given Parquet files in block order (time, then id), with term
+    /// classes from `hnz globals`: exact sizes for the block projection (E32) -> <out>/lex.*
+    Lexicon {
+        #[arg(long)]
+        globals: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// terms with a global df above this fraction of all items keep only their df
+        #[arg(long, default_value_t = 0.0002)]
+        max_df_ratio: f64,
         parquet: Vec<PathBuf>,
     },
     /// Reconstruye el índice BM25 de un segmento con otras opciones (para medir tamaño/calidad)
@@ -288,84 +338,38 @@ fn rand_docs(n: usize, max: usize, seed: u64) -> Vec<usize> {
         .collect()
 }
 
-/// One pass over all the Parquet files: per file (in parallel) the distinct terms of each item's
-/// index text, merged into one global term -> df table as the files finish.
-fn cmd_dfpass(out: &Path, parquet: &[PathBuf]) -> Result<()> {
-    use std::collections::HashMap;
-    use std::sync::mpsc;
-    if parquet.is_empty() {
-        bail!("no Parquet files given");
-    }
-    std::fs::create_dir_all(out)?;
+/// Word index of all HN in block order (months in time order, each sorted by (time, id)).
+fn cmd_lexicon(globals: &Path, out: &Path, max_df_ratio: f64, parquet: &[PathBuf]) -> Result<()> {
     let t0 = Instant::now();
-    let (tx, rx) = mpsc::sync_channel::<Result<(PathBuf, usize, Vec<(String, u32)>)>>(4);
-    let files = parquet.to_vec();
-    let worker = std::thread::spawn(move || {
-        files.par_iter().for_each_with(tx, |tx, p| {
-            let r = (|| -> Result<(PathBuf, usize, Vec<(String, u32)>)> {
-                let items = hnz::item::read_parquet(p)?.items;
-                let mut df: HashMap<String, u32> = HashMap::new();
-                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-                for it in &items {
-                    seen.clear();
-                    hnz::tokenize::for_each_term(&segment::index_text(&it.title, &it.url, &it.text), |t| {
-                        if !seen.contains(t) {
-                            seen.insert(t.to_string());
-                        }
-                    });
-                    for t in seen.drain() {
-                        *df.entry(t).or_insert(0) += 1;
-                    }
-                }
-                Ok((p.clone(), items.len(), df.into_iter().collect()))
-            })();
-            let _ = tx.send(r);
-        });
-    });
-    let mut global: HashMap<String, u64> = HashMap::new();
-    let (mut n_docs, mut done) = (0u64, 0usize);
-    for r in rx {
-        let (p, n, part) = r?;
-        n_docs += n as u64;
-        for (t, d) in part {
-            *global.entry(t).or_insert(0) += d as u64;
-        }
-        done += 1;
-        eprintln!(
-            "  {done}/{} {} ({} docs, {} terms so far, {:.0} s)",
-            parquet.len(),
-            p.display(),
-            n,
-            global.len(),
-            t0.elapsed().as_secs_f64()
-        );
+    let g: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(globals.join("globals.json"))?)?;
+    let n_all = g["n_docs"].as_u64().context("globals.json: n_docs")?;
+    let max_df_abs = (max_df_ratio * n_all as f64).ceil() as u64;
+    let classes = hnz::globals::load_df(globals)?;
+    let mut lw = bm25::LexWriter::new(&classes, max_df_abs, max_df_ratio as f32);
+    let mut files = parquet.to_vec();
+    files.sort();
+    for p in &files {
+        let mut items = hnz::item::read_parquet(p)?.items;
+        items.sort_by_key(|it| (it.time, it.id));
+        let texts: Vec<String> = items.par_iter().map(|it| segment::index_text(&it.title, &it.url, &it.text)).collect();
+        lw.add_batch(&texts);
+        eprintln!("  {} ({} docs, {} so far, {:.0} s)", p.display(), items.len(), lw.n_docs(), t0.elapsed().as_secs_f64());
     }
-    worker.join().map_err(|_| anyhow::anyhow!("dfpass worker panicked"))?;
-    let mut terms: Vec<(String, u64)> = global.into_iter().collect();
-    terms.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    let mut fb = fst::MapBuilder::new(std::io::BufWriter::new(std::fs::File::create(out.join("df.fst"))?))?;
-    for (t, d) in &terms {
-        fb.insert(t.as_bytes(), *d)?;
-    }
-    fb.finish()?;
-    // rare-term counts per threshold (fraction of all items): terms kept and their postings
-    let total_postings: u64 = terms.iter().map(|x| x.1).sum();
-    let ratios = [0.00005f64, 0.0001, 0.0002, 0.0005, 0.001, 0.01];
-    let thresholds: Vec<serde_json::Value> = ratios
-        .iter()
-        .map(|&r| {
-            let max_df = (r * n_docs as f64).ceil() as u64;
-            let (nt, np, n1) = terms.iter().filter(|x| x.1 <= max_df).fold((0u64, 0u64, 0u64), |a, x| (a.0 + 1, a.1 + x.1, a.2 + (x.1 == 1) as u64));
-            serde_json::json!({"ratio": r, "max_df": max_df, "terms": nt, "postings": np, "df1_terms": n1})
-        })
-        .collect();
-    let fst_bytes = std::fs::metadata(out.join("df.fst"))?.len();
-    let summary = serde_json::json!({
-        "files": parquet.len(), "n_docs": n_docs, "n_terms": terms.len(), "total_postings": total_postings,
-        "df_fst_bytes": fst_bytes, "thresholds": thresholds, "seconds": t0.elapsed().as_secs_f64(),
+    let lp = lw.finish()?;
+    std::fs::create_dir_all(out)?;
+    std::fs::write(out.join("lex.fst"), &lp.fst)?;
+    std::fs::write(out.join("lex.post"), &lp.post)?;
+    std::fs::write(out.join("lex.norms"), &lp.norms)?;
+    let norms_zst = zstd::bulk::compress(&lp.norms, 19)?.len();
+    let s = serde_json::json!({
+        "n_docs": lp.info.n_docs, "max_df_ratio": max_df_ratio, "max_df_abs": max_df_abs, "n_terms": lp.info.n_terms,
+        "classes": {"frequent": lp.classes.0, "single": lp.classes.1, "list": lp.classes.2}, "n_postings": lp.info.n_postings,
+        "bytes": {"fst": lp.fst.len(), "post": lp.post.len(), "norms": lp.norms.len(), "norms_zstd": norms_zst,
+                  "total_on_disk": lp.fst.len() + lp.post.len() + norms_zst},
+        "avgdl": lp.info.avgdl, "seconds": t0.elapsed().as_secs_f64(),
     });
-    std::fs::write(out.join("df.json"), serde_json::to_string_pretty(&summary)?)?;
-    println!("{}", serde_json::to_string_pretty(&summary)?);
+    std::fs::write(out.join("lex.json"), serde_json::to_string_pretty(&s)?)?;
+    println!("{}", serde_json::to_string_pretty(&s)?);
     Ok(())
 }
 
@@ -446,7 +450,7 @@ fn check_bits(bits: usize) -> Result<()> {
 
 fn cmd_eval(root: &Path, file: &Path, k: usize, m: &ModelArgs) -> Result<()> {
     let eng = Engine::open(root, &m.models)?;
-    let mut emb = Embedder::new(&m.models, &m.ov_libs)?;
+    let mut emb = eng.embedder(&m.models, &m.ov_libs)?;
     let raw = std::fs::read(file)?;
     // tolerar BOM UTF-8 (PowerShell) y rechazar UTF-16 con un mensaje claro
     if raw.starts_with(&[0xFF, 0xFE]) || raw.starts_with(&[0xFE, 0xFF]) {
@@ -481,7 +485,7 @@ fn cmd_eval(root: &Path, file: &Path, k: usize, m: &ModelArgs) -> Result<()> {
         let (mut p, mut mrr) = (0f64, 0f64);
         for (i, (text, story)) in qs.iter().enumerate() {
             let q = Query { text: text.clone(), ..tmpl.clone() };
-            let hits = eng.search(&q, Some(&vecs[i]));
+            let hits = eng.search(&q, Some(&vecs[i]))?;
             let mut rel = 0;
             let mut first = 0usize;
             let mut n = 0;
@@ -494,7 +498,7 @@ fn cmd_eval(root: &Path, file: &Path, k: usize, m: &ModelArgs) -> Result<()> {
                 if n > k {
                     break;
                 }
-                if eng.root_id(h.seg, h.doc) == Some(*story) {
+                if eng.root_id(h.seg, h.doc)? == Some(*story) {
                     rel += 1;
                     if first == 0 {
                         first = n;
@@ -723,7 +727,39 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Cmd::Dfpass { out, parquet } => cmd_dfpass(&out, &parquet)?,
+        Cmd::Pack { spec, out } => {
+            let s: hnz::pack::PackSpec = serde_json::from_str(&std::fs::read_to_string(&spec).with_context(|| format!("{}", spec.display()))?)?;
+            let r = hnz::pack::pack(&s, &out)?;
+            println!("{}", serde_json::to_string_pretty(&r)?);
+        }
+        Cmd::Lexicon { globals, out, max_df_ratio, parquet } => cmd_lexicon(&globals, &out, max_df_ratio, &parquet)?,
+        Cmd::VerifyBlock { path, level, spec, decode } => {
+            let code = match hnz::verify::verify(&path, &level, spec.as_deref(), &decode) {
+                Ok(r) => {
+                    println!("{}", serde_json::to_string_pretty(&r)?);
+                    if r["ok"] == true {
+                        0
+                    } else {
+                        4
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error: {e:#}");
+                    hnz::verify::exit_code(&e)
+                }
+            };
+            std::process::exit(code);
+        }
+        Cmd::Inspect { path, project, lex, id } => {
+            println!("{}", serde_json::to_string_pretty(&hnz::verify::inspect(&path, project, lex.as_deref(), id)?)?);
+        }
+        Cmd::Globals { out, registry, parquet } => {
+            let reg = registry.exists().then_some(registry.as_path());
+            let s = hnz::globals::run(&out, &parquet, reg)?;
+            let mut brief = s.clone();
+            brief["files"] = serde_json::json!(s["files"].as_array().map_or(0, |f| f.len()));
+            println!("{}", serde_json::to_string_pretty(&brief)?);
+        }
         Cmd::Rebm25 { seg, no_tf, max_df, models } => {
             let t0 = Instant::now();
             let s = Segment::open(&seg)?;
@@ -783,7 +819,7 @@ fn main() -> Result<()> {
             let t0 = Instant::now();
             let eng = Engine::open(&root, &m.models)?;
             let t_open = t0.elapsed();
-            let mut emb = if q.mode != Mode::Keyword && !text.trim().is_empty() { Some(Embedder::new(&m.models, &m.ov_libs)?) } else { None };
+            let mut emb = if q.mode != Mode::Keyword && !text.trim().is_empty() { Some(eng.embedder(&m.models, &m.ov_libs)?) } else { None };
             let t_load = t0.elapsed();
             let t1 = Instant::now();
             let qv = match emb.as_mut() {
@@ -792,7 +828,7 @@ fn main() -> Result<()> {
             };
             let t_emb = t1.elapsed();
             let t2 = Instant::now();
-            let hits = eng.search(&q, qv.as_deref());
+            let hits = eng.search(&q, qv.as_deref())?;
             let t_search = t2.elapsed();
             let t3 = Instant::now();
             let res = eng.fetch(&hits, s.full)?;
@@ -818,7 +854,7 @@ fn main() -> Result<()> {
         }
         Cmd::Serve { root, port, m } => {
             let eng = Engine::open(&root, &m.models)?;
-            let emb = std::sync::Mutex::new(Embedder::new(&m.models, &m.ov_libs)?);
+            let emb = std::sync::Mutex::new(eng.embedder(&m.models, &m.ov_libs)?);
             let server = tiny_http::Server::http(("127.0.0.1", port)).map_err(|e| anyhow::anyhow!("{e}"))?;
             eprintln!("hnz: {} docs en {} segmentos — http://127.0.0.1:{port}/", eng.total_docs, eng.segs.len());
             let json_hdr = || "Content-Type: application/json; charset=utf-8".parse::<tiny_http::Header>().unwrap();
@@ -851,7 +887,7 @@ fn main() -> Result<()> {
                         let t0 = Instant::now();
                         let qv = if q.mode != Mode::Keyword && !text.trim().is_empty() { Some(emb.lock().unwrap().embed_query(&text)?) } else { None };
                         let t_emb = t0.elapsed();
-                        let hits = eng.search(&q, qv.as_deref());
+                        let hits = eng.search(&q, qv.as_deref())?;
                         let t_s = t0.elapsed();
                         let res = eng.fetch(&hits, s.full)?;
                         let t_all = t0.elapsed();

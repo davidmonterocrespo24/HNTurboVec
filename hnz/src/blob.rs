@@ -54,14 +54,55 @@ impl FilePool {
 
     /// Full positional read of `buf.len()` bytes at `off`.
     pub fn read_at(&self, buf: &mut [u8], off: u64) -> Result<()> {
-        read_at(self.pick(), buf, off)
+        read_at(self.pick(), buf, off)?;
+        fault::apply(buf, off);
+        Ok(())
+    }
+}
+
+/// Fault injection for robustness tests (`examples/fuzz_block.rs`): while set, every read through
+/// a `FilePool` sees the byte at file offset `off` XORed with `xor`, without touching the file.
+/// Unset in normal use (one atomic load per read).
+#[doc(hidden)]
+pub mod fault {
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+    use std::sync::Mutex;
+
+    static OFF: AtomicU64 = AtomicU64::new(u64::MAX);
+    static XOR: AtomicU8 = AtomicU8::new(0);
+    static TRACING: AtomicBool = AtomicBool::new(false);
+    static TRACE: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+
+    /// `Some((offset, xor))` damages that byte in every later read; `None` stops.
+    pub fn set(f: Option<(u64, u8)>) {
+        let (off, xor) = f.unwrap_or((u64::MAX, 0));
+        XOR.store(xor, Ordering::SeqCst);
+        OFF.store(off, Ordering::SeqCst);
+    }
+
+    /// Starts (`true`) or stops recording the (offset, length) of every read; returns what was
+    /// recorded since the last call.
+    pub fn trace(on: bool) -> Vec<(u64, u64)> {
+        TRACING.store(on, Ordering::SeqCst);
+        std::mem::take(&mut *TRACE.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    pub(crate) fn apply(buf: &mut [u8], off: u64) {
+        if TRACING.load(Ordering::Relaxed) {
+            TRACE.lock().unwrap_or_else(|e| e.into_inner()).push((off, buf.len() as u64));
+        }
+        let fo = OFF.load(Ordering::Relaxed);
+        if fo != u64::MAX && fo >= off && fo - off < buf.len() as u64 {
+            buf[(fo - off) as usize] ^= XOR.load(Ordering::Relaxed);
+        }
     }
 }
 
 pub enum Blob {
     Resident(Vec<u8>),
-    /// `len` bytes starting at `base` of a file read through `pool`
-    Disk { pool: Arc<FilePool>, base: u64, len: usize },
+    /// `len` bytes starting at `base` of a file read through `pool`; `hash`: XXH3-128 the bytes
+    /// must have when they are loaded whole (`make_resident`), for parts of a block
+    Disk { pool: Arc<FilePool>, base: u64, len: usize, hash: Option<u128> },
 }
 
 impl Blob {
@@ -72,12 +113,13 @@ impl Blob {
         }
         let pool = FilePool::open(path, 1, false)?;
         let len = pool.len as usize;
-        Ok(Blob::Disk { pool, base: 0, len })
+        Ok(Blob::Disk { pool, base: 0, len, hash: None })
     }
 
-    /// A slice [base, base+len) of a file (a part of a block), read on demand.
-    pub fn part(pool: Arc<FilePool>, base: u64, len: usize) -> Self {
-        Blob::Disk { pool, base, len }
+    /// A slice [base, base+len) of a file (a part of a block), read on demand; `hash` is checked
+    /// when it is loaded whole.
+    pub fn part(pool: Arc<FilePool>, base: u64, len: usize, hash: Option<u128>) -> Self {
+        Blob::Disk { pool, base, len, hash }
     }
 
     pub fn len(&self) -> usize {
@@ -123,12 +165,19 @@ impl Blob {
         self.get(0, self.len())
     }
 
-    /// Loads into RAM a file that was on disk (no-op if already resident). Returns the bytes loaded.
+    /// Loads into RAM a file that was on disk (no-op if already resident), checking its hash if it
+    /// has one. Returns the bytes loaded.
     pub fn make_resident(&mut self) -> Result<usize> {
-        if self.is_resident() {
-            return Ok(0);
-        }
+        let expected = match self {
+            Blob::Resident(_) => return Ok(0),
+            Blob::Disk { hash, .. } => *hash,
+        };
         let v = self.all()?.into_owned();
+        if let Some(h) = expected {
+            if twox_hash::XxHash3_128::oneshot(&v) != h {
+                return Err(crate::block::corrupt("una parte del bloque no coincide con su hash al cargarla"));
+            }
+        }
         let n = v.len();
         *self = Blob::Resident(v);
         Ok(n)

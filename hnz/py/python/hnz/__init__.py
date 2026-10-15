@@ -34,6 +34,9 @@ DateLike = Union[str, int, _dt.date, _dt.datetime]
 
 BudgetError = _hnz.BudgetError      # MemoryError: `ram` below the minimum (the message gives it)
 BusyError = _hnz.BusyError          # TimeoutError: no turn within `timeout`; retry or raise the limits
+BlockError = _hnz.BlockError        # a compact block cannot be used: one of the two below
+CorruptBlockError = _hnz.CorruptBlockError            # damaged bytes (hash, checksum or length)
+IncompatibleBlockError = _hnz.IncompatibleBlockError  # intact, but this hnz cannot read it
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,8 +254,10 @@ class Archive:
 def open(path: Union[str, os.PathLike], *, ram: Union[int, str, None] = '2GB',
          models: Union[str, os.PathLike, None] = None, ov_libs: Union[str, os.PathLike, None] = None,
          preload: bool = False, max_concurrent: int = 8, timeout: float = 30.0,
-         cache_dir: Union[str, os.PathLike, None] = None, cache_dir_size: Union[int, str] = '512MB') -> Archive:
-    """Opens an hnz archive (the folder with the segments).
+         cache_dir: Union[str, os.PathLike, None] = None, cache_dir_size: Union[int, str] = '512MB',
+         verify: Literal['header', 'quick', 'full'] = 'quick') -> Archive:
+    """Opens an hnz archive: a compact block (a folder with `hn.hnzb`, or the file itself) or a
+    folder of segments.
 
     - `ram`: RAM budget for everything hnz holds ("2GB", "10GB", bytes, or None for no limit). At
       open, a planner loads into RAM what fits by benefit (vectors, metadata, word index, then
@@ -266,6 +271,9 @@ def open(path: Union[str, os.PathLike], *, ram: Union[int, str, None] = '2GB',
       up to `timeout` seconds and then raise `BusyError`.
     - `cache_dir`: folder for an optional persistent cache of decompressed records (survives
       restarts; up to `cache_dir_size` on disk). Off by default.
+    - `verify` (blocks): "header" checks the structure; "quick" (default, ~0.1-0.3 s) also the
+      always-loaded parts and decodes 4 short records whose text is known; "full" hashes every
+      part and the embedder files too. Errors: `CorruptBlockError`, `IncompatibleBlockError`.
     """
     path = os.fspath(path)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 <= timeout < 1e9:
@@ -276,9 +284,26 @@ def open(path: Union[str, os.PathLike], *, ram: Union[int, str, None] = '2GB',
             'ov_libs': os.fspath(ov_libs) if ov_libs else _ov_libs(),
             'preload': bool(preload), 'ram': _size(ram), 'max_concurrent': int(max_concurrent),
             'timeout': float(timeout), 'cache_dir': os.fspath(cache_dir) if cache_dir else None,
-            'cache_dir_bytes': _size(cache_dir_size)}
+            'cache_dir_bytes': _size(cache_dir_size), 'verify': verify}
     return Archive(_hnz.open(path, json.dumps(opts)), path, opts['ram'])
 
 
-__all__ = ['open', 'Archive', 'SearchResult', 'Hit', 'Item', 'BudgetError', 'BusyError', 'KINDS', 'MAX_K',
-           'terms', 'index_text', '__version__']
+def verify_block(path: Union[str, os.PathLike], level: Literal['header', 'quick', 'full'] = 'full') -> dict:
+    """Checks a compact block without opening it for queries: "header" (structure and versions),
+    "quick" (what `open` checks by default) or "full" (every part hash, the padding, the embedder
+    files and every canary: a few seconds per GB). Returns a report; raises `CorruptBlockError` or
+    `IncompatibleBlockError` (the deeper check against the sources is `hnz verify-block --level deep`)."""
+    return json.loads(_hnz.verify_block(os.fspath(path), level))
+
+
+def inspect(path: Union[str, os.PathLike], *, project: Optional[int] = None,
+            lex: Union[str, os.PathLike, None] = None, id: Optional[int] = None) -> dict:
+    """Describes a compact block: its parts (offset, bytes, bytes per document), TOC and source
+    snapshot. `project`: sizes projected to that many documents (`lex`: the exact word-index sizes
+    from `hnz lexicon`); `id`: where that item's bytes are."""
+    return json.loads(_hnz.inspect(os.fspath(path), project, os.fspath(lex) if lex else None, id))
+
+
+__all__ = ['open', 'Archive', 'SearchResult', 'Hit', 'Item', 'BudgetError', 'BusyError', 'BlockError',
+           'CorruptBlockError', 'IncompatibleBlockError', 'KINDS', 'MAX_K', 'terms', 'index_text',
+           'verify_block', 'inspect', '__version__']

@@ -11,7 +11,7 @@ use super::math::logits_to_cum;
 use super::model::{Batch, LmModel};
 use crate::htmlx::{self, Mode};
 use crate::textstore::TextRec;
-use crate::varint::{get, put};
+use crate::varint::{put, try_get};
 use anyhow::{anyhow, bail, Context, Result};
 use crate::blob::Blob;
 use std::borrow::Cow;
@@ -246,7 +246,18 @@ fn partial_rec(s: &str, flags: u64) -> TextRec {
 
 pub struct LmCodec {
     pub model: LmModel,
-    tok: Tokenizer,
+    /// needed only to compress (decompression works from the model's own token bytes)
+    tok: Option<Tokenizer>,
+}
+
+/// See `LmCodec::plan_record`.
+pub enum RecPlan {
+    /// one header byte
+    Empty,
+    /// the whole record (stored with zstd)
+    Fallback(Vec<u8>),
+    /// the LM token ids and the first bytes of the record (header varint + check byte)
+    Lm { ids: Vec<u32>, head: Vec<u8> },
 }
 
 pub struct EncStats {
@@ -264,7 +275,24 @@ impl LmCodec {
         }
         let tp = model_path.with_extension("tokenizer.json");
         let tok = Tokenizer::from_file(&tp).map_err(|e| anyhow!("tokenizer {}: {e}", tp.display()))?;
+        Ok(Self { model, tok: Some(tok) })
+    }
+
+    /// From the bytes of the model (and of its tokenizer, needed only to compress).
+    pub fn from_parts(model: Vec<u8>, tokenizer_json: Option<&[u8]>) -> Result<Self> {
+        let model = LmModel::from_bytes(model)?;
+        if model.h.vocab > 1 << super::coder::VOCAB_BITS {
+            bail!("vocabulario de {} tokens: el codificador admite hasta {}", model.h.vocab, 1 << super::coder::VOCAB_BITS);
+        }
+        let tok = match tokenizer_json {
+            Some(j) => Some(Tokenizer::from_bytes(j).map_err(|e| anyhow!("tokenizer: {e}"))?),
+            None => None,
+        };
         Ok(Self { model, tok })
+    }
+
+    fn tokenizer(&self) -> &Tokenizer {
+        self.tok.as_ref().expect("este codec se cargó sin tokenizador: solo puede descomprimir")
     }
 
     /// Comprime un registro (un hilo). Devuelve el registro serializado y su nº de tokens.
@@ -272,39 +300,15 @@ impl LmCodec {
     /// cabecera = ntok<<4 | codec<<3 | lmmap<<2 | modo (codec 1 = zstd de reserva).
     pub fn encode_record(&self, title: &str, url: &str, text: &str) -> (Vec<u8>, u64) {
         let _fp = super::fpenv::FpGuard::new();
-        let fallback = || {
-            let mut raw = Vec::new();
-            put(&mut raw, title.len() as u64);
-            put(&mut raw, url.len() as u64);
-            raw.extend_from_slice(title.as_bytes());
-            raw.extend_from_slice(url.as_bytes());
-            raw.extend_from_slice(text.as_bytes());
-            let mut out = Vec::new();
-            put(&mut out, 1 << 3 | Mode::Raw as u64);
-            out.extend(zstd::bulk::compress(&raw, 19).expect("zstd"));
-            (out, 0u64)
+        let (ids, head) = match self.plan_record(title, url, text) {
+            RecPlan::Empty => {
+                let mut out = Vec::new();
+                put(&mut out, Mode::Modern as u64);
+                return (out, 0);
+            }
+            RecPlan::Fallback(out) => return (out, 0),
+            RecPlan::Lm { ids, head } => (ids, head),
         };
-        // registro vacío (p.ej. una fila deleted): solo 1 byte de cabecera, sin LM
-        if title.is_empty() && url.is_empty() && text.is_empty() {
-            let mut out = Vec::new();
-            put(&mut out, Mode::Modern as u64);
-            return (out, 0);
-        }
-        let Some((s, flags)) = lm_string(title, url, text) else {
-            return fallback();
-        };
-        let ids: Vec<u32> = match self.tok.encode(s.as_str(), false) {
-            Ok(e) => e.get_ids().to_vec(),
-            Err(_) => return fallback(),
-        };
-        let bytes: Vec<u8> = ids.iter().flat_map(|&i| self.model.token_bytes(i).iter().copied()).collect();
-        if ids.is_empty()
-            || ids.len() > MAX_TOKENS.min(self.model.h.max_pos.saturating_sub(1))
-            || bytes != s.as_bytes()
-            || ids.iter().any(|&i| i as usize >= self.model.h.vocab)
-        {
-            return fallback();
-        }
         let mut seq = Vec::with_capacity(ids.len() + 1);
         seq.push(self.model.h.bos);
         seq.extend_from_slice(&ids[..ids.len() - 1]);
@@ -318,11 +322,50 @@ impl LmCodec {
                 encode_token(&mut enc, &cum, ids[p0 + r]);
             }
         });
-        let mut out = Vec::new();
-        put(&mut out, (ids.len() as u64) << 4 | flags);
-        out.push(check_byte(s.as_bytes()));
+        let mut out = head;
         out.extend(enc.finish());
         (out, ids.len() as u64)
+    }
+
+    /// What `encode_record` does with a record, without the arithmetic coding: the whole record if
+    /// it is empty or stored with zstd, or the LM token ids and the record's header (varint + check
+    /// byte). Pack and verify use it to check copied records against the source items.
+    pub fn plan_record(&self, title: &str, url: &str, text: &str) -> RecPlan {
+        let fallback = || {
+            let mut raw = Vec::new();
+            put(&mut raw, title.len() as u64);
+            put(&mut raw, url.len() as u64);
+            raw.extend_from_slice(title.as_bytes());
+            raw.extend_from_slice(url.as_bytes());
+            raw.extend_from_slice(text.as_bytes());
+            let mut out = Vec::new();
+            put(&mut out, 1 << 3 | Mode::Raw as u64);
+            out.extend(zstd::bulk::compress(&raw, 19).expect("zstd"));
+            RecPlan::Fallback(out)
+        };
+        // registro vacío (p.ej. una fila deleted): solo 1 byte de cabecera, sin LM
+        if title.is_empty() && url.is_empty() && text.is_empty() {
+            return RecPlan::Empty;
+        }
+        let Some((s, flags)) = lm_string(title, url, text) else {
+            return fallback();
+        };
+        let ids: Vec<u32> = match self.tokenizer().encode(s.as_str(), false) {
+            Ok(e) => e.get_ids().to_vec(),
+            Err(_) => return fallback(),
+        };
+        let bytes: Vec<u8> = ids.iter().flat_map(|&i| self.model.token_bytes(i).iter().copied()).collect();
+        if ids.is_empty()
+            || ids.len() > MAX_TOKENS.min(self.model.h.max_pos.saturating_sub(1))
+            || bytes != s.as_bytes()
+            || ids.iter().any(|&i| i as usize >= self.model.h.vocab)
+        {
+            return fallback();
+        }
+        let mut head = Vec::new();
+        put(&mut head, (ids.len() as u64) << 4 | flags);
+        head.push(check_byte(s.as_bytes()));
+        RecPlan::Lm { ids, head }
     }
 
     /// Descomprime varios registros EN LOTE (los pesos se leen una vez por paso para todos).
@@ -362,6 +405,11 @@ impl LmCodec {
     }
 
     /// The smallest pool that can decode any record.
+    /// Most tokens an LM record can have (longer ones are stored with zstd).
+    pub fn max_tokens(&self) -> usize {
+        MAX_TOKENS.min(self.model.h.max_pos.saturating_sub(1))
+    }
+
     pub fn min_pool(&self) -> u64 {
         self.max_record_cost() + self.batch_overhead()
     }
@@ -395,7 +443,7 @@ impl LmCodec {
         let mut decs = Vec::new();
         let mut heads = Vec::new();
         for (i, r) in recs.iter().enumerate() {
-            let h = parse_head(r, has_check[i]);
+            let h = parse_head(r, has_check[i], self.max_tokens())?;
             if h.zstd {
                 out[i] = Some((decode_fallback(h.payload)?, false));
             } else if h.ntok == 0 {
@@ -530,7 +578,7 @@ impl LmCodec {
                 while slot_rec[s].is_none() && next < recs.len() {
                     let i = next;
                     next += 1;
-                    let h = parse_head(recs[i], has_check);
+                    let h = parse_head(recs[i], has_check, self.max_tokens())?;
                     if h.zstd {
                         sink(i, decode_fallback(h.payload)?)?;
                     } else if h.ntok == 0 {
@@ -581,28 +629,39 @@ struct RecHead<'a> {
     payload: &'a [u8],
 }
 
-fn parse_head(r: &[u8], has_check: bool) -> RecHead<'_> {
+/// The header of a record; a damaged one (unreadable, or more tokens than any record can have,
+/// which would make the decoder run on and on) is a `CorruptBlockError`.
+fn parse_head(r: &[u8], has_check: bool, max_tok: usize) -> Result<RecHead<'_>> {
+    let bad = || crate::block::corrupt("cabecera de registro dañada");
     let mut p = 0;
-    let h = get(r, &mut p);
+    let h = try_get(r, &mut p).ok_or_else(bad)?;
     let zstd = (h >> 3) & 1 == 1;
     let ntok = (h >> 4) as usize;
+    if ntok > max_tok {
+        return Err(bad());
+    }
     let mut check = None;
     if !zstd && ntok > 0 && has_check {
-        check = r.get(p).copied();
+        check = Some(*r.get(p).ok_or_else(bad)?);
         p += 1;
     }
-    RecHead { ntok, flags: h & 7, zstd, check, payload: &r[p.min(r.len())..] }
+    Ok(RecHead { ntok, flags: h & 7, zstd, check, payload: &r[p.min(r.len())..] })
 }
 
 fn decode_fallback(payload: &[u8]) -> Result<TextRec> {
-    let raw = zstd::stream::decode_all(payload)?;
+    let bad = || crate::block::corrupt("registro zstd dañado");
+    let raw = zstd::stream::decode_all(payload).map_err(|_| bad())?;
     let mut q = 0;
-    let tl = get(&raw, &mut q) as usize;
-    let ul = get(&raw, &mut q) as usize;
+    let tl = try_get(&raw, &mut q).ok_or_else(bad)? as usize;
+    let ul = try_get(&raw, &mut q).ok_or_else(bad)? as usize;
+    let (t_end, u_end) = (q.checked_add(tl).ok_or_else(bad)?, q.saturating_add(tl).checked_add(ul).ok_or_else(bad)?);
+    if u_end > raw.len() {
+        return Err(bad());
+    }
     Ok(TextRec {
-        title: String::from_utf8(raw[q..q + tl].to_vec())?,
-        url: String::from_utf8(raw[q + tl..q + tl + ul].to_vec())?,
-        text: String::from_utf8(raw[q + tl + ul..].to_vec())?,
+        title: String::from_utf8(raw[q..t_end].to_vec()).map_err(|_| bad())?,
+        url: String::from_utf8(raw[t_end..u_end].to_vec()).map_err(|_| bad())?,
+        text: String::from_utf8(raw[u_end..].to_vec()).map_err(|_| bad())?,
     })
 }
 
@@ -619,7 +678,8 @@ pub fn check_byte(b: &[u8]) -> u8 {
 fn finish_record(bytes: Vec<u8>, h: &RecHead) -> Result<TextRec> {
     if let Some(c) = h.check {
         if check_byte(&bytes) != c {
-            bail!("registro corrupto: la comprobación no coincide (¿modelo LM o binario distinto del que comprimió?)");
+            // the record's bytes passed their group checksum: this binary decodes them differently
+            return Err(crate::block::incompatible("registro corrupto: la comprobación no coincide (¿modelo LM o binario distinto del que comprimió?)"));
         }
     }
     let s = String::from_utf8(bytes).context("UTF-8 inválido al descomprimir (¿modelo distinto?)")?;
@@ -705,6 +765,67 @@ pub struct LmStore {
     bin: Blob,
     off: Vec<u64>,
     pub info: LmInfo,
+    /// blocks: low 32 bits of the XXH3-64 of each group, checked on every read
+    gsum: Option<Vec<u32>>,
+}
+
+/// Checksum of a text group in a block.
+pub fn group_sum(group: &[u8]) -> u32 {
+    twox_hash::XxHash3_64::oneshot(group) as u32
+}
+
+/// Writes the text of a block (P3): records in document order, in groups of `GROUP` (the record
+/// bytes are copied as they are), the u64 offset of each group (then the end) and a checksum per
+/// group.
+pub struct TextGroupWriter {
+    pending: Vec<Vec<u8>>,
+    pub groups: Vec<u8>,
+    pub idx: Vec<u8>,
+    pub gsum: Vec<u8>,
+    pub n: usize,
+}
+
+impl Default for TextGroupWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TextGroupWriter {
+    pub fn new() -> Self {
+        Self { pending: Vec::new(), groups: Vec::new(), idx: Vec::new(), gsum: Vec::new(), n: 0 }
+    }
+
+    pub fn push(&mut self, rec: Vec<u8>) {
+        self.pending.push(rec);
+        self.n += 1;
+        if self.pending.len() == GROUP {
+            self.flush();
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let mut g = Vec::new();
+        for r in &self.pending {
+            put(&mut g, r.len() as u64);
+        }
+        for r in &self.pending {
+            g.extend_from_slice(r);
+        }
+        self.idx.extend_from_slice(&(self.groups.len() as u64).to_le_bytes());
+        self.gsum.extend_from_slice(&group_sum(&g).to_le_bytes());
+        self.groups.extend_from_slice(&g);
+        self.pending.clear();
+    }
+
+    pub fn finish(mut self) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        self.flush();
+        self.idx.extend_from_slice(&(self.groups.len() as u64).to_le_bytes());
+        (self.groups, self.idx, self.gsum)
+    }
 }
 
 impl LmStore {
@@ -717,11 +838,26 @@ impl LmStore {
         let idx = std::fs::read(dir.join("lm.idx"))?;
         let off = idx.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
         let info: LmInfo = serde_json::from_str(&std::fs::read_to_string(dir.join("lm.json"))?)?;
-        Ok(Self { bin, off, info })
+        Ok(Self { bin, off, info, gsum: None })
+    }
+
+    /// From the parts of a block: the groups (in RAM or on disk), their offsets and checksums.
+    pub fn from_parts(bin: Blob, idx: &[u8], gsum: &[u8], info: LmInfo) -> Result<Self> {
+        let bad = |m: &str| crate::block::corrupt(format!("text: {m}"));
+        let ng = info.n_docs.div_ceil(info.group);
+        if idx.len() != (ng + 1) * 8 || gsum.len() != ng * 4 || info.group == 0 {
+            return Err(bad("tamaño del índice"));
+        }
+        let off: Vec<u64> = idx.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+        if off.windows(2).any(|w| w[1] < w[0]) || *off.last().unwrap() as usize != bin.len() {
+            return Err(bad("desplazamientos"));
+        }
+        let gsum = gsum.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        Ok(Self { bin, off, info, gsum: Some(gsum) })
     }
 
     pub fn ram_bytes(&self) -> usize {
-        self.bin.resident_bytes() + self.off.capacity() * 8
+        self.bin.resident_bytes() + self.off.capacity() * 8 + self.gsum.as_ref().map_or(0, |g| g.capacity() * 4)
     }
 
     pub fn blob(&self) -> &Blob {
@@ -737,11 +873,20 @@ impl LmStore {
         let g = doc / self.info.group;
         let k = doc % self.info.group;
         let data = self.bin.get(self.off[g] as usize, (self.off[g + 1] - self.off[g]) as usize)?;
+        let corrupt = || crate::block::corrupt(format!("text group {g} (docs {}..)", g * self.info.group));
+        if let Some(gs) = &self.gsum {
+            if group_sum(&data) != gs[g] {
+                return Err(corrupt());
+            }
+        }
         let n = (self.info.n_docs - g * self.info.group).min(self.info.group);
         let mut p = 0;
-        let lens: Vec<usize> = (0..n).map(|_| get(&data, &mut p) as usize).collect();
+        let lens: Vec<usize> = (0..n).map(|_| crate::varint::try_get(&data, &mut p).map(|x| x as usize)).collect::<Option<_>>().ok_or_else(corrupt)?;
         let start = p + lens[..k].iter().sum::<usize>();
         let end = start + lens[k];
+        if end > data.len() {
+            return Err(corrupt());
+        }
         Ok(match data {
             Cow::Borrowed(b) => Cow::Borrowed(&b[start..end]),
             Cow::Owned(v) => Cow::Owned(v[start..end].to_vec()),
@@ -750,6 +895,11 @@ impl LmStore {
 
     pub fn rec_check(&self) -> bool {
         self.info.rec_check
+    }
+
+    /// Where group `g` is stored: (offset, length) in the text file or part.
+    pub fn group_range(&self, g: usize) -> (u64, u64) {
+        (self.off[g], self.off[g + 1] - self.off[g])
     }
 
     pub fn check_model(&self, codec: &LmCodec) -> Result<()> {

@@ -98,7 +98,12 @@ fn f32s(b: &[u8]) -> Vec<f32> {
 impl LmModel {
     pub fn load(path: &Path) -> Result<Self> {
         let data = std::fs::read(path).with_context(|| format!("modelo LM {}", path.display()))?;
-        if &data[..6] != b"HNZLM1" {
+        Self::from_bytes(data)
+    }
+
+    /// From the bytes of a `.hnzlm` file (its id depends only on these bytes).
+    pub fn from_bytes(data: Vec<u8>) -> Result<Self> {
+        if data.len() < 12 || &data[..6] != b"HNZLM1" {
             bail!("no es un .hnzlm");
         }
         let hl = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;

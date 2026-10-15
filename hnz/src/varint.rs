@@ -24,6 +24,25 @@ pub fn get(buf: &[u8], pos: &mut usize) -> u64 {
     }
 }
 
+/// Like `get`, but None past the end of `buf` or after 10 bytes (corrupt input never panics).
+#[inline]
+pub fn try_get(buf: &[u8], pos: &mut usize) -> Option<u64> {
+    let mut v = 0u64;
+    let mut shift = 0;
+    loop {
+        let b = *buf.get(*pos)?;
+        *pos += 1;
+        v |= ((b & 0x7f) as u64) << shift;
+        if b < 0x80 {
+            return Some(v);
+        }
+        shift += 7;
+        if shift > 63 {
+            return None;
+        }
+    }
+}
+
 #[inline]
 pub fn zz(v: i64) -> u64 {
     ((v << 1) ^ (v >> 63)) as u64

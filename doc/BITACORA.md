@@ -775,3 +775,54 @@ the multi-day all-HN runs (P5) start after P3.
   same inputs, and a corruption matrix (superblock, TOC, trailer, truncation, extension, part bytes,
   magic, major version, unknown feature). Reads go through a pool of file handles (Windows
   serializes I/O on one synchronous handle).
+- **Finding: HN ids are not in time order.** 309,761 items (0.63 %) have a time later than some
+  higher id; they concentrate in 2013, 2015, 2024 and 2025, and 2 have corrupt times (year ~58,000).
+  Without them the rest is perfectly monotonic. So a block keeps documents in **(time, id) order**
+  (a date range = a contiguous range of documents, exact) and finds the out-of-order ids through a
+  small table (`meta/late`). Month files' id ranges overlap (24 pairs): the old engine refuses
+  overlapping segments, which would have broken a per-year build in the old format.
+- **`hnz globals`** (replaces `dfpass`; 117 s): the same df FST (byte-identical), the global author
+  table (1,144,172 authors, 4.97 MB zstd) and per-file counts and hashes.
+- **Exact all-HN word index** (`hnz lexicon`, 579 s): FST 52.9 MB + postings 276.4 MB + norms
+  35.7 MB (zstd) = **365.0 MB**; 10,901 frequent terms (df only), 2,562,172 single-document terms
+  (inline in the FST), 1,650,122 lists; 119,574,577 postings; avgdl 27.2.
+- **Order of `kids`** (D3): in 2010 and 2015 ~77 % of the lists are the children in id order, 9 %
+  in reverse, 13 % other (8-17 KB per month of exceptions); 2024-01 has no kids in the dataset.
+  Stored as a code per document relative to the children found through `parent` (139.6 KB).
+- **Sample block** (`hnz pack --spec work/p3/pack.json`, 59 s; layout and numbers in
+  [08-block.md](08-block.md)): 637,046 documents (40 out of time order), 611,576 LM records, 64
+  zstd, 25,406 empty; 611,626 vectors. Container 146.9 MB + embedder IR 276.0 MB. Every copied
+  record checked against its item when packing. Same bytes with 1 or 16 threads, and a rewrite
+  through the writer gives the same file. **Projection to all of HN** (exact word index): **5.32 GB,
+  107.8 B/doc** (text 56.7, codes 30.7, metadata 5.1 B/doc; models and IR 0.35 GB).
+- **Quality on the block** (`hnz eval`, 300 queries per month, P@10, 2024 / 2010 / 2015): vector
+  0.208 / 0.147 / 0.185 (mean 0.180 = E30a's 0.181 for 256-bit prefix codes); words alone 0.119 /
+  0.056 / 0.080; hybrid (w 0.15, c 20) 0.241 / 0.169 / 0.217. **Words alone are weak by design**:
+  only rare terms (global df <= 0.02 %) have postings, and common technical words are frequent in
+  HN ("rust", "postgres", "mysql", "kubernetes", "terraform"): a keyword query made only of them
+  returns nothing. P4 scores every query word over the vector candidates (E30c), which covers it.
+- **Python on the block**: `hnz.open(block, ram="2GB")` in 0.33 s (`verify="quick"`); floor
+  708 MiB; `get()` identical to the Parquet for 900 random items (every column but `words`); 8
+  clients for 60 s at the floor + 24 MiB: 0 errors, process growth 0.86 x ram, ledger peak 0.97 x ram.
+- **`hnz verify-block`** (`hnz/src/verify.rs`): header (ms), quick 0.33 s, full 4.9 s (423 MB
+  hashed incl. the IR), **deep 13.3 min: 0 differences** (every metadata row, record, header, vector
+  code, kids list and id lookup against the sources; the word index rebuilt byte for byte; 12,825
+  records decoded and compared: 758 s of the 13 min, 17 rec/s with the CPU shared with the LM
+  training). `hnz inspect` (parts, offsets, projection, where an id's bytes are). Exit codes 0 / 2
+  corrupt / 3 incompatible / 4 differs from its sources / 1.
+- **Damaged data never panics** (review item): metadata lookups, BM25 and the engine's search /
+  fetch / get return typed errors; BM25 cursors validate every postings block (sizes, bit widths,
+  increasing documents < n_docs) and report damage; record headers are bounded by the model's
+  `max_tokens`; zstd fallback records are checked; a metadata frame decodes into at most 16 MB.
+  A latent bug fixed on the way: a metadata block made only of out-of-order rows repeats the
+  previous block's main id, and the id lookup would have searched the wrong block (not present in
+  the sample; possible at full scale).
+- **Regression:** with the P3 binary the old archive (`out/`) gives the same eval figures (3 months,
+  every configuration) and the same results for 20 searches as the P2 binary; the block gives the
+  same eval figures before and after the hardening. Tests: Rust 27; Python 24 (old archive) + 30
+  (block: lossless `get`, ids out of time order, disk = RAM, concurrency, CLI = library, memory
+  <= 1.03 x ram, and a tamper matrix: 9 places found at open, a damaged record / metadata block
+  found when read, padding found by `full`, a damaged `embed.bin` found when the embedder loads,
+  200 flips in codes and postings without a crash, not-a-block, a block next to segments, and 5
+  intact-but-incompatible rewrites: math version, row encoding, sign rule, another LM, an unknown
+  required part).

@@ -84,6 +84,23 @@ pub struct VecIndex {
     has: Vec<u64>,
     pub nbytes: usize,
     pub n: usize,
+    /// sparse layout (blocks): codes only for the documents with a vector, in document order;
+    /// `rank[w]` = vectors before word `w` of `has` (derived at open)
+    rank: Option<Vec<u32>>,
+    /// blocks: ties at the Hamming cut are broken by a hash of (doc, query) instead of the doc
+    /// number (in one global, time-ordered segment the doc number would always favour old docs)
+    pub tie_seeded: bool,
+}
+
+/// 32-bit integer hash (murmur3 finalizer).
+#[inline]
+fn mix32(x: u32) -> u32 {
+    let mut z = x.wrapping_mul(0x9E37_79B1);
+    z ^= z >> 16;
+    z = z.wrapping_mul(0x85EB_CA6B);
+    z ^= z >> 13;
+    z = z.wrapping_mul(0xC2B2_AE35);
+    z ^ (z >> 16)
 }
 
 /// Tabla de consulta: para cada byte del código, suma de q[d] de los bits a 1.
@@ -155,7 +172,79 @@ impl VecIndex {
                 hb.len()
             );
         }
-        Ok(Self { n: n_docs, codes, has, nbytes })
+        Ok(Self { n: n_docs, codes, has, nbytes, rank: None, tie_seeded: false })
+    }
+
+    /// From the parts of a block: the bitmap of documents with a vector and their codes (only
+    /// those, in document order; in RAM or on disk).
+    pub fn from_parts(has_bytes: &[u8], codes: Blob, bits: usize, n_docs: usize) -> Result<Self> {
+        let nbytes = bits / 8;
+        if bits == 0 || bits % 64 != 0 || has_bytes.len() % 8 != 0 || has_bytes.len() / 8 < n_docs.div_ceil(64) {
+            return Err(crate::block::corrupt("vec/has: tamaño"));
+        }
+        let has: Vec<u64> = has_bytes.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+        let mut rank = Vec::with_capacity(has.len());
+        let mut acc = 0u32;
+        for w in &has {
+            rank.push(acc);
+            acc += w.count_ones();
+        }
+        if codes.len() != acc as usize * nbytes {
+            return Err(crate::block::corrupt(format!("vec/codes: {} bytes para {acc} vectores de {nbytes} B", codes.len())));
+        }
+        Ok(Self { n: n_docs, codes, has, nbytes, rank: Some(rank), tie_seeded: true })
+    }
+
+    /// Code slot of a document (dense: the document; sparse: vectors before it).
+    #[inline]
+    fn slot(&self, doc: usize) -> usize {
+        match &self.rank {
+            None => doc,
+            Some(r) => r[doc / 64] as usize + (self.has[doc / 64] & ((1u64 << (doc % 64)) - 1)).count_ones() as usize,
+        }
+    }
+
+    /// Calls `f(doc, code)` for the documents of [st, en) that have a vector, reading their codes in
+    /// windows (one borrowed slice when resident; reads of at most `DISK_READ_DOCS` codes on disk).
+    fn scan(&self, st: usize, en: usize, mut f: impl FnMut(usize, &[u8])) {
+        let nb = self.nbytes;
+        if self.rank.is_none() {
+            self.windows(st, en, |a, bytes| {
+                for d in a..a + bytes.len() / nb {
+                    if self.has(d) {
+                        f(d, &bytes[(d - a) * nb..(d - a + 1) * nb]);
+                    }
+                }
+            });
+            return;
+        }
+        let (s0, s1) = (self.slot(st), if en >= self.n { self.slot_end() } else { self.slot(en) });
+        let step = if self.codes.is_resident() { (s1 - s0).max(1) } else { DISK_READ_DOCS };
+        let mut d = st;
+        let mut s = s0;
+        while s < s1 {
+            let e = (s + step).min(s1);
+            let bytes = self.codes.get(s * nb, (e - s) * nb).unwrap_or_else(|err| {
+                eprintln!("hnz: no se pudo leer vec/codes: {err:#}");
+                Cow::Owned(vec![0; (e - s) * nb])
+            });
+            for i in 0..e - s {
+                while !self.has(d) {
+                    d += 1;
+                }
+                f(d, &bytes[i * nb..(i + 1) * nb]);
+                d += 1;
+            }
+            s = e;
+        }
+    }
+
+    /// Number of code slots (sparse: documents with a vector).
+    fn slot_end(&self) -> usize {
+        match &self.rank {
+            None => self.n,
+            Some(r) => r.last().map_or(0, |&x| x as usize + self.has.last().map_or(0, |w| w.count_ones() as usize)),
+        }
     }
 
     #[inline]
@@ -164,7 +253,7 @@ impl VecIndex {
     }
 
     pub fn ram_bytes(&self) -> usize {
-        self.codes.resident_bytes() + self.has.capacity() * 8
+        self.codes.resident_bytes() + self.has.capacity() * 8 + self.rank.as_ref().map_or(0, |r| r.capacity() * 4)
     }
 
     pub fn blob(&self) -> &Blob {
@@ -190,10 +279,15 @@ impl VecIndex {
     /// Code of the document (borrowed if the codes are resident; read from disk if not).
     #[inline]
     pub fn code(&self, doc: usize) -> Cow<'_, [u8]> {
-        self.codes.get(doc * self.nbytes, self.nbytes).unwrap_or_else(|e| {
+        self.try_code(doc).unwrap_or_else(|e| {
             eprintln!("hnz: no se pudo leer vec.bin: {e:#}");
             Cow::Owned(vec![0; self.nbytes])
         })
+    }
+
+    /// Code of the document, or the read error.
+    pub fn try_code(&self, doc: usize) -> Result<Cow<'_, [u8]>> {
+        self.codes.get(self.slot(doc) * self.nbytes, self.nbytes)
     }
 
     /// Codes of documents [st, en), consecutive (a single read if they are on disk).
@@ -234,14 +328,11 @@ impl VecIndex {
         for w in 0..nwin {
             let st = lo + w * gap;
             let en = (st + W).min(hi);
-            let bytes = self.codes_of(st, en);
-            for d in st..en {
-                seen += 1;
-                if self.has(d) {
-                    sample[Self::ham(q, &bytes[(d - st) * self.nbytes..], s1) as usize] += 1;
-                    ns += 1;
-                }
-            }
+            seen += (en - st) as u64;
+            self.scan(st, en, |_, c| {
+                sample[Self::ham(q, c, s1) as usize] += 1;
+                ns += 1;
+            });
         }
         let frac = cand as f64 / (ns as f64 * (hi - lo) as f64 / seen.max(1) as f64).max(1.0);
         let want = (frac * ns as f64 * 2.0).ceil() as u64 + 16;
@@ -256,25 +347,23 @@ impl VecIndex {
             maxd as u32
         };
         let t_est = cut(&sample, want);
+        // ties at the cut: by doc number (segments) or by a hash of (doc, query) (blocks)
+        let seed = q.sign1.iter().fold(0x2545_F491u32, |a, &w| mix32(a ^ w as u32 ^ (w >> 32) as u32));
+        let tie = |d: usize| if self.tie_seeded { mix32(d as u32 ^ seed) } else { d as u32 };
         // 2) una pasada: candidatos con Hamming <= t e histograma exacto de todo el rango
-        let pass = |t: u32| -> (Vec<(u32, u32)>, Vec<u64>) {
+        let pass = |t: u32| -> (Vec<(u32, u32, u32)>, Vec<u64>) {
             let starts: Vec<usize> = (lo..hi).step_by(CH).collect();
-            let parts: Vec<(Vec<(u32, u32)>, Vec<u64>)> = starts
+            let parts: Vec<(Vec<(u32, u32, u32)>, Vec<u64>)> = starts
                 .par_iter()
                 .map(|&st| {
                     let en = (st + CH).min(hi);
                     let mut v = Vec::new();
                     let mut hist = vec![0u64; maxd + 1];
-                    self.windows(st, en, |a, bytes| {
-                        for d in a..a + bytes.len() / self.nbytes {
-                            if !self.has(d) {
-                                continue;
-                            }
-                            let h = Self::ham(q, &bytes[(d - a) * self.nbytes..], s1);
-                            hist[h as usize] += 1;
-                            if h <= t {
-                                v.push((h, d as u32));
-                            }
+                    self.scan(st, en, |d, c| {
+                        let h = Self::ham(q, c, s1);
+                        hist[h as usize] += 1;
+                        if h <= t {
+                            v.push((h, tie(d), d as u32));
                         }
                     });
                     (v, hist)
@@ -300,7 +389,7 @@ impl VecIndex {
             all.truncate(cand);
         }
         all.sort_unstable();
-        all.into_iter().map(|x| x.1).collect()
+        all.into_iter().map(|x| x.2).collect()
     }
 
     /// Versión anterior de la etapa 1 (montículos por trozo), solo para comparar en pruebas y en el
@@ -315,18 +404,13 @@ impl VecIndex {
             .map(|&st| {
                 let en = (st + CH).min(hi);
                 let mut h: BinaryHeap<(u32, u32)> = BinaryHeap::with_capacity(cand.min(en - st) + 1);
-                self.windows(st, en, |a, bytes| {
-                    for d in a..a + bytes.len() / self.nbytes {
-                        if !self.has(d) {
-                            continue;
-                        }
-                        let ham = Self::ham(q, &bytes[(d - a) * self.nbytes..], s1);
-                        if h.len() < cand {
-                            h.push((ham, d as u32));
-                        } else if ham < h.peek().unwrap().0 {
-                            h.pop();
-                            h.push((ham, d as u32));
-                        }
+                self.scan(st, en, |d, c| {
+                    let ham = Self::ham(q, c, s1);
+                    if h.len() < cand {
+                        h.push((ham, d as u32));
+                    } else if ham < h.peek().unwrap().0 {
+                        h.pop();
+                        h.push((ham, d as u32));
                     }
                 });
                 h
@@ -365,5 +449,71 @@ impl VecIndex {
         docs.iter()
             .map(|&d| if self.has(d as usize) { q.score(&self.code(d as usize)) } else { f32::NEG_INFINITY })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rnd(x: &mut u64) -> u64 {
+        *x ^= *x << 13;
+        *x ^= *x >> 7;
+        *x ^= *x << 17;
+        *x
+    }
+
+    #[test]
+    fn sparse_equals_dense() {
+        let (n, nb) = (20_000usize, 32usize);
+        let mut x = 99u64;
+        let mut dense = vec![0u8; n * nb];
+        let mut has = vec![0u64; n.div_ceil(64)];
+        let mut sparse = Vec::new();
+        for d in 0..n {
+            if rnd(&mut x) % 10 != 0 {
+                has[d / 64] |= 1 << (d % 64);
+                for b in 0..nb {
+                    dense[d * nb + b] = rnd(&mut x) as u8;
+                }
+                sparse.extend_from_slice(&dense[d * nb..(d + 1) * nb]);
+            }
+        }
+        let hb: Vec<u8> = has.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let dv = VecIndex { codes: Blob::Resident(dense), has: has.clone(), nbytes: nb, n, rank: None, tie_seeded: false };
+        for resident in [true, false] {
+            let codes = if resident {
+                Blob::Resident(sparse.clone())
+            } else {
+                let p = std::env::temp_dir().join(format!("hnz_vec_sparse_{}.bin", std::process::id()));
+                std::fs::write(&p, &sparse).unwrap();
+                Blob::open(&p, false).unwrap()
+            };
+            let mut sv = VecIndex::from_parts(&hb, codes, 256, n).unwrap();
+            sv.tie_seeded = false;
+            let q: Vec<f32> = (0..768).map(|_| (rnd(&mut x) % 1000) as f32 / 500.0 - 1.0).collect();
+            let lut = QueryLut::new(&q, nb);
+            for d in [0, 1, 63, 64, 999, n - 1] {
+                assert_eq!(dv.has(d), sv.has(d));
+                if dv.has(d) {
+                    assert_eq!(dv.code(d), sv.code(d), "doc {d}");
+                }
+            }
+            for (lo, hi) in [(0, n), (100, 7_000), (12_345, 19_999)] {
+                for cand in [50, 2_000] {
+                    assert_eq!(dv.search(&lut, lo, hi, cand, 30), sv.search(&lut, lo, hi, cand, 30), "{lo}..{hi} {cand}");
+                    assert_eq!(dv.hamming_select_heap(&lut, lo, hi, cand), sv.hamming_select_heap(&lut, lo, hi, cand));
+                }
+            }
+            let docs: Vec<u32> = (0..n as u32).step_by(7).collect();
+            assert_eq!(dv.score_docs(&lut, &docs), sv.score_docs(&lut, &docs));
+            // seeded ties: same candidates up to the tie group, not biased towards low doc numbers
+            sv.tie_seeded = true;
+            let a = sv.hamming_select_pub(&lut, 0, n, 500);
+            assert_eq!(a.len(), 500);
+            let mean = a.iter().map(|&d| d as f64).sum::<f64>() / a.len() as f64;
+            assert!(mean > n as f64 * 0.35, "mean doc {mean}");
+        }
+        assert!(VecIndex::from_parts(&hb, Blob::Resident(vec![0; 64]), 256, n).is_err());
     }
 }

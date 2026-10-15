@@ -6,7 +6,7 @@
 //! - Búsqueda top-k con MaxScore y saltos por rango de docIDs (= rango de fechas).
 
 use crate::tokenize;
-use crate::varint::{get, put};
+use crate::varint::{put, try_get};
 use anyhow::{Context, Result};
 use bitpacking::{BitPacker, BitPacker4x};
 use fst::{Map, MapBuilder};
@@ -44,7 +44,22 @@ pub struct Bm25Info {
     /// términos con df/n_docs > este valor no se indexan (stopwords automáticas)
     #[serde(default = "one")]
     pub max_df_ratio: f32,
+    /// dictionary value layout: 0 = segment (Single/List), 1 = block v1 (tagged, see `LexWriter`)
+    #[serde(default)]
+    pub layout: u32,
+    /// sum of the documents' lengths (indexable terms); block layout
+    #[serde(default)]
+    pub total_len: u64,
+    /// block layout: terms with a global df above this have no postings (only their df)
+    #[serde(default)]
+    pub max_df_abs: u64,
 }
+
+/// Dictionary value layout of a block (`Bm25Info::layout = 1`): tag = v & 3.
+pub const LAYOUT_BLOCK: u32 = 1;
+const TAG_FREQUENT: u64 = 0;
+const TAG_SINGLE: u64 = 1;
+const TAG_LIST: u64 = 2;
 
 fn yes() -> bool {
     true
@@ -143,6 +158,9 @@ impl Builder {
             n_postings,
             with_tf,
             max_df_ratio,
+            layout: 0,
+            total_len: self.total_len,
+            max_df_abs: 0,
         };
         std::fs::write(dir.join("bm25.json"), serde_json::to_string_pretty(&info)?)?;
         Ok(info)
@@ -191,16 +209,23 @@ fn encode_postings(p: &[(u32, u32)], out: &mut Vec<u8>, with_tf: bool) {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TermPost {
     Single { doc: u32, tf: u32 },
     List { off: usize },
+    /// a term too frequent to have postings (block layout): only its df is known
+    Frequent,
 }
 
 /// Cursor over a postings list. Each block of 128 is read when the cursor reaches it: borrowed if
-/// bm25.post is in RAM, or with one disk read (memory does not depend on the list's size).
+/// bm25.post is in RAM, or with one disk read (memory does not depend on the list's size). Every
+/// block is validated (sizes, bit widths, increasing documents below `n_docs`): a damaged list
+/// ends the cursor and is reported by `bad` (the postings of a block are read without a hash).
 pub struct Cursor<'a> {
     post: &'a Blob,
+    n_docs: usize,
+    /// what was wrong with the list (read error or damaged bytes), if anything
+    bad: Option<String>,
     /// start of the list in bm25.post
     base: usize,
     with_tf: bool,
@@ -219,9 +244,11 @@ pub struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
-    fn new(post: &'a Blob, t: TermPost, with_tf: bool) -> Self {
+    fn new(post: &'a Blob, t: TermPost, with_tf: bool, n_docs: usize) -> Self {
         let mut c = Cursor {
             post,
+            n_docs,
+            bad: None,
             base: 0,
             with_tf,
             single: None,
@@ -249,19 +276,39 @@ impl<'a> Cursor<'a> {
                     c.exhaust();
                 }
             }
+            TermPost::Frequent => c.exhaust(),
         }
         c
     }
 
     /// Bytes [o, o+len) of the list (clipped at the end of the file); None if the read fails.
-    fn read(&self, o: usize, len: usize) -> Option<Cow<'a, [u8]>> {
-        match self.post.get(self.base + o, len) {
+    fn read(&mut self, o: usize, len: usize) -> Option<Cow<'a, [u8]>> {
+        let post = self.post;
+        match post.get(self.base + o, len) {
             Ok(b) => Some(b),
             Err(e) => {
-                eprintln!("hnz: no se pudieron leer postings de bm25.post: {e:#}");
+                self.fail(format!("{e:#}"));
                 None
             }
         }
+    }
+
+    /// Ends the cursor and records why (the first reason is kept).
+    fn fail(&mut self, why: String) {
+        if self.bad.is_none() {
+            self.bad = Some(why);
+        }
+        self.exhaust();
+    }
+
+    fn damaged(&mut self, what: &str) -> bool {
+        self.fail(format!("postings dañados ({what}) en la posición {}", self.base));
+        false
+    }
+
+    /// Why the list could not be read whole, if it could not.
+    pub fn bad(&self) -> Option<&str> {
+        self.bad.as_deref()
     }
 
     /// Exhausted list (e.g. after a read error): `doc()` returns END.
@@ -277,15 +324,26 @@ impl<'a> Cursor<'a> {
     fn header(&mut self) -> bool {
         let Some(head) = self.read(0, 10) else { return false };
         let mut p = 0;
-        let df = get(&head, &mut p) as usize;
+        let Some(df) = try_get(&head, &mut p) else { return self.damaged("df") };
+        if df == 0 || df > self.n_docs as u64 {
+            return self.damaged("df");
+        }
+        let df = df as usize;
         let nfull = df / BLK;
         let Some(h) = self.read(0, p + nfull * 20) else { return false };
-        let mut last = 0u32;
+        let mut last = 0u64;
         let mut plen = Vec::with_capacity(nfull);
-        for _ in 0..nfull {
-            last += get(&h, &mut p) as u32;
-            self.lasts.push(last);
-            plen.push(get(&h, &mut p) as usize);
+        for b in 0..nfull {
+            let Some(dl) = try_get(&h, &mut p) else { return self.damaged("cabecera") };
+            let Some(pl) = try_get(&h, &mut p) else { return self.damaged("cabecera") };
+            // each full block holds 128 increasing documents; its payload is 2 bytes + at most 32
+            // bits per document and per frequency
+            last += dl;
+            if last >= self.n_docs as u64 || (b > 0 && dl < BLK as u64) || (b == 0 && last < BLK as u64 - 1) || !(2..=1026).contains(&pl) {
+                return self.damaged("cabecera");
+            }
+            self.lasts.push(last as u32);
+            plen.push(pl as usize);
         }
         for l in plen {
             self.pay.push(p);
@@ -304,17 +362,24 @@ impl<'a> Cursor<'a> {
         if b < self.nfull {
             let o = self.pay[b];
             let end = if b + 1 < self.nfull { self.pay[b + 1] } else { self.tail_off };
-            let Some(data) = self.read(o, end - o) else {
-                self.exhaust();
-                return false;
-            };
+            let Some(data) = self.read(o, end - o) else { return false };
+            if data.len() != end - o || data.len() < 2 {
+                return self.damaged("bloque");
+            }
             let (db, tb) = (data[0], data[1]);
+            let need = 2 + BitPacker4x::compressed_block_size(db) + if self.with_tf { BitPacker4x::compressed_block_size(tb) } else { 0 };
+            if db > 32 || tb > 32 || data.len() != need {
+                return self.damaged("bloque");
+            }
             let init = if b == 0 { 0 } else { self.lasts[b - 1] };
             let n = bp.decompress_sorted(init, &data[2..], &mut self.docs, db);
+            if (b > 0 && self.docs[0] <= init) || self.docs.windows(2).any(|w| w[1] <= w[0]) || self.docs[BLK - 1] != self.lasts[b] {
+                return self.damaged("bloque");
+            }
             if self.with_tf {
                 bp.decompress(&data[2 + n..], &mut self.tfs, tb);
                 for t in self.tfs.iter_mut() {
-                    *t += 1;
+                    *t = t.saturating_add(1);
                 }
             } else {
                 self.tfs.fill(1);
@@ -322,16 +387,25 @@ impl<'a> Cursor<'a> {
             self.len = BLK;
         } else {
             let cnt = self.df - self.nfull * BLK;
-            let Some(data) = self.read(self.tail_off, cnt * 20) else {
-                self.exhaust();
-                return false;
-            };
+            let Some(data) = self.read(self.tail_off, cnt * 20) else { return false };
             let mut p = 0;
-            let mut prev = if self.nfull == 0 { 0 } else { self.lasts[self.nfull - 1] };
+            let mut prev = if self.nfull == 0 { 0u64 } else { self.lasts[self.nfull - 1] as u64 };
             for i in 0..cnt {
-                prev += get(&data, &mut p) as u32;
-                self.docs[i] = prev;
-                self.tfs[i] = if self.with_tf { get(&data, &mut p) as u32 } else { 1 };
+                let Some(d) = try_get(&data, &mut p) else { return self.damaged("cola") };
+                // increasing documents (only the very first of a list may be doc 0)
+                if d == 0 && (i > 0 || self.nfull > 0) || prev + d >= self.n_docs as u64 {
+                    return self.damaged("cola");
+                }
+                prev += d;
+                self.docs[i] = prev as u32;
+                self.tfs[i] = if self.with_tf {
+                    match try_get(&data, &mut p) {
+                        Some(t) => t.min(u32::MAX as u64) as u32,
+                        None => return self.damaged("cola"),
+                    }
+                } else {
+                    1
+                };
             }
             self.len = cnt;
         }
@@ -422,6 +496,14 @@ impl Bm25 {
         Ok(Self { fst, post, norms, info })
     }
 
+    /// From the parts of a block: the dictionary, the postings (in RAM or on disk) and the norms.
+    pub fn from_parts(fst: Vec<u8>, post: Blob, norms: Vec<u8>, info: Bm25Info) -> Result<Self> {
+        if norms.len() != info.n_docs {
+            anyhow::bail!("norms: {} bytes for {} documents", norms.len(), info.n_docs);
+        }
+        Ok(Self { fst: Map::new(fst)?, post, norms, info })
+    }
+
     /// Bytes it takes in RAM.
     pub fn ram_bytes(&self) -> usize {
         self.fst.as_fst().as_bytes().len() + self.post.resident_bytes() + self.norms.capacity()
@@ -438,19 +520,41 @@ impl Bm25 {
     /// (postings, df) del término en este segmento.
     pub fn lookup(&self, term: &str) -> Option<(TermPost, u32)> {
         let v = self.fst.get(term)?;
+        if self.info.layout == LAYOUT_BLOCK {
+            return match v & 3 {
+                TAG_FREQUENT => Some((TermPost::Frequent, (v >> 2) as u32)),
+                TAG_SINGLE => Some((TermPost::Single { doc: (v >> 2) as u32, tf: 1 }, 1)),
+                TAG_LIST => {
+                    let off = (v >> 2) as usize;
+                    let head = self.post.get(off, 10).ok()?;
+                    let mut p = 0;
+                    let df = crate::varint::try_get(&head, &mut p)? as u32;
+                    Some((TermPost::List { off }, df))
+                }
+                _ => None,
+            };
+        }
         if v & 1 == 1 {
             Some((TermPost::Single { doc: (v >> 9) as u32, tf: ((v >> 1) & 0xff) as u32 }, 1))
         } else {
             let off = (v >> 1) as usize;
             let head = self.post.get(off, 10).ok()?;
             let mut p = 0;
-            let df = get(&head, &mut p) as u32;
+            let df = try_get(&head, &mut p)? as u32;
             Some((TermPost::List { off }, df))
         }
     }
 
     pub fn cursor(&self, t: TermPost) -> Cursor<'_> {
-        Cursor::new(&self.post, t, self.info.with_tf)
+        Cursor::new(&self.post, t, self.info.with_tf, self.info.n_docs)
+    }
+
+    /// A damaged or unreadable postings list among the cursors -> `CorruptBlockError`.
+    fn check<'b, 'c: 'b>(&self, mut cur: impl Iterator<Item = &'b Cursor<'c>>) -> Result<()> {
+        match cur.find_map(|c| c.bad()) {
+            Some(why) => Err(crate::block::corrupt(format!("índice de palabras: {why}"))),
+            None => Ok(()),
+        }
     }
 
     #[inline]
@@ -461,9 +565,9 @@ impl Bm25 {
     }
 
     /// Top-k en [lo, hi) con MaxScore. `terms`: (postings, idf global).
-    pub fn top_k(&self, terms: &[(TermPost, f32)], lo: u32, hi: u32, k: usize) -> Vec<(u32, f32)> {
+    pub fn top_k(&self, terms: &[(TermPost, f32)], lo: u32, hi: u32, k: usize) -> Result<Vec<(u32, f32)>> {
         if terms.is_empty() || k == 0 {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let mut cur: Vec<(Cursor, f32, f32)> = terms
             .iter()
@@ -523,13 +627,14 @@ impl Bm25 {
                 theta = heap.peek().unwrap().0 .0 .0;
             }
         }
+        self.check(cur.iter().map(|c| &c.0))?;
         let mut v: Vec<(u32, f32)> = heap.into_iter().map(|Reverse((s, d))| (d, s.0)).collect();
         v.sort_by(|a, b| b.1.total_cmp(&a.1));
-        v
+        Ok(v)
     }
 
     /// Puntuación BM25 de una lista de docs (ordenados ascendentemente).
-    pub fn score_docs(&self, terms: &[(TermPost, f32)], docs: &[u32]) -> Vec<f32> {
+    pub fn score_docs(&self, terms: &[(TermPost, f32)], docs: &[u32]) -> Result<Vec<f32>> {
         let mut out = vec![0f32; docs.len()];
         for &(t, idf) in terms {
             let mut c = self.cursor(t);
@@ -542,8 +647,134 @@ impl Bm25 {
                     out[i] += self.score(idf, c.tf(), d);
                 }
             }
+            self.check(std::iter::once(&c))?;
         }
-        out
+        Ok(out)
+    }
+}
+
+/// Builds the word index of a block (P3, layout 1): for every term its df in the block; postings
+/// (document ids, without tf) only for the terms that are rare in all of HN (global df <=
+/// `max_df_abs`, from `hnz globals`). Dictionary values: tag = v & 3, 0 FREQUENT (df = v >> 2),
+/// 1 SINGLE (doc = v >> 2), 2 LIST (offset = v >> 2 into the postings, which start with the df).
+pub struct LexWriter<'a> {
+    classes: &'a Map<Vec<u8>>,
+    max_df_abs: u64,
+    max_df_ratio: f32,
+    /// term -> (df in the block, documents if the term is rare)
+    terms: HashMap<String, (u32, Option<Vec<u32>>)>,
+    norms: Vec<u8>,
+    total_len: u64,
+    missing: u64,
+}
+
+/// The parts of a block's word index.
+pub struct LexParts {
+    pub fst: Vec<u8>,
+    pub post: Vec<u8>,
+    pub norms: Vec<u8>,
+    pub info: Bm25Info,
+    /// (frequent, single, list) term counts
+    pub classes: (u64, u64, u64),
+}
+
+impl<'a> LexWriter<'a> {
+    pub fn new(classes: &'a Map<Vec<u8>>, max_df_abs: u64, max_df_ratio: f32) -> Self {
+        Self { classes, max_df_abs, max_df_ratio, terms: HashMap::new(), norms: Vec::new(), total_len: 0, missing: 0 }
+    }
+
+    /// Documents with consecutive ids (the next id = documents added so far).
+    pub fn add_batch(&mut self, texts: &[String]) {
+        let start = self.norms.len() as u32;
+        let toks: Vec<(Vec<String>, u32)> = texts
+            .par_iter()
+            .map(|t| {
+                let mut v: Vec<String> = Vec::new();
+                let mut n = 0u32;
+                tokenize::for_each_term(t, |w| {
+                    n += 1;
+                    v.push(w.to_string());
+                });
+                v.sort_unstable();
+                v.dedup();
+                (v, n)
+            })
+            .collect();
+        for (k, (terms, n)) in toks.into_iter().enumerate() {
+            let doc = start + k as u32;
+            self.norms.push(norm_encode(n));
+            self.total_len += n as u64;
+            for w in terms {
+                match self.terms.get_mut(&w) {
+                    Some(e) => {
+                        e.0 += 1;
+                        if let Some(d) = e.1.as_mut() {
+                            d.push(doc);
+                        }
+                    }
+                    None => {
+                        let rare = match self.classes.get(&w) {
+                            Some(g) => g <= self.max_df_abs,
+                            None => {
+                                self.missing += 1;
+                                true
+                            }
+                        };
+                        self.terms.insert(w, (1, rare.then(|| vec![doc])));
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn n_docs(&self) -> usize {
+        self.norms.len()
+    }
+
+    pub fn finish(self) -> Result<LexParts> {
+        if self.missing > 0 {
+            anyhow::bail!("{} terms are not in the global table (rebuild it with `hnz globals` over the same files)", self.missing);
+        }
+        let mut terms: Vec<(String, (u32, Option<Vec<u32>>))> = self.terms.into_iter().collect();
+        terms.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let mut fb = MapBuilder::memory();
+        let mut post = Vec::new();
+        let (mut nf, mut ns, mut nl, mut n_postings) = (0u64, 0u64, 0u64, 0u64);
+        for (w, (df, docs)) in &terms {
+            let v = match docs {
+                None => {
+                    nf += 1;
+                    (*df as u64) << 2 | TAG_FREQUENT
+                }
+                Some(d) if d.len() == 1 => {
+                    ns += 1;
+                    n_postings += 1;
+                    (d[0] as u64) << 2 | TAG_SINGLE
+                }
+                Some(d) => {
+                    nl += 1;
+                    n_postings += d.len() as u64;
+                    let off = post.len() as u64;
+                    let pairs: Vec<(u32, u32)> = d.iter().map(|&x| (x, 1)).collect();
+                    encode_postings(&pairs, &mut post, false);
+                    off << 2 | TAG_LIST
+                }
+            };
+            fb.insert(w.as_bytes(), v)?;
+        }
+        let n_docs = self.norms.len();
+        let info = Bm25Info {
+            n_docs,
+            avgdl: self.total_len as f32 / n_docs.max(1) as f32,
+            n_terms: terms.len(),
+            n_postings,
+            with_tf: false,
+            max_df_ratio: self.max_df_ratio,
+            layout: LAYOUT_BLOCK,
+            total_len: self.total_len,
+            max_df_abs: self.max_df_abs,
+        };
+        Ok(LexParts { fst: fb.into_inner()?, post, norms: self.norms, info, classes: (nf, ns, nl) })
     }
 }
 
@@ -588,12 +819,12 @@ mod tests {
         assert_eq!(c.doc(), 501);
         let (tu, dfu) = ix.lookup("uniqueterm").unwrap();
         assert_eq!(dfu, 1);
-        let r = ix.top_k(&[(tu, 5.0)], 0, 1000, 3);
+        let r = ix.top_k(&[(tu, 5.0)], 0, 1000, 3).unwrap();
         assert_eq!(r[0].0, 999);
         let (ta, _) = ix.lookup("async").unwrap();
-        let r = ix.top_k(&[(tp, 1.0), (ta, 2.0)], 100, 400, 5);
+        let r = ix.top_k(&[(tp, 1.0), (ta, 2.0)], 100, 400, 5).unwrap();
         assert!(r.iter().all(|x| x.0 >= 100 && x.0 < 400 && x.0 % 7 == 0));
-        let s = ix.score_docs(&[(ta, 2.0)], &[7, 8, 14]);
+        let s = ix.score_docs(&[(ta, 2.0)], &[7, 8, 14]).unwrap();
         assert!(s[0] > 0.0 && s[1] == 0.0 && s[2] > 0.0);
         // with the lists on disk (read block by block), exactly the same
         let dk = Bm25::open_with(&dir, false).unwrap();
@@ -608,10 +839,93 @@ mod tests {
         let mut c = dk.cursor(tp);
         c.advance(500);
         assert_eq!(c.doc(), 501);
-        assert_eq!(dk.top_k(&[(tp, 1.0), (ta, 2.0)], 100, 400, 5), ix.top_k(&[(tp, 1.0), (ta, 2.0)], 100, 400, 5));
-        assert_eq!(dk.score_docs(&[(ta, 2.0)], &[7, 8, 14]), s);
+        assert_eq!(dk.top_k(&[(tp, 1.0), (ta, 2.0)], 100, 400, 5).unwrap(), ix.top_k(&[(tp, 1.0), (ta, 2.0)], 100, 400, 5).unwrap());
+        assert_eq!(dk.score_docs(&[(ta, 2.0)], &[7, 8, 14]).unwrap(), s);
         drop(dk);
         drop(ix);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn texts() -> Vec<String> {
+        (0..1000u32)
+            .map(|i| {
+                let mut t = String::from("filler words here ");
+                if i % 3 == 0 {
+                    t.push_str("rust ");
+                }
+                if i % 7 == 0 {
+                    t.push_str("rust async tokio ");
+                }
+                if i == 999 {
+                    t.push_str("uniqueterm ");
+                }
+                t
+            })
+            .collect()
+    }
+
+    fn classes(texts: &[String]) -> Map<Vec<u8>> {
+        let mut df: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        for t in texts {
+            let mut s: Vec<String> = tokenize::terms(t);
+            s.sort();
+            s.dedup();
+            for w in s {
+                *df.entry(w).or_insert(0) += 1;
+            }
+        }
+        Map::from_iter(df).unwrap()
+    }
+
+    #[test]
+    fn block_layout_matches_segment_without_tf() {
+        let texts = texts();
+        let cls = classes(&texts);
+        // every term rare: the same results as a segment index without tf
+        let mut lw = LexWriter::new(&cls, u64::MAX, 1.0);
+        lw.add_batch(&texts[..400]);
+        lw.add_batch(&texts[400..]);
+        let lp = lw.finish().unwrap();
+        assert_eq!(lp.classes.0, 0);
+        let blk = Bm25::from_parts(lp.fst.clone(), Blob::Resident(lp.post.clone()), lp.norms.clone(), lp.info.clone()).unwrap();
+        let dir = std::env::temp_dir().join(format!("hnz_lex_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut b = Builder::new();
+        b.add_batch(&texts);
+        b.write_opts(&dir, false, 1.0).unwrap();
+        let seg = Bm25::open(&dir).unwrap();
+        for w in ["rust", "async", "uniqueterm", "filler"] {
+            let (a, da) = blk.lookup(w).unwrap();
+            let (b, db) = seg.lookup(w).unwrap();
+            assert_eq!(da, db, "{w}");
+            let idf = 1.5;
+            assert_eq!(blk.top_k(&[(a, idf)], 0, 1000, 20).unwrap(), seg.top_k(&[(b, idf)], 0, 1000, 20).unwrap(), "{w}");
+            assert_eq!(blk.score_docs(&[(a, idf)], &[0, 3, 7, 999]).unwrap(), seg.score_docs(&[(b, idf)], &[0, 3, 7, 999]).unwrap());
+        }
+        let (ta, _) = blk.lookup("async").unwrap();
+        let (tr, _) = blk.lookup("rust").unwrap();
+        let (sa, _) = seg.lookup("async").unwrap();
+        let (sr, _) = seg.lookup("rust").unwrap();
+        assert_eq!(blk.top_k(&[(tr, 1.0), (ta, 2.0)], 100, 400, 5).unwrap(), seg.top_k(&[(sr, 1.0), (sa, 2.0)], 100, 400, 5).unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+        // with a threshold: frequent terms keep their df but have no postings
+        let mut lw = LexWriter::new(&cls, 200, 0.2);
+        lw.add_batch(&texts);
+        let lp = lw.finish().unwrap();
+        let blk = Bm25::from_parts(lp.fst, Blob::Resident(lp.post), lp.norms, lp.info).unwrap();
+        let (t, df) = blk.lookup("filler").unwrap();
+        assert_eq!((t, df), (TermPost::Frequent, 1000));
+        let (t, df) = blk.lookup("rust").unwrap();
+        assert_eq!((t, df), (TermPost::Frequent, 429));
+        let (t, df) = blk.lookup("async").unwrap();
+        assert!(matches!(t, TermPost::List { .. }) && df == 143);
+        assert_eq!(blk.lookup("uniqueterm").unwrap(), (TermPost::Single { doc: 999, tf: 1 }, 1));
+        assert!(blk.top_k(&[(TermPost::Frequent, 1.0)], 0, 1000, 5).unwrap().is_empty());
+        assert_eq!(lp.classes, (3, 1, 2)); // filler, words, rust ("here" is a stopword) | uniqueterm | async, tokio
+        // a term missing from the global table is an error
+        let few = classes(&texts[..10]);
+        let mut lw = LexWriter::new(&few, 200, 0.2);
+        lw.add_batch(&texts);
+        assert!(lw.finish().is_err());
     }
 }

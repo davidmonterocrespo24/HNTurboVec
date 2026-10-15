@@ -69,6 +69,22 @@ fn lists(a: &ArrayRef) -> Result<Vec<Vec<u32>>> {
     Ok(out)
 }
 
+/// The `kids` column of a Parquet file: (id, kids in HN's order), sorted by id.
+pub fn read_kids(path: &Path) -> Result<Vec<(u32, Vec<u32>)>> {
+    let f = File::open(path).with_context(|| format!("abriendo {}", path.display()))?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(f)?.with_batch_size(65536).build()?;
+    let mut out = Vec::new();
+    for batch in reader {
+        let b = batch?;
+        let id = ints::<UInt32Type>(col(&b, "id")?)?;
+        let kids = lists(col(&b, "kids")?)?;
+        out.extend(id.into_iter().map(|x| x as u32).zip(kids));
+    }
+    out.sort_by_key(|x| x.0);
+    out.dedup_by_key(|x| x.0);
+    Ok(out)
+}
+
 /// Lee un Parquet mensual. Devuelve todos los ítems (incluidos los `deleted`), ordenados por id.
 pub fn read_parquet(path: &Path) -> Result<Loaded> {
     let f = File::open(path).with_context(|| format!("abriendo {}", path.display()))?;

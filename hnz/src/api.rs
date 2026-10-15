@@ -51,11 +51,24 @@ pub struct OpenOptions {
     pub cache_dir: Option<PathBuf>,
     /// maximum size of that cache on disk, in bytes
     pub cache_dir_bytes: u64,
+    /// compact blocks: what is checked at open: "header", "quick" (+ always-loaded parts and 4
+    /// short canaries decoded) or "full" (+ every part and external file, all canaries)
+    pub verify: String,
 }
 
 impl Default for OpenOptions {
     fn default() -> Self {
-        Self { models: None, ov_libs: None, preload: false, ram: None, max_concurrent: 8, timeout: 30.0, cache_dir: None, cache_dir_bytes: 512 * MB }
+        Self {
+            models: None,
+            ov_libs: None,
+            preload: false,
+            ram: None,
+            max_concurrent: 8,
+            timeout: 30.0,
+            cache_dir: None,
+            cache_dir_bytes: 512 * MB,
+            verify: "quick".into(),
+        }
     }
 }
 
@@ -272,12 +285,27 @@ fn embedder_estimate(models: &Path) -> u64 {
 
 impl Archive {
     pub fn open(root: &Path, opts: OpenOptions) -> Result<Self> {
+        let level = match opts.verify.as_str() {
+            "header" => crate::block::VerifyLevel::Header,
+            "quick" => crate::block::VerifyLevel::Quick,
+            "full" => crate::block::VerifyLevel::Full,
+            o => return Err(anyhow::Error::new(QueryError(format!("verify debe ser header, quick o full (es {o:?})")))),
+        };
+        // a compact block (P3), or a folder of segments
+        let block = match crate::block::Block::locate(root) {
+            Some(p) => Some(crate::block::Block::open(&p)?),
+            None => None,
+        };
         // first, the folder must have segments (the most likely error: wrong folder)
-        let has_segments = std::fs::read_dir(root)
-            .with_context(|| format!("no se puede leer {}", root.display()))?
-            .filter_map(|e| e.ok())
-            .any(|e| e.path().join("manifest.json").exists());
-        if !has_segments {
+        let has_segments = root.is_dir()
+            && std::fs::read_dir(root)
+                .with_context(|| format!("no se puede leer {}", root.display()))?
+                .filter_map(|e| e.ok())
+                .any(|e| e.path().join("manifest.json").exists());
+        if block.is_some() && has_segments {
+            bail!("{} contiene un bloque (hn.hnzb) y también carpetas de segmentos: use una cosa u otra", root.display());
+        }
+        if block.is_none() && !has_segments {
             let hint = if root.join("manifest.json").exists() {
                 " (esa carpeta ES un segmento: indique la carpeta que contiene los segmentos)"
             } else {
@@ -291,9 +319,10 @@ impl Archive {
                 opts.timeout, opts.max_concurrent
             )))
         })?;
-        let models = match opts.models {
-            Some(m) => m,
-            None => default_models(root)?,
+        let models = match (&block, opts.models) {
+            (Some(b), _) => b.dir(),
+            (None, Some(m)) => m,
+            (None, None) => default_models(root)?,
         };
         let budget = Budget::new(opts.ram);
         // open with nothing loaded (only the fixed structures), then plan what to load; the disk
@@ -302,7 +331,10 @@ impl Archive {
         if let Some(d) = &opts.cache_dir {
             std::fs::create_dir_all(d).with_context(|| format!("cache_dir {}", d.display()))?;
         }
-        let mut eng = Engine::open_with(root, &models, eopts).with_context(|| format!("abriendo {}", root.display()))?;
+        let mut eng = match &block {
+            Some(b) => Engine::open_block(b.clone(), eopts)?,
+            None => Engine::open_with(root, &models, eopts).with_context(|| format!("abriendo {}", root.display()))?,
+        };
         if eng.segs.is_empty() {
             let hint = if root.join("manifest.json").exists() {
                 " (esa carpeta ES un segmento: indique la carpeta que contiene los segmentos)"
@@ -311,7 +343,14 @@ impl Archive {
             };
             bail!("no hay segmentos (carpetas con manifest.json) en {}{hint}", root.display());
         }
-        let emb_est = embedder_estimate(&models);
+        let emb_est = match &block {
+            Some(b) => {
+                let bin = b.external().iter().find(|e| e.name == "embed.bin").map_or(0, |e| e.len);
+                let tok = b.part("model/embed.tok").map_or(0, |p| p.raw_len);
+                bin * 7 / 5 + 4 * tok + 32 * MB
+            }
+            None => embedder_estimate(&models),
+        };
         let emb_charge = budget.charge(Class::Model, emb_est);
         let candidates =
             eng.parts().into_iter().map(|(seg, part, _, bytes)| Candidate { seg, part, bytes, recency: eng.segs[seg].s.man.time_max }).collect();
@@ -337,6 +376,16 @@ impl Archive {
             }
         }
         eng.set_cache_bytes(plan.cache);
+        if let Some(b) = &block {
+            // canaries: records decoded now, compared with the text they had when packed
+            if level >= crate::block::VerifyLevel::Quick {
+                eng.check_canaries(&["short"])?;
+            }
+            if level >= crate::block::VerifyLevel::Full {
+                b.verify_full()?;
+                eng.check_canaries(&["long", "fallback", "empty"])?;
+            }
+        }
         let query_charge = budget.charge(Class::Working, plan.query_pool);
         let adm = Admission::new(opts.max_concurrent, plan.query_pool, timeout);
         let ov_libs = opts.ov_libs.or_else(|| std::env::var_os("HNZ_OV_LIBS").map(PathBuf::from));
@@ -407,12 +456,21 @@ impl Archive {
     fn spawn_embedder(&self) -> Result<(mpsc::Sender<(String, EmbedReply)>, EmbMem)> {
         let libs = self.ov_libs.clone().context("falta la carpeta de OpenVINO (ov_libs o la variable HNZ_OV_LIBS)")?;
         let models = self.models.clone();
+        // a block: its IR files (checked against their hashes) and the tokenizer inside it
+        let block_files = match &self.eng.block {
+            Some(b) => Some(b.embedder_files()?),
+            None => None,
+        };
         let (tx, rx) = mpsc::channel::<(String, EmbedReply)>();
         let (ready_tx, ready_rx) = mpsc::channel::<Result<EmbMem>>();
         std::thread::Builder::new().name("hnz-embedder".into()).spawn(move || {
             // measure the load and a first inference (it allocates OpenVINO's buffers and threads)
             let (r, steady, peak) = crate::mem::measure(|| {
-                Embedder::new(&models, &libs).and_then(|mut e| {
+                let e = match &block_files {
+                    Some((xml, bin, tok)) => Embedder::from_files(xml, bin, tok, &libs),
+                    None => Embedder::new(&models, &libs),
+                };
+                e.and_then(|mut e| {
                     e.embed_query("warm up")?;
                     Ok(e)
                 })
@@ -456,7 +514,7 @@ impl Archive {
         let t_q = t0.elapsed();
         let qv = if q.mode != Mode::Keyword && !q.text.trim().is_empty() { Some(self.embed_inner(&q.text)?) } else { None };
         let t_emb = t0.elapsed();
-        let hits = self.eng.search_with(&q, qv.as_deref(), &|extra| turn.try_grow(extra));
+        let hits = self.eng.search_with(&q, qv.as_deref(), &|extra| turn.try_grow(extra))?;
         let t_s = t0.elapsed();
         let results = self.eng.fetch(&hits, req.full)?;
         let t_all = t0.elapsed();
@@ -520,6 +578,11 @@ impl Archive {
             "docs": self.eng.total_docs,
             "segments": segs,
             "ram_budget": self.plan.limit,
+            "block": self.eng.block.as_ref().map(|b| serde_json::json!({
+                "path": b.path.display().to_string(), "snapshot": b.snapshot_hex(), "writer": b.writer,
+                "parts": b.parts().len(), "bytes": std::fs::metadata(&b.path).map(|m| m.len()).unwrap_or(0),
+                "manifest_snapshot": b.manifest()["snapshot"],
+            })),
             "embedder_loaded": self.emb.get().is_some(),
             "memory": self.memory(),
         })

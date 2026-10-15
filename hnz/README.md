@@ -51,6 +51,18 @@ hnz stats                                                    # size per componen
 Do not mix overlapping segments in the same folder (e.g. `seg-2010` and `seg-2010-06`): the engine
 refuses to open them.
 
+## Compact block (P3)
+One read-only file `hn.hnzb` plus the embedder IR next to it, for all the months of a pack spec
+(layout, integrity levels and measurements: [doc/08-block.md](../doc/08-block.md)):
+```bash
+hnz globals --out work/global data/*/*.parquet          # global df of every term + global author table
+hnz pack --spec work/p3/pack.json --out work/p3/hn-sample.hnz   # needs the months' LM segments and embeddings
+hnz verify-block work/p3/hn-sample.hnz --level full    # header | quick | full | deep (deep: against the sources)
+hnz inspect work/p3/hn-sample.hnz --project 49324111 --lex work/lex-all/lex.json   # sizes; projection to all of HN
+hnz search --root work/p3/hn-sample.hnz "how do I deal with burnout"            # every command works on a block
+```
+Exit codes of `verify-block`: 0 ok, 2 corrupt, 3 incompatible, 4 differs from its sources, 1 other.
+
 ## Searching
 ```bash
 hnz search "how do I deal with burnout" -k 10
@@ -95,9 +107,15 @@ with hnz.open(r"C:\path\out", ram="2GB", preload=True) as hn:   # models in out/
   (8) and `timeout` (30 s): admission control, `hnz.BusyError` when there is no turn in time.
   `cache_dir=`: optional persistent cache of decompressed records. Details and measurements:
   [doc/07-ram.md](../doc/07-ram.md).
+- A compact block opens the same way (`hnz.open(r"C:\path\hn-sample.hnz")`); `verify="quick"`
+  (default) checks its structure, the always-loaded parts and 4 decoded canaries (~0.3 s);
+  `hnz.verify_block(path, "full")` hashes everything; damaged or unreadable blocks raise
+  `hnz.CorruptBlockError` / `hnz.IncompatibleBlockError` (both `hnz.BlockError`).
+  `hnz.inspect(path)` describes it.
 - OpenVINO's DLLs come from the installed `openvino` package (or `ov_libs=` / `HNZ_OV_LIBS`).
 - Tests: `python -m pytest hnz/py/tests` (same results as the CLI, lossless against the Parquet
-  files, 8 threads at once, disk mode == RAM mode, process memory <= 1.03 x `ram`).
+  files, 8 threads at once, disk mode == RAM mode, process memory <= 1.03 x `ram`; on the old
+  archive and on the sample block, plus a tamper matrix for the block).
 
 ## Environment variables
 - `HNZ_MODELS` (models folder), `HNZ_OV_LIBS` (`openvino_c.dll` folder).

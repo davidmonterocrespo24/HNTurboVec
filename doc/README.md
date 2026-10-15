@@ -17,6 +17,7 @@ matters is daily use: **fast, accurate and compact**. Implementation in **Rust**
 | [05-arquitectura.md](05-arquitectura.md) | The system built in Rust: format, query, caches, robustness, sizes. |
 | [06-libreria.md](06-libreria.md) | Design of the library for backends (Python, RAM budget, compact block); pending approval. |
 | [07-ram.md](07-ram.md) | (English) RAM governance (P2): what `ram=` covers, the planner, disk reads, capped LM batch, admission control, measurements. |
+| [08-block.md](08-block.md) | (English) The compact block (P3): byte layout of `hn.hnzb`, parts, manifest, integrity levels, tools (`pack`, `verify-block`, `inspect`), sample measurements. |
 
 ## Repository structure
 
@@ -53,7 +54,13 @@ matters is daily use: **fast, accurate and compact**. Implementation in **Rust**
 - [x] Python library `import hnz` (P1, E30) and **RAM governance** (P2, E31): everything hnz holds
       stays within `ram=`; what does not fit is read from disk with identical results; process
       memory <= 1.03 x `ram` with 8 concurrent clients ([07-ram.md](07-ram.md)).
-- [ ] Full build of the 239 months (`scripts/pipeline.py`; days of CPU/iGPU).
+- [x] **Compact block** (P3, E32): one read-only file `hn.hnzb` + the embedder IR, documents in
+      (time, id) order, global word index of rare terms, integrity levels and canaries,
+      `hnz pack` / `verify-block` / `inspect`; sample block verified 100 % against its sources;
+      projection to all of HN: **5.32 GB** ([08-block.md](08-block.md)).
+- [ ] P4: reranking by re-embedding the candidates' prefix and frequent words scored over the
+      vector candidates (E30a, E30c).
+- [ ] Full build of the 239 months (P5; days of CPU/iGPU).
 
 ## Result with the 3-month sample (637,046 items, E26)
 

@@ -33,7 +33,8 @@ def load(path, tok, max_len, limit=None):
     for i in range(0, len(recs), 4096):
         enc = tok(recs[i:i + 4096], add_special_tokens=False)['input_ids']
         for s, ids in zip(recs[i:i + 4096], enc):
-            out.append((([tok.bos_token_id] + ids)[:max_len], len(s.encode('utf-8'))))
+            # int32 arrays, not Python lists: 5 % of HN is ~184 M tokens (lists would take ~6-8 GB)
+            out.append((np.array(([tok.bos_token_id] + ids)[:max_len], dtype=np.int32), len(s.encode('utf-8'))))
     return out
 
 
@@ -65,7 +66,7 @@ def tensors(data, idx, pad):
     m = torch.zeros((len(idx), L), dtype=torch.long)
     for r, i in enumerate(idx):
         ids = data[i][0]
-        x[r, :len(ids)] = torch.tensor(ids)
+        x[r, :len(ids)] = torch.from_numpy(ids)
         m[r, :len(ids)] = 1
     return x.to(DEV), m.to(DEV)
 
@@ -115,6 +116,10 @@ def main():
     ap.add_argument('--fp32', action='store_true', help='sin fp16 mixto en la GPU')
     ap.add_argument('--probe', type=int, default=0)
     a = ap.parse_args()
+    if os.name == 'nt' and not a.probe:
+        # keep Windows from sleeping while this process trains (released when it exits)
+        import ctypes
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001)  # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
     torch.set_num_threads(a.threads)
     global DEV, AMP
     DEV = torch.device('xpu' if a.device == 'auto' and hasattr(torch, 'xpu') and torch.xpu.is_available() else
