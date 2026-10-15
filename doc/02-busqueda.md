@@ -1,45 +1,45 @@
-# Búsqueda (índices)
+# Search (indexes)
 
-Detalle numérico en [BITACORA.md](BITACORA.md) (E04-E07, E10, E13, E14, E18, E19, E22, E25, E26).
+Numerical details in [BITACORA.md](BITACORA.md) (E04-E07, E10, E13, E14, E18, E19, E22, E25, E26).
 
-## Qué hemos aprendido
+## What we have learned
 
-1. **Medir calidad real, no solo fidelidad.** "recall vs float" castiga mucho la cuantización y la
-   truncación; con etiquetas reales (título → comentarios del mismo hilo) la pérdida es mínima.
-2. **EmbeddingGemma 2 (Google, oct-2026) es el mejor modelo probado**: P@10 .634 en float sobre el
-   conjunto pequeño, frente a .578 de bge-small y .474 de potion.
-3. **Binario asimétrico** (documento en 1 bit/dim, consulta en float): 768 bits = 96 B/doc casi igual
-   que float (E07, E22). En el mes completo (E19): 768 bits P@10 híbrida .315; 512 bits (64 B) .307;
-   384 bits .298; 256 bits .289 → **768 en caliente, 512 en frío**.
-4. **Búsqueda en 2 etapas** (Hamming sobre 256 bits → asimétrico): pierde 0,7 % y es 2,3x más rápida
-   que el asimétrico completo (E14).
-5. **PQ (8-32 B) y RaBitQ** (faiss) no mejoran al binario asimétrico por byte. **turbovec** (TurboQuant)
-   a igual tamaño queda empatado dentro del ruido (E22).
-6. **BM25 compacto**: FST + postings BitPacker4x + normas de 1 B, sin posiciones: ~49 B/doc frente a
-   83 de tantivy. **No se podan términos por df**: la poda por segmento (E18) hacía desaparecer términos
-   frecuentes de un periodo (p.ej. "covid" en 2020) para la búsqueda por palabras (E25).
-7. **Fusión** coseno + 0,15·bm25/(bm25+20): +9 % de P@10 sobre solo vectores (E14).
-8. **Embeddings a escala**: EmbeddingGemma 2 solo-texto exportado a OpenVINO en la **iGPU Arc**:
-   ~204 docs/s con buckets de longitud → todo HN en ~2,8 días (E13). Consultas en CPU con pesos int8:
+1. **Measure real quality, not just fidelity.** "recall vs float" heavily penalizes quantization and
+   truncation; with real labels (title → comments of the same thread) the loss is minimal.
+2. **EmbeddingGemma 2 (Google, Oct-2026) is the best model tested**: P@10 .634 in float on the
+   small set, versus .578 for bge-small and .474 for potion.
+3. **Asymmetric binary** (document at 1 bit/dim, query in float): 768 bits = 96 B/doc, almost the
+   same as float (E07, E22). On the full month (E19): 768 bits hybrid P@10 .315; 512 bits (64 B)
+   .307; 384 bits .298; 256 bits .289 → **768 in the hot tier, 512 in the cold tier**.
+4. **2-stage search** (Hamming over 256 bits → asymmetric): loses 0.7% and is 2.3x faster than the
+   full asymmetric one (E14).
+5. **PQ (8-32 B) and RaBitQ** (faiss) do not beat asymmetric binary per byte. **turbovec**
+   (TurboQuant) at the same size is tied within the noise (E22).
+6. **Compact BM25**: FST + BitPacker4x postings + 1 B norms, no positions: ~49 B/doc versus 83 for
+   tantivy. **Terms are not pruned by df**: per-segment pruning (E18) made a period's frequent terms
+   (e.g. "covid" in 2020) disappear for keyword search (E25).
+7. **Fusion** cosine + 0.15·bm25/(bm25+20): +9% P@10 over vectors only (E14).
+8. **Embeddings at scale**: text-only EmbeddingGemma 2 exported to OpenVINO on the **Arc iGPU**:
+   ~204 docs/s with length buckets → all of HN in ~2.8 days (E13). Queries on CPU with int8 weights:
    ~25-40 ms (E23).
-9. **Filtros** (autor, tipo, dead, fechas) se aplican al generar candidatos: el autor y los tipos raros
-   recorren los metadatos del rango (exacto); el resto se sobre-muestrea y se filtra en orden de
-   puntuación con una columna de banderas de 1 B/doc en RAM (`meta.flags.zst`), reintentando solo
-   el segmento que se queda corto (E25, E26). Sin texto: listado de lo más reciente.
-10. **Mezclar segmentos de 768 y 512 bits no necesita calibración**: el coseno renormalizado en cada
-    prefijo MRL queda a +0,003 [−0,001, +0,007] de P@10 de tenerlo todo a 768 (no significativo);
-    calibrar (regresión o momentos) es significativamente peor en conjunto: gana en las consultas
-    sobre 2024 y pierde más en las de años viejos (E26).
-11. **Validar con consultas cuyas respuestas estén en distintos niveles** (2024, 2010, 2015): con un
-    solo conjunto, cualquier sesgo contra lo antiguo parece una mejora (E26).
-12. **La métrica título → hilo baja al crecer el archivo** (los hilos parecidos de otros años cuentan
-    como fallos): comparar versiones con la misma composición del archivo (E26).
-13. **Reranker cross-encoder** (MiniLM 80-120 MB, equivalente a Jev/System One): con el texto completo
-    de los 30 candidatos, +0,015-0,026 de P@10 (significativo; mejor en fusión RRF con el orden de
-    hnz) a costa de 0,6-1,6 s por consulta; con los fragmentos de 64 tokens no mejora en el nivel
-    frío → no por defecto. Cuidado con la fuga de la etiqueta: el reranker debe ver solo el propio
-    documento, no el título del hilo (E26).
+9. **Filters** (author, type, dead, dates) are applied when generating candidates: author and rare
+   types scan the metadata of the range (exact); the rest is oversampled and filtered in score
+   order with a 1 B/doc flags column in RAM (`meta.flags.zst`), retrying only the segment that
+   falls short (E25, E26). Without text: a listing of the most recent items.
+10. **Mixing 768- and 512-bit segments needs no calibration**: the cosine renormalized at each MRL
+    prefix is +0.003 [−0.001, +0.007] P@10 away from having everything at 768 (not significant);
+    calibrating (regression or moments) is significantly worse overall: it gains on the queries
+    about 2024 and loses more on those about older years (E26).
+11. **Validate with queries whose answers lie in different tiers** (2024, 2010, 2015): with a single
+    set, any bias against old content looks like an improvement (E26).
+12. **The title → thread metric drops as the archive grows** (similar threads from other years count
+    as misses): compare versions with the same archive composition (E26).
+13. **Cross-encoder reranker** (MiniLM 80-120 MB, equivalent to Jev/System One): with the full text
+    of the 30 candidates, +0.015-0.026 P@10 (significant; better in RRF fusion with hnz's ranking)
+    at a cost of 0.6-1.6 s per query; with the 64-token snippets it does not improve in the cold
+    tier → not by default. Beware of label leakage: the reranker must see only the document itself,
+    not the thread title (E26).
 
-## Pendiente
-- Rerankers mayores (jina, bge-reranker-v2-m3 int8): descarga fallida por la red (E26).
-- Evaluar con consultas de palabras clave y preguntas (hoy solo títulos → hilo).
+## Pending
+- Larger rerankers (jina, bge-reranker-v2-m3 int8): download failed due to the network (E26).
+- Evaluate with keyword queries and questions (currently only titles → thread).

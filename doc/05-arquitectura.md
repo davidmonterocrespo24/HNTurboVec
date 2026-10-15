@@ -1,117 +1,117 @@
-# Arquitectura del sistema `hnz` (Rust)
+# `hnz` system architecture (Rust)
 
-Estado: **implementado y verificado sobre 3 meses de muestra** (2010-06 y 2015-06 en nivel frío,
-2024-01 en nivel caliente). Evidencias numéricas en [BITACORA.md](BITACORA.md); uso en
-[../hnz/README.md](../hnz/README.md). Revisión adversarial y correcciones: E25.
+Status: **implemented and verified on 3 sample months** (2010-06 and 2015-06 in the cold tier,
+2024-01 in the hot tier). Numerical evidence in [BITACORA.md](BITACORA.md); usage in
+[../hnz/README.md](../hnz/README.md). Adversarial review and fixes: E25.
 
-## Principios
-1. **Lo que más pesa es el texto** → niveles por antigüedad (como un LSM): zstd para lo reciente
-   (lectura en µs) y **LM + codificación aritmética** para lo antiguo (la mitad de tamaño). Un
-   segmento se puede "enfriar" después con `hnz retier`.
-2. **Búsqueda híbrida**: vectores binarios de EmbeddingGemma 2 + BM25 compacto (cada uno falla
-   donde el otro acierta; DeepMind 2508.21038). Fusión calibrada (E14): coseno + 0,15·bm25/(bm25+20).
-3. **Orden temporal**: los docIDs siguen el id de HN, así un rango de fechas es un rango contiguo.
-4. **Sin pérdida y verificable**: `hnz verify` compara cada registro con el Parquet original (también
-   las filas `deleted`, que se guardan como metadatos para no romper los hilos).
-5. **Determinismo del nivel LM**: matmul int8 exacta + matemática propia en orden fijo → el mismo
-   binario da los mismos bits en cualquier CPU compatible (requiere x86-64-v3 / AVX2; AVX-VNNI es
-   opcional: con o sin él el resultado es idéntico). Cada registro lleva 1 byte de comprobación
-   (se valida al descomprimirlo entero; los fragmentos no lo cubren) y al abrir se exige el mismo
-   id de modelo y `MATH_VERSION`.
+## Principles
+1. **Text is what takes up the most space** → tiers by age (like an LSM): zstd for recent data
+   (reads in µs) and **LM + arithmetic coding** for old data (half the size). A
+   segment can be "cooled down" later with `hnz retier`.
+2. **Hybrid search**: EmbeddingGemma 2 binary vectors + compact BM25 (each one fails
+   where the other succeeds; DeepMind 2508.21038). Calibrated fusion (E14): cosine + 0.15·bm25/(bm25+20).
+3. **Temporal order**: docIDs follow the HN id, so a date range is a contiguous range.
+4. **Lossless and verifiable**: `hnz verify` compares every record with the original Parquet (the
+   `deleted` rows too, which are stored as metadata so as not to break the threads).
+5. **LM tier determinism**: exact int8 matmul + our own math in a fixed order → the same
+   binary yields the same bits on any compatible CPU (requires x86-64-v3 / AVX2; AVX-VNNI is
+   optional: with or without it the result is identical). Each record carries 1 check byte
+   (validated when the record is decompressed in full; snippets do not cover it) and opening
+   requires the same model id and `MATH_VERSION`.
 
-## Segmentos (carpeta autocontenida e inmutable; `build` es atómico vía `<seg>.building`)
-| Fichero | Contenido | B/doc caliente (2024-01) | B/doc frío (2015-06) |
+## Segments (self-contained, immutable folder; `build` is atomic via `<seg>.building`)
+| File | Contents | B/doc hot (2024-01) | B/doc cold (2015-06) |
 |---|---|---|---|
-| `manifest.json` | rango de ids/fechas, nivel, modelo LM, `build_id` | — | — |
-| `meta.bin/.idx`, `authors.zst` | id/time/parent/tipo/dead/deleted/score/descendants/autor/poll/parts, bloques de 1024, varint delta + zstd | 5,5 | 5,7 |
-| `meta.flags.zst` | 1 B/doc (tipo, dead, deleted) para filtrar sin descomprimir; se carga en RAM al abrir | 0,10 | 0,16 |
-| `text.bin/.idx/.dict` (**nivel zstd**) | bloques de 16, columnar, HTML→forma compacta reversible (2 dialectos, enlaces truncados), zstd-19 + diccionario | 116,8 | — |
-| `lm.bin/.idx/.json` (**nivel LM**) | por registro: cabecera varint + byte de comprobación + flujo aritmético; grupos de 32 | — | 64,4 |
-| `bm25.fst/.post/.norms/.json` | FST de términos (df=1 inline), postings en bloques de 128 con BitPacker4x, normas 1 B, MaxScore; sin poda (E25) | 49,2 | 53,9 |
-| `vec.bin/.has` | signo de las dims de EmbeddingGemma 2: 768 bits (caliente) / 512 bits (frío, E19) | 96,1 | 64,1 |
-| **Total** (`hnz stats`, E26) | | **267,6** | **188,2** |
+| `manifest.json` | id/date range, tier, LM model, `build_id` | — | — |
+| `meta.bin/.idx`, `authors.zst` | id/time/parent/type/dead/deleted/score/descendants/author/poll/parts, blocks of 1024, delta varint + zstd | 5.5 | 5.7 |
+| `meta.flags.zst` | 1 B/doc (type, dead, deleted) to filter without decompressing; loaded into RAM on open | 0.10 | 0.16 |
+| `text.bin/.idx/.dict` (**zstd tier**) | blocks of 16, columnar, HTML→reversible compact form (2 dialects, truncated links), zstd-19 + dictionary | 116.8 | — |
+| `lm.bin/.idx/.json` (**LM tier**) | per record: varint header + check byte + arithmetic stream; groups of 32 | — | 64.4 |
+| `bm25.fst/.post/.norms/.json` | term FST (df=1 inline), postings in blocks of 128 with BitPacker4x, 1 B norms, MaxScore; no pruning (E25) | 49.2 | 53.9 |
+| `vec.bin/.has` | sign of the EmbeddingGemma 2 dims: 768 bits (hot) / 512 bits (cold, E19) | 96.1 | 64.1 |
+| **Total** (`hnz stats`, E26) | | **267.6** | **188.2** |
 
-Proyección para ~49,3 M ítems con los 2 últimos años en caliente (~9 M) y el resto en frío:
-≈ 9 M × 267,6 B + 40,3 M × 188 B ≈ **10,0 GB**, más los modelos en ejecución (0,38 GB: embedder int8, LM y tokenizadores) → **≈ 10,4 GB** en total.
+Projection for ~49.3 M items with the last 2 years hot (~9 M) and the rest cold:
+≈ 9 M × 267.6 B + 40.3 M × 188 B ≈ **10.0 GB**, plus the runtime models (0.38 GB: int8 embedder, LM and tokenizers) → **≈ 10.4 GB** in total.
 
-## Consulta
+## Query
 ```
-consulta (texto, k ≤ 500, desde/hasta, tipo, autor)
-  ├─ sin texto: listado de lo más reciente que cumple los filtros (sin embedding)
-  ├─ embedding: EmbeddingGemma 2 (IR OpenVINO int8, CPU) desde Rust ................ ~20-25 ms
-  ├─ por segmento que solapa las fechas (rayon):
-  │    · con autor o tipos raros (job/poll): recorrido exacto de metadatos + puntuación
-  │    · si no: vectores (Hamming 256 bits → asimétrico) + BM25 (MaxScore con IDF global);
-  │      filtros con la columna de banderas en RAM, en orden de puntuación; si el segmento no
-  │      llega a k y su lista de candidatos se recortó, se repite solo él con ×4 y luego ×16
-  │    · solo docs con señal: algún término (palabras), vector (vectorial), una de las dos (híbrida)
-  ├─ fusión → top-k ........................................................ ~3-10 ms
-  └─ recuperar: zstd (µs) | nivel LM: resultados + títulos del hilo en UN lote (KV-cache,
-     pool de hilos propio); fragmento de 64 tokens del cuerpo por defecto, completo bajo demanda
+query (text, k ≤ 500, from/to, type, author)
+  ├─ no text: listing of the most recent items that match the filters (no embedding)
+  ├─ embedding: EmbeddingGemma 2 (OpenVINO int8 IR, CPU) from Rust ................. ~20-25 ms
+  ├─ per segment overlapping the dates (rayon):
+  │    · with author or rare types (job/poll): exact metadata scan + scoring
+  │    · otherwise: vectors (Hamming 256 bits → asymmetric) + BM25 (MaxScore with global IDF);
+  │      filters with the in-RAM flags column, in score order; if the segment does not reach k
+  │      and its candidate list was truncated, only that segment is re-run with ×4 and then ×16
+  │    · only docs with signal: some term (keyword), vector (vector), either of the two (hybrid)
+  ├─ fusion → top-k ........................................................ ~3-10 ms
+  └─ retrieve: zstd (µs) | LM tier: results + thread titles in ONE batch (KV-cache,
+     own thread pool); 64-token body snippet by default, full body on demand
 ```
-Latencias medidas: ver la tabla de [README.md](README.md) y E26 en la bitácora.
+Measured latencies: see the table in [README.md](README.md) and E26 in the log.
 
-## Caché por capas
-- **L1 RAM**: registros del nivel LM ya descomprimidos (20.000) y títulos de stories.
-- **L2 disco** (`<root>/_cache_l2.bin`, ≤ 512 MB, no cuenta en `hnz stats`): registros fríos ya
-  descomprimidos, re-comprimidos con zstd rápido; clave con `build_id` del segmento, cabecera
-  validada, acceso exclusivo (un proceso).
-- **L3**: el almacén (zstd o LM).
+## Layered cache
+- **L1 RAM**: already decompressed LM-tier records (20,000) and story titles.
+- **L2 disk** (`<root>/_cache_l2.bin`, ≤ 512 MB, not counted in `hnz stats`): already decompressed
+  cold records, re-compressed with fast zstd; keyed by the segment's `build_id`, validated
+  header, exclusive access (one process).
+- **L3**: the store (zstd or LM).
 
-## Robustez
-- `build` atómico; el motor ignora `*.building`, `*.retier`, `*.old` y rechaza segmentos solapados.
-- `retier` reconstruye en `<seg>.retier`, verifica (muestra de 2.000 o `--verify-all`) y deja el
-  original como `<seg>.old` (solo lo borra con `--verify-all --delete-old`).
-- Cambiar la matemática del LM incrementa `MATH_VERSION`: los segmentos antiguos se rechazan con un
-  mensaje claro y hay que reconstruirlos desde el Parquet (`hnz build --tier lm`).
-- Varios modelos LM pueden convivir en un archivo (cada segmento indica el suyo).
+## Robustness
+- Atomic `build`; the engine ignores `*.building`, `*.retier`, `*.old` and rejects overlapping segments.
+- `retier` rebuilds into `<seg>.retier`, verifies (sample of 2,000 or `--verify-all`) and leaves the
+  original as `<seg>.old` (it only deletes it with `--verify-all --delete-old`).
+- Changing the LM math increments `MATH_VERSION`: old segments are rejected with a clear
+  message and must be rebuilt from the Parquet (`hnz build --tier lm`).
+- Several LM models can coexist in one archive (each segment states its own).
 
-## Construcción (offline)
-1. `scripts/prepare_models.py`: IR de EmbeddingGemma 2 (documentos en buckets, consultas int8), tokenizador y
-   LM `.hnzlm`.
-2. `scripts/pipeline.py --years 2006-2026`: descarga → embeddings en la iGPU (~204 docs/s, ~2,8 días para todo)
-   → segmento por año (zstd los 2 últimos años del dataset, LM el resto; ~120 reg/s en CPU, ~4 días)
-   → vectores (768/512 bits). Reanudable; reconstruye el año en curso si aparecen meses nuevos.
-3. `hnz verify` por segmento (lote continuo en el nivel LM).
+## Build (offline)
+1. `scripts/prepare_models.py`: EmbeddingGemma 2 IR (documents in buckets, queries in int8), tokenizer and
+   `.hnzlm` LM.
+2. `scripts/pipeline.py --years 2006-2026`: download → embeddings on the iGPU (~204 docs/s, ~2.8 days for everything)
+   → segment per year (zstd for the last 2 years of the dataset, LM for the rest; ~120 rec/s on CPU, ~4 days)
+   → vectors (768/512 bits). Resumable; rebuilds the current year if new months appear.
+3. `hnz verify` per segment (continuous batching in the LM tier).
 
-## Modelos (cuentan en el tamaño total del sistema)
-| Modelo | Uso | Tamaño |
+## Models (counted in the total system size)
+| Model | Use | Size |
 |---|---|---|
-| EmbeddingGemma 2 (texto) IR int8 + tokenizer | embedding de consultas | 276 MB + 32 MB |
-| EmbeddingGemma 2 IR fp16 por buckets | solo construcción (iGPU) | 4 × 542 MB (no hace falta para consultar) |
-| pythia-70m `.hnzlm` int8 + tokenizer | (des)compresión del nivel frío | 72 MB + 3,5 MB |
+| EmbeddingGemma 2 (text) int8 IR + tokenizer | query embedding | 276 MB + 32 MB |
+| EmbeddingGemma 2 fp16 IR per bucket | build only (iGPU) | 4 × 542 MB (not needed for querying) |
+| pythia-70m `.hnzlm` int8 + tokenizer | cold-tier (de)compression | 72 MB + 3.5 MB |
 
-## Perfil compacto: plan medido, aún NO implementado (E27-E29)
-Objetivo pedido: 4-5 GB para todo HN aceptando hasta 10 s por consulta (con descompresión). Idea:
-gastar el tiempo en reordenar, no en guardar: un índice mínimo da 100-200 candidatos y se re-puntúan
-con su propio texto descomprimido (re-embeber + BM25 exacto). Decisión del 2026-10-14: documentarlo
-y no implementarlo por ahora.
+## Compact profile: measured plan, NOT implemented yet (E27-E29)
+Requested goal: 4-5 GB for all of HN, accepting up to 10 s per query (with decompression). Idea:
+spend the time on reranking, not on storage: a minimal index yields 100-200 candidates, which are
+re-scored with their own decompressed text (re-embedding + exact BM25). Decision of 2026-10-14:
+document it and not implement it for now.
 
-| Componente (todo HN) | Hoy | Compacto | Cómo | ¿Medido? |
+| Component (all of HN) | Today | Compact | How | Measured? |
 |---|---|---|---|---|
-| Texto | 3,65 GB | **2,84 GB** | todo en el nivel LM con el LM entrenado con HN (`models/lm-hn-70m.hnzlm`, −9,2 %) | sí (E29) |
-| Vectores | 3,45 GB | **1,18-1,58 GB** | binario de 192-256 bits + reordenar el top-100/200 re-embebiendo el texto descomprimido | sí, simulado (E27a) |
-| Palabras | 2,61 GB | **0,55-0,65 GB** | solo términos raros (df ≤ 0,02 %) + BM25 al vuelo de los frecuentes sobre los candidatos | tamaño y calidad híbrida sí (E27b); BM25 al vuelo no |
-| Metadatos | 0,29 GB | 0,28 GB | igual | sí |
-| Modelos | 0,38 GB | 0,25-0,38 GB | embedder int4 (opcional) | no |
-| **Total** | **10,4 GB** | **5,74 GB** sin pérdida · **5,24 GB** (−1 %) · **~4,96 GB** con mejoras de formato | | |
+| Text | 3.65 GB | **2.84 GB** | everything in the LM tier with the LM trained on HN (`models/lm-hn-70m.hnzlm`, −9.2%) | yes (E29) |
+| Vectors | 3.45 GB | **1.18-1.58 GB** | 192-256-bit binary + rerank the top-100/200 by re-embedding the decompressed text | yes, simulated (E27a) |
+| Keywords | 2.61 GB | **0.55-0.65 GB** | rare terms only (df ≤ 0.02%) + on-the-fly BM25 of the frequent ones over the candidates | size and hybrid quality yes (E27b); on-the-fly BM25 no |
+| Metadata | 0.29 GB | 0.28 GB | same | yes |
+| Models | 0.38 GB | 0.25-0.38 GB | int4 embedder (optional) | no |
+| **Total** | **10.4 GB** | **5.74 GB** lossless · **5.24 GB** (−1%) · **~4.96 GB** with format improvements | | |
 
-- Consulta prevista: índice mínimo → vista rápida (~0,4 s); descomprimir los primeros 128 tokens de
-  ~100 candidatos (~3 s) y re-embeberlos en la iGPU; BM25 exacto; texto completo del top-10 → ~4 s de
-  mediana (estimación, sin implementar).
-- Por implementar: etapa de reordenación en el motor; índice de términos raros + BM25 al vuelo;
-  perfil elegible en `build`/`scripts/pipeline.py`; cabeceras de registro más cortas; vocabulario compartido
-  por año; embedder int4; reconstruir todo HN (~5 días de iGPU + CPU, reanudable).
-- Descartado (E28): códigos PQ de 16-18 B (peores candidatos que el binario) y el título del hilo como
-  contexto del LM (no ahorra).
-- Opcional: entrenar el LM de HN con más datos (5 % de HN, ~7 h en la iGPU; el de 1 % aún mejoraba).
-- El LM forma parte del archivo (como un diccionario): hay que guardar una copia del `.hnzlm` exacto.
+- Planned query: minimal index → quick view (~0.4 s); decompress the first 128 tokens of
+  ~100 candidates (~3 s) and re-embed them on the iGPU; exact BM25; full text of the top-10 → ~4 s
+  median (estimate, not implemented).
+- To implement: reranking stage in the engine; rare-term index + on-the-fly BM25;
+  profile selectable in `build`/`scripts/pipeline.py`; shorter record headers; vocabulary shared
+  per year; int4 embedder; rebuild all of HN (~5 days of iGPU + CPU, resumable).
+- Discarded (E28): 16-18 B PQ codes (worse candidates than the binary ones) and the thread title as
+  LM context (no savings).
+- Optional: train the HN LM on more data (5% of HN, ~7 h on the iGPU; the 1% one was still improving).
+- The LM is part of the archive (like a dictionary): a copy of the exact `.hnzlm` must be kept.
 
-## Pendiente / mejoras
-- [ ] Construcción completa de los 239 meses (días de cómputo); el dataset ya está descargado (`scripts/download_hn.py`).
-- [x] LM específico de HN: entrenado en la iGPU en 93 min, −9 % de texto con el mismo coste (E29).
-- [ ] Perfil compacto (~5 GB, consultas de ~4 s): plan arriba.
-- [x] Reranker cross-encoder (equivalente open source a Jev/System One), probado en E26: +6-10 % de
-      P@10 (significativo) leyendo el texto completo de 30 candidatos, a 0,6-1,6 s por consulta en
-      CPU; con fragmentos no mejora en el nivel frío → no por defecto; quedan por probar los grandes.
-- [ ] Capa de etiquetas/grafo por temas (exploración, enrutado) — opcional (E08).
+## Pending / improvements
+- [ ] Full build of the 239 months (days of compute); the dataset is already downloaded (`scripts/download_hn.py`).
+- [x] HN-specific LM: trained on the iGPU in 93 min, −9% of text at the same cost (E29).
+- [ ] Compact profile (~5 GB, ~4 s queries): plan above.
+- [x] Cross-encoder reranker (open-source equivalent of Jev/System One), tested in E26: +6-10% in
+      P@10 (significant) reading the full text of 30 candidates, at 0.6-1.6 s per query on CPU;
+      with snippets, no gain in the cold tier → not on by default; the large ones remain to be tested.
+- [ ] Topic tag/graph layer (exploration, routing) — optional (E08).

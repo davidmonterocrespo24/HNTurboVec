@@ -1,22 +1,22 @@
-# Etiquetas (~1000 temas) y grafo por niveles
+# Tags (~1000 topics) and multi-level graph
 
-Detalle numérico en [BITACORA.md](BITACORA.md) (E08, E09).
+Numerical details in [BITACORA.md](BITACORA.md) (E08, E09).
 
-## Idea evaluada
-Etiquetar el contenido con ~1000 etiquetas, agruparlas en niveles (1000 → 40 áreas) y usar eso
-para compactar y/o buscar.
+## Evaluated idea
+Tag the content with ~1000 tags, group them into levels (1000 → 40 areas) and use that
+to compact and/or search.
 
-## Resultados
-- **Espacio:** guardar 3 etiquetas por documento cuesta ~0,18 GB para todo HN. Barato.
-- **Compresión:** ordenar los bloques por tema mejora < 1 % → no compacta.
-- **Como único índice:** P@10 = .004 → inútil (una etiqueta agrupa ~50.000 documentos y no puede
-  ordenar cuál responde mejor).
-- **Como enrutador** (buscar solo en las N etiquetas más cercanas a la consulta): escanea 3-13 % del
-  corpus con −19 % / −8 % de calidad. Útil para acelerar, no para ahorrar espacio.
-- **Jerarquía:** con potion salen temas claros pero también grupos "por tono". Para un mapa
-  navegable: agrupar con EmbeddingGemma 2 y nombrar las 1000 etiquetas con un LLM (1000 llamadas).
+## Results
+- **Space:** storing 3 tags per document costs ~0.18 GB for all of HN. Cheap.
+- **Compression:** sorting the blocks by topic improves by < 1% → it does not compact.
+- **As the only index:** P@10 = .004 → useless (a tag groups ~50,000 documents and cannot
+  rank which one answers best).
+- **As a router** (search only in the N tags closest to the query): scans 3-13% of the
+  corpus with −19% / −8% quality. Useful for speeding up, not for saving space.
+- **Hierarchy:** with potion, clear topics emerge, but also groups "by tone". For a navigable
+  map: cluster with EmbeddingGemma 2 and name the 1000 tags with an LLM (1000 calls).
 
-## Decisión
-Capa opcional de **exploración, filtros por tema y enrutado** (tipo GraphRAG de Microsoft), no de
-compresión. Además el grafo natural de HN (respuesta → padre → story) se usa para dar contexto a
-cada resultado (título de la story, comentario padre).
+## Decision
+Optional layer for **exploration, topic filters and routing** (like Microsoft's GraphRAG), not for
+compression. In addition, HN's natural graph (reply → parent → story) is used to give context to
+each result (story title, parent comment).

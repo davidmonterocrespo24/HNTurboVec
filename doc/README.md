@@ -1,89 +1,89 @@
-# HNTurboVec — documentación del proyecto
+# HNTurboVec — project documentation
 
-**Objetivo:** tener *todo* Hacker News (~49,3 M ítems) en el **mínimo espacio en disco** posible,
-con **búsqueda tipo Google/RAG** (consulta libre, palabras, nº de resultados, rango de años/fechas)
-y **recuperación del texto literal** de los resultados. La preparación puede tardar; lo que
-importa es el uso diario: **rápido, preciso y compacto**. Implementación en **Rust** (`hnz/`).
+**Goal:** to have *all* of Hacker News (~49.3 M items) in the **minimum disk space** possible,
+with **Google/RAG-style search** (free-form query, keywords, number of results, year/date range)
+and **verbatim retrieval of the text** of the results. Preparation may take a while; what
+matters is daily use: **fast, accurate and compact**. Implementation in **Rust** (`hnz/`).
 
-## Cómo está organizada esta carpeta
+## How this folder is organized
 
-| Documento | Contenido |
+| Document | Contents |
 |---|---|
-| [BITACORA.md](BITACORA.md) | **Registro cronológico de TODOS los experimentos** (qué se probó, script, resultado). Consultar antes de probar algo para no repetir. |
-| [01-almacenamiento-texto.md](01-almacenamiento-texto.md) | Compresión del texto/metadatos: zstd, bloques, orden, LM como compresor. |
-| [02-busqueda.md](02-busqueda.md) | Índices de búsqueda: vectores (binario, PQ, RaBitQ, turbovec), BM25, calidad real, modelos de embeddings. |
-| [03-etiquetas-jerarquia.md](03-etiquetas-jerarquia.md) | Idea de ~1000 etiquetas + grafo de niveles: compresión, enrutado, jerarquía. |
-| [04-investigacion-arxiv.md](04-investigacion-arxiv.md) | Papers revisados (prioridad Google/Microsoft), qué sirve y qué no. |
-| [05-arquitectura.md](05-arquitectura.md) | El sistema construido en Rust: formato, consulta, cachés, robustez, tamaños. |
-| [06-libreria.md](06-libreria.md) | Diseño de la librería para backends (Python, presupuesto de RAM, bloque compacto); pendiente de aprobación. |
+| [BITACORA.md](BITACORA.md) | **Chronological record of ALL experiments** (what was tried, script, result). Check it before trying something, so as not to repeat it. |
+| [01-almacenamiento-texto.md](01-almacenamiento-texto.md) | Text/metadata compression: zstd, blocks, ordering, LM as a compressor. |
+| [02-busqueda.md](02-busqueda.md) | Search indexes: vectors (binary, PQ, RaBitQ, turbovec), BM25, real quality, embedding models. |
+| [03-etiquetas-jerarquia.md](03-etiquetas-jerarquia.md) | Idea of ~1000 tags + a graph of levels: compression, routing, hierarchy. |
+| [04-investigacion-arxiv.md](04-investigacion-arxiv.md) | Papers reviewed (priority to Google/Microsoft), what is useful and what is not. |
+| [05-arquitectura.md](05-arquitectura.md) | The system built in Rust: format, query, caches, robustness, sizes. |
+| [06-libreria.md](06-libreria.md) | Design of the library for backends (Python, RAM budget, compact block); pending approval. |
 | [07-ram.md](07-ram.md) | (English) RAM governance (P2): what `ram=` covers, the planner, disk reads, capped LM batch, admission control, measurements. |
 
-## Estructura del repositorio
+## Repository structure
 
-| Carpeta | Qué hay |
+| Folder | What is in it |
 |---|---|
-| `hnz/` | Motor en Rust (biblioteca + CLI `hnz.exe`) y paquete de Python en `hnz/py` (`import hnz`) |
-| `scripts/` | Herramientas para construir el archivo: descarga, pipeline, modelos, entrenamiento del LM |
-| `experimentos/` | Scripts de los experimentos (`bench_*.py`, `make_eval.py`) citados en la bitácora |
-| `resultados/` | Salidas de los experimentos (`results_*.txt`) |
-| `eval/` | Conjuntos de consultas de evaluación (título → comentarios del hilo) |
-| `doc/` | Esta documentación; `doc/investigacion/` = investigación previa (Hermes) |
-| `data/`, `emb/`, `models/`, `out/` | Fuera de git: dataset, embeddings, modelos y archivo construido |
+| `hnz/` | Rust engine (library + CLI `hnz.exe`) and Python package in `hnz/py` (`import hnz`) |
+| `scripts/` | Tools to build the archive: download, pipeline, models, LM training |
+| `experimentos/` | Experiment scripts (`bench_*.py`, `make_eval.py`) cited in the log |
+| `resultados/` | Experiment outputs (`results_*.txt`) |
+| `eval/` | Evaluation query sets (title → thread comments) |
+| `doc/` | This documentation; `doc/investigacion/` = prior research (Hermes) |
+| `data/`, `emb/`, `models/`, `out/` | Not in git: dataset, embeddings, models and built archive |
 
-## Estado actual
+## Current status
 
-- [x] Medición del tamaño de HN y de la línea base (investigación previa en Hermes).
-- [x] Benchmarks de almacenamiento, vectores, BM25, calidad real, LM, etiquetas (mes 2024-01).
-- [x] EmbeddingGemma 2 en la iGPU (OpenVINO): ~204 docs/s → todo HN en ~2,8 días (E10, E13).
-- [x] Sistema `hnz` en Rust: segmentos con nivel zstd (caliente) y nivel LM (frío), BM25,
-      vectores binarios, búsqueda híbrida con filtros, CLI + HTTP + web, verificación sin pérdida.
-- [x] LM compresor determinista propio (Pythia int8, AVX-VNNI, codificador aritmético) (E17, E20).
-- [x] Cachés L1/L2, `retier`, embedder de consultas int8, latencias medidas (E23, E24).
-- [x] Revisión adversarial (141 agentes): 60 hallazgos confirmados y corregidos (E25).
-- [x] 2ª, 3ª y 4ª revisión (18 + 4 + 18 hallazgos corregidos); segmentos de muestra reconstruidos con el
-      binario final y verificados al completo (637.046 registros idénticos al original); mismo
-      resultado byte a byte con dos binarios distintos (E26).
-- [x] Reranker cross-encoder (equivalente open source a Jev/System One) probado (E26): +6-10 % de
-      P@10 pero multiplica la latencia por 5-7 (necesita el texto completo) → no se usa por defecto.
-- [x] Todo el dataset descargado (`scripts/download_hn.py`: 239 meses, 12,42 GB, SHA-256 comprobados).
-- [x] LM entrenado con HN en la iGPU: −9 % de texto con el mismo coste (E29).
-- [x] Plan de **perfil compacto** medido (E27-E29): **~5 GB** para todo HN (5,74 sin pérdida, 5,24
-      con −1 %) con consultas de ~4 s; documentado en [05-arquitectura.md](05-arquitectura.md), sin
-      implementar por ahora.
+- [x] Measurement of the size of HN and of the baseline (prior research in Hermes).
+- [x] Benchmarks of storage, vectors, BM25, real quality, LM, tags (month 2024-01).
+- [x] EmbeddingGemma 2 on the iGPU (OpenVINO): ~204 docs/s → all of HN in ~2.8 days (E10, E13).
+- [x] `hnz` system in Rust: segments with a zstd tier (hot) and an LM tier (cold), BM25,
+      binary vectors, hybrid search with filters, CLI + HTTP + web, lossless verification.
+- [x] In-house deterministic LM compressor (Pythia int8, AVX-VNNI, arithmetic coder) (E17, E20).
+- [x] L1/L2 caches, `retier`, int8 query embedder, measured latencies (E23, E24).
+- [x] Adversarial review (141 agents): 60 findings confirmed and fixed (E25).
+- [x] 2nd, 3rd and 4th reviews (18 + 4 + 18 findings fixed); sample segments rebuilt with the
+      final binary and fully verified (637,046 records identical to the original); same
+      byte-for-byte result with two different binaries (E26).
+- [x] Cross-encoder reranker (open-source equivalent of Jev/System One) tested (E26): +6-10% in
+      P@10 but multiplies latency by 5-7 (it needs the full text) → not used by default.
+- [x] Whole dataset downloaded (`scripts/download_hn.py`: 239 months, 12.42 GB, SHA-256 checked).
+- [x] LM trained on HN on the iGPU: −9% text at the same cost (E29).
+- [x] **Compact profile** plan measured (E27-E29): **~5 GB** for all of HN (5.74 lossless, 5.24
+      with −1%) with ~4 s queries; documented in [05-arquitectura.md](05-arquitectura.md), not
+      implemented for now.
 - [x] Python library `import hnz` (P1, E30) and **RAM governance** (P2, E31): everything hnz holds
       stays within `ram=`; what does not fit is read from disk with identical results; process
       memory <= 1.03 x `ram` with 8 concurrent clients ([07-ram.md](07-ram.md)).
-- [ ] Construcción completa de los 239 meses (`scripts/pipeline.py`; días de CPU/iGPU).
+- [ ] Full build of the 239 months (`scripts/pipeline.py`; days of CPU/iGPU).
 
-## Resultado con la muestra de 3 meses (637.046 ítems, E26)
+## Result with the 3-month sample (637,046 items, E26)
 
-| | Caliente (zstd) | Frío (LM) |
+| | Hot (zstd) | Cold (LM) |
 |---|---|---|
-| Tamaño por ítem (texto + metadatos + BM25 + vectores) | 267,6 B | 187-188 B |
-| Todo HN (~49,3 M; 2 años en caliente) | **≈ 10,0 GB** + modelos 0,38 GB (≈ 10,4 GB) | |
-| Búsqueda híbrida k=10 (embedding + búsqueda + texto; mediana, caché vacía) | 26 ms | 280 ms (fragmentos de 64 tokens) |
-| Texto completo de 10 resultados fríos | — | 527 ms; 24 ms en caché RAM, 53 ms en caché disco |
-| Abrir el archivo | 180 ms | |
+| Size per item (text + metadata + BM25 + vectors) | 267.6 B | 187-188 B |
+| All of HN (~49.3 M; 2 years in the hot tier) | **≈ 10.0 GB** + models 0.38 GB (≈ 10.4 GB) | |
+| Hybrid search k=10 (embedding + search + text; median, empty cache) | 26 ms | 280 ms (64-token snippets) |
+| Full text of 10 cold results | — | 527 ms; 24 ms cached in RAM, 53 ms cached on disk |
+| Opening the archive | 180 ms | |
 
-En todo el archivo, la latencia depende de cuántos resultados salgan del nivel frío (~25 ms cada
-uno): 103 ms de mediana con consultas sobre 2024 (2 de 10 fríos) y 264 ms con consultas sobre 2010
-(8 de 10). Sin texto (listados con filtros): 4 ms.
+Across the whole archive, latency depends on how many results come from the cold tier (~25 ms
+each): 103 ms median with queries on 2024 (2 of 10 cold) and 264 ms with queries on 2010
+(8 of 10). Without text (listings with filters): 4 ms.
 
-Calidad (P@10 híbrida, título → comentarios del hilo, todo el archivo): 0,278 / 0,208 / 0,249 con
-consultas de 2024 / 2010 / 2015. Con más meses esta cifra baja aunque la búsqueda no empeore: los
-hilos parecidos de otros años cuentan como fallos (E26).
+Quality (hybrid P@10, title → thread comments, whole archive): 0.278 / 0.208 / 0.249 with
+queries from 2024 / 2010 / 2015. With more months this figure drops even though search does not
+get worse: similar threads from other years count as misses (E26).
 
-## Entorno
+## Environment
 
-- Python: `.venv` creado con `uv` (Python 3.12) e instalado desde [`../requirements-torch.txt`](../requirements-torch.txt) (torch CPU, índice de PyTorch) y [`../requirements.txt`](../requirements.txt)
-  (versiones fijadas). Modelos: `.venv\Scripts\python scripts\prepare_models.py` (o con el entorno activado; ver `hnz/README.md`).
-- Datos: dataset `open-index/hacker-news` de Hugging Face: **239 Parquet mensuales** (2006-10 →
-  2026-08) más ficheros horarios de los últimos días (`today/…`) y estadísticas (628 ficheros en total).
-  Todo el dataset se baja con `scripts/download_hn.py` (~12,4 GB en `data/`): reanudable byte a byte si se
-  corta (basta con volver a lanzarlo), versión fija del dataset y SHA-256 de cada fichero.
-- Embeddings cacheados en `emb/` (`*.npy`) para no recalcular.
-- Descargas de Hugging Face con `HF_HUB_DISABLE_XET=1`: el descargador `hf_xet` muere a mitad de
-  descarga en esta máquina (E26); `scripts/pipeline.py`, `scripts/prepare_models.py` y `experimentos/bench_rerank.py` lo fijan.
-- Máquina: Intel Core Ultra 7 265H (16 núcleos, iGPU Arc 140T, NPU), 31 GB RAM, sin GPU NVIDIA.
-- Rust: toolchain `stable-x86_64-pc-windows-gnu` (instalación de usuario, sin Visual Studio); el
-  binario requiere CPU x86-64-v3 (AVX2).
+- Python: `.venv` created with `uv` (Python 3.12) and installed from [`../requirements-torch.txt`](../requirements-torch.txt) (CPU torch, PyTorch index) and [`../requirements.txt`](../requirements.txt)
+  (pinned versions). Models: `.venv\Scripts\python scripts\prepare_models.py` (or with the environment activated; see `hnz/README.md`).
+- Data: Hugging Face dataset `open-index/hacker-news`: **239 monthly Parquet files** (2006-10 →
+  2026-08) plus hourly files for the last few days (`today/…`) and statistics (628 files in total).
+  The whole dataset is downloaded with `scripts/download_hn.py` (~12.4 GB in `data/`): resumable
+  byte by byte if interrupted (just run it again), pinned dataset version and SHA-256 of each file.
+- Embeddings cached in `emb/` (`*.npy`) so as not to recompute them.
+- Hugging Face downloads with `HF_HUB_DISABLE_XET=1`: the `hf_xet` downloader dies mid-download
+  on this machine (E26); `scripts/pipeline.py`, `scripts/prepare_models.py` and `experimentos/bench_rerank.py` set it.
+- Machine: Intel Core Ultra 7 265H (16 cores, Arc 140T iGPU, NPU), 31 GB RAM, no NVIDIA GPU.
+- Rust: toolchain `stable-x86_64-pc-windows-gnu` (user install, without Visual Studio); the
+  binary requires an x86-64-v3 CPU (AVX2).

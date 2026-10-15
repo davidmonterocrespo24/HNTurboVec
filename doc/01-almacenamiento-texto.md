@@ -1,44 +1,47 @@
-# Almacenamiento del texto (la información recuperable)
+# Text storage (the retrievable information)
 
-Detalle numérico en [BITACORA.md](BITACORA.md) (E00-E03, E09, E12, E15-E17, E20, E24, E25).
+Numerical details in [BITACORA.md](BITACORA.md) (E00-E03, E09, E12, E15-E17, E20, E24, E25).
 
-## Qué hemos aprendido
+## What we have learned
 
-1. **El texto es lo que más pesa** (~335 B/ítem crudo). Metadatos en columnas delta: ~5,5 B/ítem.
-2. **Bloques pequeños > compresor más fuerte.** Pasar de 1 registro a 16 por bloque baja de 181 a
-   ~124 B/ítem; zstd-22, brotli-11 y xz apenas mejoran a zstd-19 + diccionario.
-3. **Orden por hilo** ayuda un poco (118,5 → 114,4 B en bloques de 256); por tema < 1 %. Pero un
-   orden distinto del id obliga a guardar un mapa doc→bloque (~4 B/doc) → **orden por id** (= orden
-   temporal), que además convierte un rango de fechas en un rango contiguo de documentos.
-4. **El salto grande es el LM como compresor**: con pythia-70m int8 y la representación "e" (E15),
-   ~61-64 B/registro de texto frente a ~117 B con zstd en bloques de 16. Cada registro se codifica
-   solo → acceso aleatorio perfecto; el "diccionario" es el modelo (72 MB).
-5. **HTML de HN**: dos dialectos de escapado (antiguo ~2007-2012 y moderno) y enlaces truncados con
-   "…" (30-40 % de los enlaces) → transformación reversible verificada registro a registro.
-6. **Filas `deleted`**: se guardan como metadatos (tipo, fecha, padre, dead) para no romper la cadena
-   de los hilos (en 2010-06, 141 comentarios cuelgan de un borrado). El orden de `kids` no se guarda.
+1. **Text is the heaviest part** (~335 B/item raw). Metadata in delta columns: ~5.5 B/item.
+2. **Small blocks > stronger compressor.** Going from 1 record to 16 per block brings it down from
+   181 to ~124 B/item; zstd-22, brotli-11 and xz barely improve on zstd-19 + dictionary.
+3. **Ordering by thread** helps a little (118.5 → 114.4 B in blocks of 256); by topic < 1%. But an
+   order other than by id requires storing a doc→block map (~4 B/doc) → **ordering by id**
+   (= chronological order), which also turns a date range into a contiguous range of documents.
+4. **The big leap is the LM as a compressor**: with pythia-70m int8 and representation "e" (E15),
+   ~61-64 B/record of text versus ~117 B with zstd in blocks of 16. Each record is encoded on its
+   own → perfect random access; the "dictionary" is the model (72 MB).
+5. **HN's HTML**: two escaping dialects (old ~2007-2012 and modern) and links truncated with
+   "…" (30-40% of the links) → reversible transformation verified record by record.
+6. **`deleted` rows**: stored as metadata (type, date, parent, dead) so as not to break the chain
+   of the threads (in 2010-06, 141 comments hang off a deleted item). The order of `kids` is not
+   stored.
 
-## Cómo se resolvieron los riesgos del LM
+## How the LM's risks were resolved
 
-- **Determinismo bit a bit:** motor propio en Rust con matmul int8 exacta (el resultado no depende
-  del núcleo SIMD ni de los hilos), exp/erf propias y sumas en orden fijo; `MATH_VERSION` en `lm.json`.
-- **Integridad:** 1 byte de comprobación por registro, validado al descomprimir el registro
-  **completo** (`--full`, `get`, `verify`): una divergencia (otro binario con el mismo modelo y la
-  misma `MATH_VERSION`) da error en ~255 de cada 256 registros; el resto solo se rechaza si además
-  sale UTF-8 inválido o un registro mal formado, así que no es una garantía absoluta (`hnz verify`
-  sí lo es: compara con el original). Los fragmentos y títulos se cortan antes del final y no lo
-  comprueban; ahí protege que al abrir el segmento se exige el mismo id de modelo y `MATH_VERSION`.
-- **Descompresión secuencial:** lote de todos los resultados de una consulta, pool de hilos propio,
-  modo fragmento (64 tokens del cuerpo) y cachés L1 (RAM) + L2 (disco).
-- **Coste de compresión:** ~120 reg/s en 16 hilos (≈ 4 días para ~40 M ítems fríos), en paralelo con
-  los embeddings en la iGPU.
+- **Bit-for-bit determinism:** custom engine in Rust with exact int8 matmul (the result does not
+  depend on the SIMD kernel or on the threads), custom exp/erf and sums in a fixed order;
+  `MATH_VERSION` in `lm.json`.
+- **Integrity:** 1 check byte per record, validated when decompressing the **full** record
+  (`--full`, `get`, `verify`): a divergence (another binary with the same model and the same
+  `MATH_VERSION`) produces an error in ~255 out of every 256 records; the rest are rejected only if
+  they also come out as invalid UTF-8 or a malformed record, so it is not an absolute guarantee
+  (`hnz verify` is one: it compares against the original). Snippets and titles are cut before the
+  end and do not check it; there, the protection is that opening the segment requires the same
+  model id and `MATH_VERSION`.
+- **Sequential decompression:** a batch with all the results of a query, custom thread pool,
+  snippet mode (64 tokens of the body) and L1 (RAM) + L2 (disk) caches.
+- **Compression cost:** ~120 rec/s on 16 threads (≈ 4 days for ~40 M cold items), in parallel with
+  the embeddings on the iGPU.
 
-## Niveles implementados
+## Implemented tiers
 
-| Nivel | Uso típico | Formato | Texto B/ítem (medido) | Lectura de un top-10 |
+| Tier | Typical use | Format | Text B/item (measured) | Reading a top-10 |
 |---|---|---|---|---|
-| Caliente | años recientes | zstd-19 + dict, bloques de 16 | ~117 | ~2,5 ms (26 ms con embedding y búsqueda) |
-| Frío | años antiguos | LM pythia-70m + codificación aritmética | ~61-65 | ~0,26 s fragmentos; ~0,5 s completo (2 ms en caché RAM, 29 ms en disco) |
+| Hot | recent years | zstd-19 + dict, blocks of 16 | ~117 | ~2.5 ms (26 ms with embedding and search) |
+| Cold | older years | pythia-70m LM + arithmetic coding | ~61-65 | ~0.26 s snippets; ~0.5 s full (2 ms cached in RAM, 29 ms on disk) |
 
-El tamaño de bloque zstd es configurable (`--block`): bloques de 256 dan ~114 B con lecturas de
-~0,2 ms (un posible nivel "templado"). Un segmento caliente se enfría con `hnz retier --tier lm`.
+The zstd block size is configurable (`--block`): blocks of 256 give ~114 B with reads of
+~0.2 ms (a possible "warm" tier). A hot segment is cooled down with `hnz retier --tier lm`.
