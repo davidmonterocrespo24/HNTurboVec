@@ -1049,11 +1049,24 @@ the multi-day all-HN runs (P5) start after P3.
 | 2 streams, E-cores only | 4,874 | 6,493 | 3,501 | 920 | 59.2 |
   On E-cores only the LM decodes faster (it keeps the P-cores) but the embedder falls behind and
   the wait at the end triples; the default, 4 threads and P-cores only are within noise of each
-  other. The default stays. **This run's default (p50 3.5 s, p90 4.5 s) is ~1.1 s faster than step
-  4's (4.6 s)**, with the same queries: decoding 3.6 → 2.9 s and the final wait 0.87 → 0.37 s. The
-  priority queue explains the wait, not the decoding; the laptop's state (clocks, temperature) may
-  differ between the runs, so an interleaved A/B run of both binaries is pending before crediting
-  the queue with it.
+  other. The default stays. This run's default (p50 3.5 s, p90 4.5 s) was ~1.1 s faster than step
+  4's (4.6 s) with the same queries, but the interleaved A/B below shows that the priority queue
+  is not the reason: **the laptop's speed drifts by about ±1 s between runs of a whole setting**
+  (clocks, temperature, power state), so only interleaved comparisons count.
+- **E33e step 4c — interleaved A/B** (`experimentos/bench_ab_latency.py`: for each of 30 other eval
+  queries, both binaries run cold one after the other, in alternating order →
+  `resultados/results_e33e_ab_queue.txt`): FIFO queue (`hnz-p4f`) vs priority queue with the review
+  fixes (`hnz-p4k`): search median 4,562 vs 4,542 ms (paired median difference −53 ms, the new one
+  faster in 17/30), decoding 3,828 vs 3,860 ms, wait after decoding 568 vs 428 ms (−69 ms, 20/30),
+  documents embedded 68 vs 64 (27/30). **The queue trims the final wait and the waste a little; the
+  total barely moves**, identical results.
+  Second A/B, the same binary with 60 vector candidates and a cascade of 40 against the defaults
+  (100 and 50; `--rerank-kv 60 --rerank-top 40` → `resultados/results_e33e_ab_kv60.txt`): **search
+  median 4,284 → 2,865 ms (paired median −1,472 ms, faster in 30/30)**, decoding 3,722 → 2,092 ms,
+  wait after decoding 429 → 424 ms, documents embedded 65 → 46; the top 10 differs in 16 of the 30
+  queries (other candidates; equal quality on average in step 1b). Since step 1b chose among three
+  settings on the test queries, the choice is checked on a disjoint dev set before it becomes the
+  default (`make_eval.py --skip 300`: the next 300 stories of each month's shuffle, 0 overlap).
 - **E33a — the dynamic int8 IR on the CPU** (`experimentos/bench_doc_embed_dyn.py` →
   `resultados/results_e33a.txt`), against the plan's rules:
   - **Queries** (the 900 eval queries at [1, 64]): cosine with the static b1_s64 int8 IR mean

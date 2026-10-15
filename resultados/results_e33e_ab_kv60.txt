@@ -1,0 +1,21 @@
+results differ: 1-Bit Pixels Encoded in E. Coli for the Display of Interactive Digital Media
+results differ: Show HN: Pfuzz, a web fuzzer following the Unix philosophy
+results differ: Building an antilibrary: the power of unread books
+results differ: The $500M Dollar Typo
+results differ: Wayfair CEO tells employees to 'work longer hours' in year-end email
+results differ: Tesla: You Have to Wipe Bugs/Bird Poop Off Your Cybertruck to Avoid Corrosion
+results differ: Post-Serverless Era Trends
+results differ: Intellectual honesty and html5
+results differ: Iceland passes the "Wikileaks law". What will it mean for journalists?
+results differ: How Scribd runs 150,000,000 polygon intersections a day
+results differ: What’s The Secret Behind Diapers.com Success? A Kiva Robot Warehouse
+results differ: Results from the State of Clojure, Summer 2010 Survey
+results differ: How two men survived a prison where 12,000 were killed
+results differ: The Case of GCC-5.1 and the Two C++ ABIs
+results differ: Ask HN: How to deal with female name on resume?
+results differ: Help, I’m Trapped in Facebook’s Absurd Pseudonym Purgatory
+30 queries, cold, interleaved; A = hnz-p4k.exe , B = hnz-p4k.exe --rerank-kv 60 --rerank-top 40
+   search: A median     4284  B median     2865  median of B - A    -1472  (B lower in 30/30)
+   decode: A median     3722  B median     2092  median of B - A    -1530  (B lower in 30/30)
+     tail: A median      429  B median      424  median of B - A      -12  (B lower in 15/30)
+ embedded: A median       65  B median       46  median of B - A      -18  (B lower in 30/30)

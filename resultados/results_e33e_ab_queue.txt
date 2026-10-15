@@ -1,0 +1,5 @@
+30 queries, cold, interleaved; A = hnz-p4f.exe , B = hnz-p4k.exe 
+   search: A median     4562  B median     4542  median of B - A      -53  (B lower in 17/30)
+   decode: A median     3828  B median     3860  median of B - A     +107  (B lower in 10/30)
+     tail: A median      568  B median      428  median of B - A      -69  (B lower in 20/30)
+ embedded: A median       68  B median       64  median of B - A       -3  (B lower in 27/30)
