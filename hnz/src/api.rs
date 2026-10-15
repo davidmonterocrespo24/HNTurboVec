@@ -101,6 +101,8 @@ pub struct SearchRequest {
     /// P4: answer within this many milliseconds from the call (opt-in): a reranking not done by
     /// then gives way to stage 1's results, or to the cheap score's order, marked `degraded`
     pub deadline_ms: Option<f64>,
+    /// P4: vector candidates to rerank (None = 80; fewer is faster, more reaches deeper)
+    pub rerank_depth: Option<usize>,
 }
 
 impl Default for SearchRequest {
@@ -121,6 +123,7 @@ impl Default for SearchRequest {
             c_bm25: None,
             rerank: None,
             deadline_ms: None,
+            rerank_depth: None,
         }
     }
 }
@@ -180,6 +183,9 @@ pub fn make_query(r: &SearchRequest) -> Result<Query> {
     }
     if r.c_bm25.is_some_and(|c| !(c.is_finite() && c > 0.0)) || r.w_bm25.is_some_and(|w| !(w.is_finite() && w >= 0.0)) {
         return Err(bad(format!("c_bm25 debe ser > 0 y w_bm25 >= 0 (son {:?} y {:?})", r.c_bm25, r.w_bm25)));
+    }
+    if r.rerank_depth.is_some_and(|d| d == 0 || d > crate::rerank::MAX_DEPTH) {
+        return Err(bad(format!("rerank_depth debe estar entre 1 y {} (es {:?})", crate::rerank::MAX_DEPTH, r.rerank_depth)));
     }
     if r.deadline_ms.is_some_and(|d| !(d.is_finite() && d > 0.0 && d <= 3.6e6)) {
         return Err(bad(format!("deadline_ms debe estar entre 0 y 3.600.000 (es {:?})", r.deadline_ms)));
@@ -655,7 +661,7 @@ impl Archive {
         // the deadline counts from the call: waiting for a turn gives up at it too (BusyError)
         let deadline = req.deadline_ms.map(|d| t0 + Duration::from_secs_f64(d / 1e3));
         let cfg = {
-            let d = crate::rerank::RerankCfg::default();
+            let d = req.rerank_depth.map_or_else(crate::rerank::RerankCfg::default, crate::rerank::RerankCfg::with_depth);
             crate::rerank::RerankCfg { w: req.w_bm25.unwrap_or(d.w), c: req.c_bm25.unwrap_or(d.c), ..d }
         };
         // a search that may be reranked declares the reranker's first round of stage 1 and the

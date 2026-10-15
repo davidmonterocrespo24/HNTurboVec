@@ -1067,6 +1067,22 @@ the multi-day all-HN runs (P5) start after P3.
   queries (other candidates; equal quality on average in step 1b). Since step 1b chose among three
   settings on the test queries, the choice is checked on a disjoint dev set before it becomes the
   default (`make_eval.py --skip 300`: the next 300 stories of each month's shuffle, 0 overlap).
+- **E33e step 1c — the dev set decides** (`resultados/results_e33e_dev.txt`; 900 dev queries never
+  used to choose; stored vectors), P@10:
+| Setting | 2024-01 | 2010-06 | 2015-06 | mean (dev) | mean (test) |
+|---|---|---|---|---|---|
+| kv 100, cascade 50 | 0.252 | 0.239 | 0.240 | 0.2437 | 0.2387 |
+| **kv 80, cascade 50** | 0.253 | 0.238 | 0.240 | **0.2437** | 0.2380 |
+| kv 60, cascade 40 | 0.250 | 0.234 | 0.238 | 0.2407 | 0.2390 |
+| kv 100, cascade 30 | 0.250 | 0.238 | 0.238 | 0.2420 | 0.2370 |
+  On dev, 60 candidates lose 0.003 (2010: −0.005); 80 lose nothing on either set (1,800 queries).
+  Interleaved A/B of kv 80 against kv 100 (`resultados/results_e33e_ab_kv80.txt`, 30 queries):
+  search median 4,850 → 4,055 ms (paired −829 ms, faster in 30/30), decoding −948 ms; the top 10
+  differs in 7 of 30. **Decision: 80 vector candidates (cascade 50) are the default**: the quality
+  of 100 at ~17 % less latency, still meeting the gate on the test set (0.279 / 0.193 / 0.242).
+  `rerank_depth` (library, `--rerank-kv` in the CLI) picks another depth per search, 1-500: 60
+  re-embeds 40 and is ~34 % faster than 100 for ~0.003 less P@10; deeper reaches results stage 1
+  ranks lower (useful for large k).
 - **E33a — the dynamic int8 IR on the CPU** (`experimentos/bench_doc_embed_dyn.py` →
   `resultados/results_e33a.txt`), against the plan's rules:
   - **Queries** (the 900 eval queries at [1, 64]): cosine with the static b1_s64 int8 IR mean
@@ -1137,3 +1153,24 @@ the multi-day all-HN runs (P5) start after P3.
   **11 passed** (5.6 min, without the memory soak), including two new tests: the fusion parameters
   change the reranked order, and a rerank keeps progressing (and meets its deadline) while two
   threads call `embed()` in a loop and a third decodes 300 records with `get()`.
+- **P4 closing checks** (free machine, binary/wheel with 80 candidates by default →
+  `resultados/results_p4_suites.txt`):
+  - Python suites: **`test_rerank` 13 passed** (incl. `rerank_depth` and the memory soak: 8
+    clients reranking for 60 s at the floor + 64 MiB, process growth <= 1.03 x ram, ledger <= ram),
+    **`test_block` 31, `test_hnz` 13, `test_memory` 11: 68/68.** Rust: 32.
+  - **Cold reranked search through the library** (`hnz.open(…, preload=True)`, 12 dev queries):
+    median **2,754 ms at `ram='2GB'`** (LM pool 95 MiB) and 2,948 ms without a limit (pool 256 MiB).
+    The CLI measures ~4 s for the same work because each of its processes meets every embedding
+    shape for the first time; a library process has them warm after its first queries.
+  - **Concurrency** (cold reranks, nothing else): 1 client 22 searches/min (p50 2.9 s); 4 clients
+    26/min at 2 GB (p50 8.4 s each) and 25/min with a 256 MiB pool (8.7 s): **reranking is
+    CPU-bound (~25 cold searches per minute on this laptop) and the LM pool's size does not matter**,
+    so the prefix-bound idea of E33b (reserving a prefix's room instead of the whole record's) is
+    not needed.
+  - **`get()` under 4 cold reranks** (`experimentos/bench_get_under_rerank.py`): p95 726 ms alone
+    and **887 ms** with the reranks running (the plan's criterion: <= 1 s). The price: while a client
+    fetches full records back to back, the reranks get one LM step per 100 ms of interactive work
+    and took ~55 s each (6 of them in 60 s). Bounded, by design: interactive reads first.
+  **P4 done:** quality gate met (0.238 by default, 0.239 with 100 candidates; real re-embedding =
+  stored vectors), cold reranked search ~2.8 s in the library (~4 s in the CLI) on this 16-thread
+  laptop, memory within `ram`, 68 Python and 32 Rust tests, adversarial review fixed.

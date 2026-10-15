@@ -80,7 +80,7 @@ struct SearchArgs {
     /// done by then gives way to stage 1's results, or to the cheap score's order (degraded)
     #[arg(long)]
     deadline_ms: Option<f64>,
-    /// P4: vector candidates to rerank (default 100)
+    /// P4: vector candidates to rerank (default 80)
     #[arg(long)]
     rerank_kv: Option<usize>,
     /// P4: candidates re-embedded in hybrid mode, the top of the cheap score (default 50)
@@ -531,12 +531,12 @@ fn cmd_eval_rerank(root: &Path, file: &Path, k: usize, m: &ModelArgs, emb: Optio
     let base = Query { k: k + 1, ..Default::default() };
     let d = RerankCfg::default();
     let mut configs: Vec<(String, Query, RerankCfg)> = vec![
-        ("híbrida, cascada 50 (P4)".into(), base.clone(), d.clone()),
+        ("híbrida, kv 80, cascada 50 (P4)".into(), base.clone(), d.clone()),
         ("híbrida, todos re-embebidos (E30c)".into(), base.clone(), RerankCfg { embed_top: None, ..d.clone() }),
         ("híbrida, cascada 30".into(), base.clone(), RerankCfg { embed_top: Some(30), ..d.clone() }),
-        // fewer vector candidates: fewer prefixes to decode (E33b's rule for slow CPUs)
-        ("híbrida, kv 80, cascada 50".into(), base.clone(), RerankCfg { kv: 80, ..d.clone() }),
-        ("híbrida, kv 60, cascada 40".into(), base.clone(), RerankCfg { kv: 60, embed_top: Some(40), ..d.clone() }),
+        // more or fewer vector candidates (E33e step 1b): more reach deeper, fewer decode less
+        ("híbrida, kv 100, cascada 50".into(), base.clone(), RerankCfg { kv: 100, ..d.clone() }),
+        ("híbrida, kv 60, cascada 40".into(), base.clone(), RerankCfg::with_depth(60)),
         ("híbrida, solo R0 (sin re-embeber)".into(), base.clone(), RerankCfg { embed_top: Some(0), ..d.clone() }),
         ("vector, re-embebidos".into(), Query { mode: Mode::Vector, ..base.clone() }, d.clone()),
         ("palabras (frecuentes entre candidatos)".into(), Query { mode: Mode::Keyword, ..base.clone() }, d.clone()),

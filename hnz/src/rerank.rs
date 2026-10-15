@@ -21,7 +21,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
-/// Reranking settings (defaults: E30c, E30f and the user's decisions of 2026-10-15).
+/// Reranking settings (defaults: E30c, E30f, the user's decisions of 2026-10-15, and E33e step
+/// 1b: 80 vector candidates rerank as well as 100 on the test and dev queries, 17 % faster).
 #[derive(Clone, Debug)]
 pub struct RerankCfg {
     /// vector candidates (stage 1)
@@ -38,9 +39,21 @@ pub struct RerankCfg {
     pub c: f32,
 }
 
+impl RerankCfg {
+    /// The defaults with `kv` vector candidates (the caller's `rerank_depth`): the cascade
+    /// re-embeds two thirds of them, at most 50 (E33e: 60 candidates with 40 re-embedded).
+    pub fn with_depth(kv: usize) -> Self {
+        let kv = kv.clamp(1, MAX_DEPTH);
+        Self { kv, embed_top: Some((kv * 2).div_ceil(3).min(50)), ..Self::default() }
+    }
+}
+
+/// The most vector candidates a search may ask to rerank.
+pub const MAX_DEPTH: usize = 500;
+
 impl Default for RerankCfg {
     fn default() -> Self {
-        Self { kv: 100, kb: 20, kb_keyword: 50, embed_top: Some(50), r0_w: 0.3, r0_c: 20.0, w: 0.15, c: 40.0 }
+        Self { kv: 80, kb: 20, kb_keyword: 50, embed_top: Some(50), r0_w: 0.3, r0_c: 20.0, w: 0.15, c: 40.0 }
     }
 }
 

@@ -59,8 +59,10 @@ matters is daily use: **fast, accurate and compact**. Implementation in **Rust**
       (time, id) order, global word index of rare terms, integrity levels and canaries,
       `hnz pack` / `verify-block` / `inspect`, document prompts defined in Rust (v2); sample block
       verified 100 % against its sources; projection to all of HN: **5.32 GB** ([08-block.md](08-block.md)).
-- [ ] P4: reranking by re-embedding the candidates' prefix and frequent words scored over the
-      vector candidates (E30a, E30c).
+- [x] **Reranking** (P4, E33): each candidate's prefix decoded by a shared LM service, BM25 of every
+      query word over it, the top 50 of a cheap score re-embedded on the CPU; frequent words found
+      among the semantic candidates; opt-in deadline; P@10 0.238 (P3 block: 0.211); cold search
+      ~2.8 s in the library on a 16-thread laptop ([09-rerank.md](09-rerank.md)).
 - [ ] Full build of the 239 months (P5; days of CPU/iGPU).
 
 ## Result with the 3-month sample (637,046 items, E26)

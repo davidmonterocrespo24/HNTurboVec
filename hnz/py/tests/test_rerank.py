@@ -39,8 +39,9 @@ def ids_scores(r):
 
 def test_rerank_on_by_default(hn):
     r = hn.search(QUERIES[1], k=10, raw=True)
-    # the top 50 by the cheap score are re-embedded, plus a few speculative ones (overlap)
-    assert 'rerank' in r and r['rerank']['candidates'] >= 100 and r['rerank']['embedded'] >= 50
+    # 80 vector + up to 20 rare-term candidates; the top 50 by the cheap score are re-embedded,
+    # plus a few speculative ones (overlap)
+    assert 'rerank' in r and r['rerank']['candidates'] >= 80 and r['rerank']['embedded'] >= 50
     assert len(r['results']) == 10
     p3 = hn.search(QUERIES[1], k=10, raw=True, rerank=False)
     assert 'rerank' not in p3 and len(p3['results']) == 10
@@ -165,6 +166,18 @@ def test_reranking_progresses_under_query_and_get_streams(hn):
         stop.set()
         for t in ts:
             t.join()
+
+
+def test_rerank_depth(hn):
+    q = QUERIES[2]
+    r = hn.search(q, k=10, raw=True, rerank_depth=60)
+    assert len(r['results']) == 10 and r['rerank']['candidates'] <= 60 + 20
+    assert r['rerank']['embedded'] >= 40
+    deep = hn.search(q, k=50, raw=True, rerank_depth=200)
+    assert len(deep['results']) == 50 and deep['rerank']['candidates'] > 100
+    for bad in (0, 501):
+        with pytest.raises(ValueError):
+            hn.search(q, rerank_depth=bad)
 
 
 def test_filters_hold(hn):

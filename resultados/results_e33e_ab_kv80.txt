@@ -1,0 +1,12 @@
+results differ: Show HN: Pfuzz, a web fuzzer following the Unix philosophy
+results differ: Wayfair CEO tells employees to 'work longer hours' in year-end email
+results differ: Intellectual honesty and html5
+results differ: How Scribd runs 150,000,000 polygon intersections a day
+results differ: How two men survived a prison where 12,000 were killed
+results differ: The Case of GCC-5.1 and the Two C++ ABIs
+results differ: Help, I’m Trapped in Facebook’s Absurd Pseudonym Purgatory
+30 queries, cold, interleaved; A = hnz-p4k.exe , B = hnz-p4k.exe --rerank-kv 80 --rerank-top 50
+   search: A median     4850  B median     4055  median of B - A     -829  (B lower in 30/30)
+   decode: A median     4084  B median     3196  median of B - A     -948  (B lower in 30/30)
+     tail: A median      522  B median      538  median of B - A      +66  (B lower in 9/30)
+ embedded: A median       64  B median       57  median of B - A       -5  (B lower in 27/30)

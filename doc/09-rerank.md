@@ -1,7 +1,7 @@
 # Reranking (P4): a compact block's candidates reordered by their prefix
 
-**Status:** implemented on 2026-10-15 (log entry E33 in [BITACORA.md](BITACORA.md)); quality and
-cold latency measured; the memory run with concurrent clients pending. Design: a panel of three
+**Status:** done on 2026-10-15 (log entry E33 in [BITACORA.md](BITACORA.md)): quality gate met,
+latency and memory measured, adversarial review fixed, 68 Python and 32 Rust tests pass. Design: a panel of three
 architects and a judge (E33); the measurements it rests on: E30a (prefix embeddings), E30c
 (fusion), E30f (cascade).
 
@@ -9,8 +9,8 @@ architects and a judge (E33); the measurements it rests on: E30a (prefix embeddi
 
 A cold search of a compact block (hybrid mode, the default):
 
-1. **Stage 1** (as in P3): the query vector against the 256-bit codes gives the top 100 by the
-   asymmetric score `s1`; the rare-term index gives the top 20 by BM25. Filters (dates, types,
+1. **Stage 1** (as in P3): the query vector against the 256-bit codes gives the top 80 by the
+   asymmetric score `s1` (`rerank_depth`); the rare-term index gives the top 20 by BM25. Filters (dates, types,
    author, dead/deleted) apply here, so every reranked document passes them.
 2. **Prefixes.** Each candidate's prefix (title, url and the first 128 LM tokens of the body,
    [08-block.md](08-block.md) "Vectors") comes from the prefix cache, from the block's
@@ -23,7 +23,8 @@ A cold search of a compact block (hybrid mode, the default):
 5. **Cascade:** the top 50 by R0 are re-embedded (their document prompt v2, rebuilt from the
    decoded prefix exactly as `hnz prompts` built it at pack time) and scored
    `cos + 0.15 · b / (b + 40)`; the rest follow in R0 order. Re-embedding only the top 50 gives
-   the same quality as re-embedding all ~110 candidates (E30f, E33e).
+   the same quality as re-embedding all the candidates (E30f, E33e), and 80 vector candidates the
+   same as 100 (E33e steps 1b-1c, on the test and on a disjoint dev set).
 6. **Results** reuse the decoded prefixes: a record that fits in its prefix (~84 % of them) comes
    back whole, the others as the same 64-token snippet as before.
 
@@ -34,7 +35,7 @@ The embedder's thread answers the queries queued at each moment and then runs on
 documents, so a stream of `embed()` calls cannot hold the reranking back either.
 
 Other modes:
-- **Vector:** the 100 vector candidates, all re-embedded, by cosine.
+- **Vector:** the vector candidates, all re-embedded, by cosine.
 - **Keyword:** if every query word is rare, the P3 path (exhaustive postings). If one is frequent
   (e.g. "rust async runtime"), candidates = the rare top 50 + the vector top 100, kept when their
   BM25 over the prefix is > 0, ordered by it; the response carries a warning: frequent words are
@@ -92,6 +93,8 @@ mean is reported as `memory()["embedder"]["measured"]["check_flips"]`. It costs 
   `ValueError` if it cannot; `rerank=False` gives the P3 results. The response reports
   `rerank: {candidates, decoded, tokens, embedded, ms_stage1, ms_decode, ms_embed}` and, in keyword
   mode with frequent words, `warning`. CLI: `hnz search --rerank`, `hnz eval --rerank`.
+- `rerank_depth` (optional, 1-500, default 80): vector candidates to rerank; the cascade
+  re-embeds two thirds of them, at most 50.
 - `w_bm25`, `c_bm25` (optional): BM25's weight and saturation in the final fusion
   `cos + w·b/(b + c)` (None: 0.15 and 40; stage 1 without reranking: 0.15 and 20).
 - CLI: `hnz search --rerank [--deadline-ms N] [--rerank-kv N] [--rerank-top N]` (the same checks as
@@ -108,7 +111,8 @@ mean is reported as `memory()["embedder"]["measured"]["check_flips"]`. It costs 
 | Setting | 2024-01 | 2010-06 | 2015-06 | mean |
 |---|---|---|---|---|
 | P3 block, hybrid (no reranking) | 0.246 | 0.168 | 0.220 | 0.211 |
-| **P4, hybrid, cascade 50** | **0.282** | **0.193** | **0.241** | **0.239** |
+| P4, hybrid, kv 100, cascade 50 | 0.282 | 0.193 | 0.241 | 0.239 |
+| **P4, hybrid, kv 80, cascade 50 (default)** | **0.279** | **0.193** | **0.242** | **0.238** |
 | P4, all candidates re-embedded | 0.282 | 0.192 | 0.239 | 0.238 |
 | today's full index and text (P0 reference) | 0.278 | 0.208 | 0.249 | 0.245 |
 | P3 block, keyword | 0.119 | 0.056 | 0.080 | 0.085 |
@@ -123,12 +127,13 @@ Fewer vector candidates (E33e step 1b, stored vectors):
 
 | Setting | 2024-01 | 2010-06 | 2015-06 | mean | prefixes decoded |
 |---|---|---|---|---|---|
-| kv 100 + 20 rare, cascade 50 (default) | 0.282 | 0.193 | 0.241 | 0.2387 | ~96 |
-| kv 80 + 20, cascade 50 | 0.279 | 0.193 | 0.242 | 0.2380 | ~80 |
+| kv 100 + 20 rare, cascade 50 | 0.282 | 0.193 | 0.241 | 0.2387 | ~96 |
+| **kv 80 + 20, cascade 50 (default)** | 0.279 | 0.193 | 0.242 | 0.2380 | ~80 |
 | kv 60 + 20, cascade 40 | 0.281 | 0.193 | 0.243 | 0.2390 | ~65 |
 
-60 vector candidates with a cascade of 40 keep the quality of 100 with 50 and decode about a third
-fewer prefixes.
+On a disjoint dev set (900 other queries) the means are 0.2437 (kv 100), **0.2437 (kv 80)** and
+0.2407 (kv 60). 80 is the default: the quality of 100 at ~17 % less latency; `rerank_depth=60` is
+~34 % faster than 100 for ~0.003 less P@10.
 
 ## Latency (cold, sample block)
 
@@ -152,5 +157,23 @@ warm, model loading not counted), k = 10, on a Core Ultra 7 265H laptop (6 P + 8
   step). The defaults are the best setting here.
 - The embedding queue with priorities (above) cut the wait after decoding from a median of 571 ms
   to 434 ms on 21 queries, with identical results.
-- **Target:** ~4 s needs >= 16 fast threads or an iGPU (user's decision); this 16-thread hybrid
-  laptop gives p50 4.6 s, p90 5.7 s. A repeated query reuses the cached prefixes.
+- **Interleaved A/B runs** (each query cold with both settings, alternating; the laptop's speed
+  drifts by ~±1 s between whole runs, so only paired differences count): 80 candidates instead of
+  100: −829 ms median (faster in 30/30); 60 with a cascade of 40: −1,472 ms (30/30); the priority
+  queue: −53 ms.
+- **Target:** ~4 s (the user's decision: >= 16 fast threads or an iGPU). With the default 80
+  candidates this 16-thread hybrid laptop gives a median of ~4.0 s (the table above is for 100);
+  `rerank_depth=60` ~2.9 s. A repeated query reuses the cached prefixes.
+
+## Library latency, concurrency and memory
+
+- **Through the library** (`hnz.open(…, preload=True)`, the defaults, cold prefixes): median
+  **2,754 ms at `ram='2GB'`**, 2,948 ms without a limit. The CLI's ~4 s include each new
+  process's first inference at every embedding shape.
+- **Concurrent searches share the CPU**: ~25 cold reranked searches per minute on this laptop, with
+  1 client (p50 2.9 s) or 4 (p50 8.4 s each). The LM pool's size (95 or 256 MiB) does not change it.
+- **`get()` while 4 cold reranks run:** p95 887 ms (726 ms alone). A client reading full records back
+  to back slows concurrent reranks a lot (~55 s each), since interactive reads go first; they still
+  progress (one step per 100 ms).
+- **Memory:** 8 clients reranking for 60 s at the floor + 64 MiB keep the process within 1.03 x
+  `ram` and the ledger within `ram` (`test_rerank.py`).

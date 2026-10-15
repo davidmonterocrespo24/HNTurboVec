@@ -1,0 +1,17 @@
+== test_rerank
+.............                                                            [100%]
+13 passed in 312.14s (0:05:12)
+== test_block
+...............................                                          [100%]
+31 passed in 663.54s (0:11:03)
+== test_hnz
+.............                                                            [100%]
+13 passed in 52.84s
+== test_memory
+...........                                                              [100%]
+11 passed in 227.28s (0:03:47)
+== get() under reranks
+get() alone: p50 0 ms, p95 726 ms, max 1166 ms (100 records)
+get() with 4 cold reranks running: p50 0 ms, p95 887 ms, max 3322 ms (276 records)
+reranked searches meanwhile: 6, p50 55061 ms, p95 66780 ms
+suites-done
