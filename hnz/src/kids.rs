@@ -63,6 +63,79 @@ pub fn encode(ids: &[u32], kids: &[Vec<u32>], children: &[Vec<u32>]) -> Result<(
     Ok((frames, idx))
 }
 
+/// `encode` one document at a time (`pack::pack_stream`): the same frames and index.
+#[derive(Default)]
+pub struct KidsWriter {
+    raw: Vec<u8>,
+    in_frame: usize,
+    frames: Vec<u8>,
+    idx: Vec<u8>,
+}
+
+impl KidsWriter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&mut self, id: u32, kids: &[u32], children: &[u32]) -> Result<()> {
+        encode_one(&mut self.raw, id, kids, children);
+        self.in_frame += 1;
+        if self.in_frame == BLOCK {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.idx.extend_from_slice(&(self.frames.len() as u64).to_le_bytes());
+        self.frames.extend(zstd::bulk::compress(&self.raw, 19)?);
+        self.raw.clear();
+        self.in_frame = 0;
+        Ok(())
+    }
+
+    /// (zstd frames, u64 offset per frame then the end), as `encode`.
+    pub fn finish(mut self) -> Result<(Vec<u8>, Vec<u8>)> {
+        if self.in_frame > 0 {
+            self.flush()?;
+        }
+        self.idx.extend_from_slice(&(self.frames.len() as u64).to_le_bytes());
+        Ok((self.frames, self.idx))
+    }
+}
+
+/// The children of every document of a block built month by month: (parent, id) of every
+/// document, sorted, so a child in another month than its parent is found too (`children_of`
+/// over the whole block gives the same lists).
+#[derive(Default)]
+pub struct ChildIndex {
+    pairs: Vec<u64>,
+}
+
+impl ChildIndex {
+    pub fn with_capacity(n: usize) -> Self {
+        Self { pairs: Vec::with_capacity(n) }
+    }
+
+    pub fn add(&mut self, id: u32, parent: u32) {
+        if parent != 0 {
+            self.pairs.push((parent as u64) << 32 | id as u64);
+        }
+    }
+
+    pub fn finish(&mut self) {
+        use rayon::prelude::*;
+        self.pairs.par_sort_unstable();
+    }
+
+    /// The sorted ids of the documents whose parent is `id` (into `out`).
+    pub fn children(&self, id: u32, out: &mut Vec<u32>) {
+        out.clear();
+        let lo = self.pairs.partition_point(|&x| (x >> 32) < id as u64);
+        out.extend(self.pairs[lo..].iter().take_while(|&&x| (x >> 32) == id as u64).map(|&x| x as u32));
+    }
+}
+
 /// Decodes the kids of the documents of one frame (`ids` and `children` of those documents).
 pub fn decode_frame(frame: &[u8], ids: &[u32], children: &[Vec<u32>]) -> Result<Vec<Vec<u32>>> {
     let bad = || crate::block::corrupt("meta/kids");
@@ -143,5 +216,30 @@ mod tests {
         let (f2, _) = encode(&ids, &kids2, &ch).unwrap();
         assert_eq!(decode_frame(&f2, &ids, &ch).unwrap(), kids2);
         assert!(decode_frame(&frames[..frames.len() / 2], &ids, &ch).is_err());
+    }
+
+    #[test]
+    fn streaming_writer_and_child_index_match_encode() {
+        // 2,600 documents: frames of 1,024 that span a "month" boundary, children in later docs
+        let n = 2600u32;
+        let ids: Vec<u32> = (1..=n).collect();
+        let parents: Vec<u32> = ids.iter().map(|&i| if i % 3 == 0 { 0 } else { (i * 7 + 11) % n + 1 }).collect();
+        let ch = children_of(&ids, &parents);
+        let kids: Vec<Vec<u32>> = ch.iter().enumerate().map(|(d, c)| if d % 5 == 0 { c.iter().rev().copied().collect() } else { c.clone() }).collect();
+        let want = encode(&ids, &kids, &ch).unwrap();
+        let mut ci = ChildIndex::with_capacity(ids.len());
+        for (&i, &p) in ids.iter().zip(&parents) {
+            ci.add(i, p);
+        }
+        ci.finish();
+        let mut w = KidsWriter::new();
+        let mut scratch = Vec::new();
+        for (d, &i) in ids.iter().enumerate() {
+            ci.children(i, &mut scratch);
+            assert_eq!(scratch, ch[d]);
+            w.push(i, &kids[d], &scratch).unwrap();
+        }
+        assert_eq!(w.finish().unwrap(), want);
+        assert_eq!(KidsWriter::new().finish().unwrap(), encode(&[], &[], &[]).unwrap());
     }
 }

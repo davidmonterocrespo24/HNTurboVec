@@ -144,6 +144,13 @@ enum Cmd {
         spec: PathBuf,
         #[arg(long)]
         out: PathBuf,
+        /// build it month by month, the large parts through files in `--tmp` (all of HN: the
+        /// same block, byte for byte, in a few GB of RAM)
+        #[arg(long)]
+        stream: bool,
+        /// folder for the temporary parts of --stream (default: <out>.tmp)
+        #[arg(long)]
+        tmp: Option<PathBuf>,
     },
     /// Checks a compact block (P3) at a chosen depth: header; quick (what opening checks); full
     /// (every part hash, the padding, the external files, every canary); deep (full + everything
@@ -890,9 +897,14 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Cmd::Pack { spec, out } => {
+        Cmd::Pack { spec, out, stream, tmp } => {
             let s: hnz::pack::PackSpec = serde_json::from_str(&std::fs::read_to_string(&spec).with_context(|| format!("{}", spec.display()))?)?;
-            let r = hnz::pack::pack(&s, &out)?;
+            let r = if stream {
+                let tmp = tmp.unwrap_or_else(|| PathBuf::from(format!("{}.tmp", out.display())));
+                hnz::pack::pack_stream(&s, &out, &tmp)?
+            } else {
+                hnz::pack::pack(&s, &out)?
+            };
             println!("{}", serde_json::to_string_pretty(&r)?);
         }
         Cmd::Lexicon { globals, out, max_df_ratio, parquet } => cmd_lexicon(&globals, &out, max_df_ratio, &parquet)?,

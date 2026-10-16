@@ -1230,3 +1230,31 @@ the multi-day all-HN runs (P5) start after P3.
      The binary of P5 was replaced by this one at month 2008-07 (the compression code is the same;
      months before were built at the lower speed). The iGPU working alongside does not slow the
      compression (with the embedder stopped: the same 66-74 records/s).
+- **Speeds with both workers running, after the fixes** (2008 months): LM compression 81-88
+  records/s (119 alone), embedding 96-99 docs/s (~200 alone): the CPU and the iGPU share one chip
+  (power, temperature, memory bandwidth). Together they still do more than one after the other:
+  ~6.5-7 days for P5's material in parallel, against ~7.6 days in sequence (LM alone ~4.8 days, then
+  embedding alone ~2.8 days).
+- **The NPU (Intel AI Boost) for the embeddings: dropped.** OpenVINO lists it, but embedding a
+  2,000-prompt sample with the static bucket IRs had produced nothing after 25 minutes (compiling
+  the models for the NPU) and was stopped; the iGPU stays the embedding device.
+- **Streaming pack (`hnz pack --stream [--tmp DIR]`, `pack::pack_stream`)**: today's `pack` holds
+  every month in memory (items, records, every part): impossible for 49.3 M documents. A read-only
+  workflow of 5 agents analysed each component (block writer, word index, metadata, kids, text and
+  the rest: memory at full scale, global dependencies, how to stream with identical bytes;
+  `scratchpad/p5_scout_*.md`). The streaming pack: a first pass reads every month's items for the
+  (parent, id) pairs of all documents (`kids::ChildIndex`: a reply can be in another month than
+  its item), checks that ids are unique and that every item lies in its month; the second pass
+  loads one month at a time, in time order, sorts it by (time, id) and feeds the same writers as
+  `pack`, never closing a text group, a metadata block or a kids frame at a month boundary (they
+  span months); "late" comes from the running maximum id (an id below it = a higher id came first
+  in (time, id) order: the same flag as `pack`'s); canaries from a running top-k by (key, document);
+  the text groups and the vector codes go to two files (`TextGroupWriter::take_groups`,
+  `BlockWriter::add_file`), the rest stays in memory (zstd parts must be compressed whole);
+  `kids::KidsWriter` encodes one document at a time. Estimated peak for all of HN: ~3 GB (the word
+  index ~1.4-2 GB, the children pairs 0.4 GB, metadata 0.3 GB, one month ~0.4 GB).
+  **Checked byte for byte:** (1) the sample (3 months, 637,046 docs): the streaming pack writes the
+  very block of P3 (`hn.hnzb` identical, snapshot `a2fad057b3e86163f39c1ffb1f9fc8b4`, 82 s); (2) the
+  first 8 months of HN (2006-10..2007-05, two of them empty, groups and frames across months; LM
+  segments of P5): `pack` and `pack --stream` give the same file (snapshot `ef8114629703f47c…`,
+  25,767 docs), `verify-block --level full` ok.

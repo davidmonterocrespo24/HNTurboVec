@@ -851,6 +851,8 @@ pub struct TextGroupWriter {
     pub idx: Vec<u8>,
     pub gsum: Vec<u8>,
     pub n: usize,
+    /// bytes of complete groups already handed out (`take_groups`): offsets stay absolute
+    base: u64,
 }
 
 impl Default for TextGroupWriter {
@@ -861,7 +863,7 @@ impl Default for TextGroupWriter {
 
 impl TextGroupWriter {
     pub fn new() -> Self {
-        Self { pending: Vec::new(), groups: Vec::new(), idx: Vec::new(), gsum: Vec::new(), n: 0 }
+        Self { pending: Vec::new(), groups: Vec::new(), idx: Vec::new(), gsum: Vec::new(), n: 0, base: 0 }
     }
 
     pub fn push(&mut self, rec: Vec<u8>) {
@@ -883,7 +885,7 @@ impl TextGroupWriter {
         for r in &self.pending {
             g.extend_from_slice(r);
         }
-        self.idx.extend_from_slice(&(self.groups.len() as u64).to_le_bytes());
+        self.idx.extend_from_slice(&(self.base + self.groups.len() as u64).to_le_bytes());
         self.gsum.extend_from_slice(&group_sum(&g).to_le_bytes());
         self.groups.extend_from_slice(&g);
         self.pending.clear();
@@ -891,8 +893,15 @@ impl TextGroupWriter {
 
     pub fn finish(mut self) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
         self.flush();
-        self.idx.extend_from_slice(&(self.groups.len() as u64).to_le_bytes());
+        self.idx.extend_from_slice(&(self.base + self.groups.len() as u64).to_le_bytes());
         (self.groups, self.idx, self.gsum)
+    }
+
+    /// The complete groups written so far (the pending records stay): the text part can be
+    /// written out month by month (`pack::pack_stream`); `finish` then returns the rest.
+    pub fn take_groups(&mut self) -> Vec<u8> {
+        self.base += self.groups.len() as u64;
+        std::mem::take(&mut self.groups)
     }
 }
 

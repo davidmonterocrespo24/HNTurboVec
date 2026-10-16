@@ -262,6 +262,24 @@ impl BlockWriter {
         Ok(self.parts.last().unwrap())
     }
 
+    /// Adds a raw part whose bytes are those of `path` (written by a builder that could not hold
+    /// them in memory): the same part as `add` of those bytes.
+    pub fn add_file(&mut self, spec: PartSpec, path: &Path) -> Result<&PartEntry> {
+        if spec.codec != Codec::Raw {
+            bail!("parte {}: solo una parte sin comprimir se copia de un fichero", spec.name);
+        }
+        let want = std::fs::metadata(path).with_context(|| format!("{}", path.display()))?.len();
+        let e = self.add_stream(spec, None, |s| {
+            let mut f = std::io::BufReader::with_capacity(8 << 20, File::open(path)?);
+            std::io::copy(&mut f, s)?;
+            Ok(())
+        })?;
+        if e.len != want {
+            bail!("parte {}: {} bytes copiados de {} ({} bytes)", e.name, e.len, path.display(), want);
+        }
+        Ok(e)
+    }
+
     /// Records a file kept next to the container: its name, size and hash.
     pub fn add_external(&mut self, name: &str, path: &Path, role: &str) -> Result<()> {
         let (len, hash) = hash_file(path)?;

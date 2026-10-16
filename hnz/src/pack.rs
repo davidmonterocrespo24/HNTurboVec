@@ -396,6 +396,314 @@ pub fn pack(spec: &PackSpec, out: &Path) -> Result<serde_json::Value> {
     }))
 }
 
+/// The first `k` candidates by (key, document): what a stable sort by key of the candidates in
+/// document order, cut to `k`, gives (`pack`'s choice of canaries).
+struct TopK {
+    k: usize,
+    v: Vec<(u64, usize, serde_json::Value)>,
+}
+
+impl TopK {
+    fn new(k: usize) -> Self {
+        Self { k, v: Vec::new() }
+    }
+
+    fn offer(&mut self, key: u64, doc: usize, make: impl FnOnce() -> serde_json::Value) {
+        if self.v.len() == self.k && (key, doc) >= (self.v[self.k - 1].0, self.v[self.k - 1].1) {
+            return;
+        }
+        let at = self.v.partition_point(|x| (x.0, x.1) < (key, doc));
+        self.v.insert(at, (key, doc, make()));
+        self.v.truncate(self.k);
+    }
+}
+
+/// `pack` for blocks too big to hold in memory (all of HN, P5): the same block, byte for byte,
+/// built month by month. A first pass reads every month's items for the children of each
+/// document (a reply may be in another month than its item) and the checks of the whole spec;
+/// the second one loads one month at a time (items, LM segment, embeddings), in time order, and
+/// writes the two large parts (text groups, vector codes) to files in `tmp` (deleted at the end).
+/// The months of the spec must be in time order.
+pub fn pack_stream(spec: &PackSpec, out: &Path, tmp: &Path) -> Result<serde_json::Value> {
+    use std::io::Write;
+    let t0 = Instant::now();
+    if spec.bits == 0 || spec.bits % 64 != 0 {
+        bail!("bits must be a multiple of 64");
+    }
+    // months in time order (documents within a month go in (time, id) order: the global order)
+    let mut prev_end = None;
+    for m in &spec.months {
+        let (Some(a), Some(b)) = (crate::dates::parse(m, false), crate::dates::parse(m, true)) else { bail!("month {m:?} is not YYYY-MM") };
+        if prev_end.is_some_and(|e| a < e) {
+            bail!("the months of the spec must be in time order and not repeat ({m})");
+        }
+        prev_end = Some(b);
+    }
+    let authors = crate::globals::load_authors(&spec.globals)?;
+    let author_id: HashMap<&str, u32> = authors.iter().enumerate().map(|(i, a)| (a.as_str(), i as u32)).collect();
+    let classes = crate::globals::load_df(&spec.globals)?;
+    let gj: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(spec.globals.join("globals.json"))?)?;
+    let n_all = gj["n_docs"].as_u64().context("globals.json: n_docs")?;
+    let max_df_abs = (spec.max_df_ratio * n_all as f64).ceil() as u64;
+    let lm_bytes = std::fs::read(&spec.lm_model).with_context(|| format!("{}", spec.lm_model.display()))?;
+    let lm_tok = std::fs::read(&spec.lm_tokenizer).with_context(|| format!("{}", spec.lm_tokenizer.display()))?;
+    let codec = LmCodec::from_parts(lm_bytes.clone(), Some(&lm_tok))?;
+    eprintln!("pack: models and globals loaded ({:.0} s)", t0.elapsed().as_secs_f64());
+
+    // pass 1: every month's (id, parent), ids unique across months, items inside their month
+    let mut children = crate::kids::ChildIndex::default();
+    let mut seen: Vec<u64> = Vec::new();
+    let mut n = 0usize;
+    for m in &spec.months {
+        let items = read_parquet(&fill(&spec.parquet, m))?.items;
+        let (t_a, t_b) = (crate::dates::parse(m, false).unwrap(), crate::dates::parse(m, true).unwrap());
+        for it in &items {
+            if it.time < t_a || it.time >= t_b {
+                bail!("{m}: id {} has time {} ({}), outside the month", it.id, it.time, crate::dates::fmt(it.time));
+            }
+            let (w, b) = (it.id as usize / 64, it.id % 64);
+            if w >= seen.len() {
+                seen.resize(w + 1 + (w >> 3), 0);
+            }
+            if seen[w] >> b & 1 == 1 {
+                bail!("an id appears in two months");
+            }
+            seen[w] |= 1 << b;
+            children.add(it.id, it.parent);
+        }
+        n += items.len();
+    }
+    drop(seen);
+    children.finish();
+    if n == 0 {
+        bail!("nothing to pack: the months of the spec have no items");
+    }
+    if n > u32::MAX as usize {
+        bail!("{n} documents: more than a block can number");
+    }
+    eprintln!("pack: {n} documents in {} months, children indexed ({:.0} s)", spec.months.len(), t0.elapsed().as_secs_f64());
+
+    // pass 2: one month at a time
+    std::fs::create_dir_all(tmp)?;
+    let (groups_path, codes_path) = (tmp.join("text.groups"), tmp.join("vec.codes"));
+    let mut groups_w = std::io::BufWriter::with_capacity(8 << 20, std::fs::File::create(&groups_path)?);
+    let mut codes_w = std::io::BufWriter::with_capacity(8 << 20, std::fs::File::create(&codes_path)?);
+    let mut meta = MetaBlockWriter::new();
+    let mut text = TextGroupWriter::new();
+    let mut has = vec![0u64; n.div_ceil(64)];
+    let mut kw = crate::kids::KidsWriter::new();
+    let mut lex = LexWriter::new(&classes, max_df_abs, spec.max_df_ratio as f32);
+    let mut batch: Vec<String> = Vec::new();
+    let mut prefix_fb: Vec<u8> = Vec::new();
+    let (mut n_prefix_fb, mut n_deleted, mut n_with_vector, mut n_late) = (0u32, 0u64, 0u64, 0usize);
+    let (mut n_lm, mut n_fallback, mut n_empty, mut tokens) = (0usize, 0usize, 0usize, 0u64);
+    let (mut id_min, mut id_max, mut max_id) = (u32::MAX, 0u32, 0u32);
+    let (mut time_min, mut time_max) = (None::<i64>, 0i64);
+    let hkey = |d: usize| XxHash3_64::oneshot(format!("{d}canary").as_bytes());
+    let (mut c_short, mut c_long, mut c_fb, mut c_empty) = (TopK::new(4), TopK::new(1), TopK::new(1), TopK::new(1));
+    let mut files: Vec<serde_json::Value> = Vec::new();
+    let mut scratch: Vec<u32> = Vec::new();
+    let mut base = 0usize;
+    for m in &spec.months {
+        let Some(month) = load_month(spec, m, &codec)? else { continue };
+        let items = &month.items;
+        let mut order: Vec<usize> = (0..items.len()).collect();
+        order.sort_by_key(|&l| (items[l].time, items[l].id));
+        let checks: Vec<(&'static str, usize)> = order
+            .par_iter()
+            .map(|&l| check_record(&codec, &items[l], &month.lm.raw(l)?).with_context(|| format!("month {}", month.name)))
+            .collect::<Result<_>>()?;
+        for (j, &l) in order.iter().enumerate() {
+            let doc = base + j;
+            let it = &items[l];
+            let author = *author_id.get(it.by.as_str()).with_context(|| format!("id {}: author {:?} is not in the global table", it.id, it.by))?;
+            n_deleted += it.deleted as u64;
+            // late: a document with a higher id comes earlier in (time, id) order
+            let late = it.id < max_id;
+            max_id = max_id.max(it.id);
+            n_late += late as usize;
+            let row = MetaRow {
+                id: it.id,
+                time: it.time,
+                typ: it.typ,
+                dead: it.dead,
+                deleted: it.deleted,
+                parent: it.parent,
+                author,
+                score: it.score,
+                descendants: it.descendants,
+                poll: it.poll,
+                parts: it.parts.clone(),
+            };
+            meta.push(row, late)?;
+            let rec = month.lm.raw(l)?;
+            let (kind, ntok) = checks[j];
+            match kind {
+                "lm" => n_lm += 1,
+                "fallback" => n_fallback += 1,
+                _ => n_empty += 1,
+            }
+            tokens += ntok as u64;
+            if let Some(&row) = month.emb.get(&it.id) {
+                has[doc / 64] |= 1 << (doc % 64);
+                codes_w.write_all(&sign_code(&month, row, spec.bits))?;
+                n_with_vector += 1;
+                if kind == "fallback" {
+                    let (p, flags) = codec.prefix(&it.title, &it.url, &it.text).context("prefix of a record with a prompt")?;
+                    prefix_fb.extend_from_slice(&(doc as u32).to_le_bytes());
+                    prefix_fb.push(flags as u8);
+                    crate::varint::put(&mut prefix_fb, p.len() as u64);
+                    prefix_fb.extend_from_slice(p.as_bytes());
+                    n_prefix_fb += 1;
+                }
+            }
+            // canaries, as `pack` picks them
+            let canary = |kind: &str| {
+                serde_json::json!({
+                    "doc": doc, "id": it.id, "kind": kind, "ntok": ntok, "rec": xxh(&rec),
+                    "text": xxh(format!("{}\0{}\0{}", it.title, it.url, it.text).as_bytes()),
+                })
+            };
+            if kind == "lm" && (24..=64).contains(&ntok) {
+                c_short.offer(hkey(doc), doc, || canary("short"));
+            }
+            if kind == "lm" && ntok <= 2000 {
+                c_long.offer((ntok as i64 - 1500).unsigned_abs(), doc, || canary("long"));
+            }
+            if kind == "fallback" {
+                c_fb.offer(hkey(doc), doc, || canary("fallback"));
+            }
+            if kind == "empty" {
+                c_empty.offer(hkey(doc), doc, || canary("empty"));
+            }
+            text.push(rec.into_owned());
+            let kids = &month.kids[l];
+            if kids.is_empty() {
+                kw.push(it.id, &[], &[])?;
+            } else {
+                children.children(it.id, &mut scratch);
+                kw.push(it.id, kids, &scratch)?;
+            }
+            batch.push(crate::segment::index_text(&it.title, &it.url, &it.text));
+            if batch.len() == 65536 {
+                lex.add_batch(&batch);
+                batch.clear();
+            }
+            id_min = id_min.min(it.id);
+            id_max = id_max.max(it.id);
+            time_min.get_or_insert(it.time);
+            time_max = it.time;
+        }
+        groups_w.write_all(&text.take_groups())?;
+        let p = month.parquet.to_string_lossy().replace('\\', "/");
+        let g = gj["files"].as_array().and_then(|f| f.iter().find(|x| x["path"] == p.as_str())).cloned();
+        files.push(serde_json::json!({"path": p, "rows": items.len(), "sha256": g.as_ref().and_then(|x| x.get("sha256").cloned()),
+                                      "rev": g.as_ref().and_then(|x| x.get("rev").cloned())}));
+        base += items.len();
+        eprintln!("pack: {m} ({} documents, {base} of {n}, {:.0} s)", items.len(), t0.elapsed().as_secs_f64());
+    }
+    if base != n {
+        bail!("the second pass read {base} documents, the first {n}");
+    }
+    drop(children);
+    lex.add_batch(&batch);
+    drop(batch);
+    let (meta_blocks, meta_index, flags, late_ex) = meta.finish()?;
+    let (tail, text_idx, gsum) = text.finish();
+    groups_w.write_all(&tail)?;
+    groups_w.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+    codes_w.into_inner().map_err(|e| e.into_error())?.sync_all()?;
+    let (kids_frames, kids_idx) = kw.finish()?;
+    let lp = lex.finish()?;
+    eprintln!("pack: parts built ({:.0} s)", t0.elapsed().as_secs_f64());
+    let mut canaries = Vec::new();
+    for t in [c_short, c_long, c_fb, c_empty] {
+        canaries.extend(t.v.into_iter().map(|x| x.2));
+    }
+
+    // the block, part by part in `pack`'s order
+    std::fs::create_dir_all(out)?;
+    let mut w = BlockWriter::create(&out.join(crate::block::FILE_NAME))?;
+    let mut fb = n_prefix_fb.to_le_bytes().to_vec();
+    fb.extend_from_slice(&prefix_fb);
+    let authors_txt = authors.join("\n");
+    enum Src<'a> {
+        Mem(&'a [u8]),
+        File(&'a Path),
+    }
+    let parts: Vec<(&str, Codec, Access, Src)> = vec![
+        ("meta/index", Codec::Zstd, Access::Load, Src::Mem(&meta_index)),
+        ("meta/flags", Codec::Zstd, Access::Load, Src::Mem(&flags)),
+        ("meta/late", Codec::Zstd, Access::Load, Src::Mem(&late_ex)),
+        ("meta/authors", Codec::Zstd, Access::Load, Src::Mem(authors_txt.as_bytes())),
+        ("text/idx", Codec::Zstd, Access::Load, Src::Mem(&text_idx)),
+        ("text/gsum", Codec::Raw, Access::Load, Src::Mem(&gsum)),
+        ("text/prefix_fallback", Codec::Zstd, Access::Load, Src::Mem(&fb)),
+        ("vec/has", Codec::Zstd, Access::Load, Src::Mem(bytemuck_u64(&has))),
+        ("lex/fst", Codec::Raw, Access::Load, Src::Mem(&lp.fst)),
+        ("lex/norms", Codec::Zstd, Access::Load, Src::Mem(&lp.norms)),
+        ("model/lm", Codec::Raw, Access::Load, Src::Mem(&lm_bytes)),
+        ("vec/codes", Codec::Raw, Access::Scan, Src::File(&codes_path)),
+        ("meta/blocks", Codec::Raw, Access::Random, Src::Mem(&meta_blocks)),
+        ("lex/post", Codec::Raw, Access::Random, Src::Mem(&lp.post)),
+        ("text/groups", Codec::Raw, Access::Random, Src::File(&groups_path)),
+        ("meta/kids", Codec::Raw, Access::Cold, Src::Mem(&kids_frames)),
+        ("meta/kids.idx", Codec::Zstd, Access::Cold, Src::Mem(&kids_idx)),
+    ];
+    for (name, codec, access, src) in &parts {
+        match src {
+            Src::Mem(bytes) => w.add(PartSpec::new(name, *codec, *access), bytes)?,
+            Src::File(path) => w.add_file(PartSpec::new(name, *codec, *access), path)?,
+        };
+    }
+    let embed_tok = std::fs::read(&spec.embed_tokenizer)?;
+    w.add(PartSpec::new("model/embed.tok", Codec::Zstd, Access::Cold), &embed_tok)?;
+    w.add(PartSpec::new("model/lm.tok", Codec::Zstd, Access::Cold), &lm_tok)?;
+    for (ext, name) in [("xml", "embed.xml"), ("bin", "embed.bin")] {
+        let src = PathBuf::from(format!("{}.{ext}", spec.embed_ir.display()));
+        std::fs::copy(&src, out.join(name)).with_context(|| format!("{}", src.display()))?;
+        w.add_external(name, &out.join(name), if ext == "xml" { "query_ir" } else { "query_ir_weights" })?;
+    }
+    let manifest = serde_json::json!({
+        "profile": "compact",
+        "docnum": "documents in (time, id) order; deleted rows kept as metadata-only documents",
+        "snapshot": {"dataset": "open-index/hacker-news", "files": files, "n_docs": n, "n_deleted": n_deleted,
+                     "id_min": id_min, "id_max": id_max, "time_min": time_min, "time_max": time_max,
+                     "n_lm": n_lm, "n_fallback": n_fallback, "n_empty": n_empty,
+                     "n_with_vector": n_with_vector, "n_late": n_late},
+        "meta": {"block_rows": crate::meta::META_BLOCK, "row_encoding": 2, "frame_checksum": true,
+                 "authors": {"n": authors.len(), "order": "count desc, name asc", "source": gj["authors_xxh3"]}},
+        "kids": {"encoding": 1, "block": crate::kids::BLOCK},
+        "text": {"codec": "lm", "group": 32, "framing": 1, "rec_check": 1, "math_version": crate::lm::model::MATH_VERSION,
+                 "transform_version": 1, "max_tokens": 2000, "model_id": codec.model.id, "lm_records": n_lm,
+                 "zstd_records": n_fallback, "tokens": tokens, "gsum": "xxh3_64 low 32"},
+        "vec": {"bits": spec.bits, "source_dims": 768, "sign_rule": 1, "layout": "sparse", "prompt_version": spec.prompt_version,
+                "prefix_tokens": crate::prompt::PREFIX_TOKENS, "max_seq": crate::prompt::MAX_SEQ,
+                "doc_prompt": "title: <title or none> | text: <prefix body as plain text>", "query_prompt": crate::prompt::QUERY_PROMPT,
+                "prefix_fallback": n_prefix_fb},
+        "lex": {"info": lp.info, "tokenizer_version": 1, "value_layout": 1,
+                "class_source": {"n_docs": n_all, "df": gj["df_xxh3"]},
+                "terms": {"frequent": lp.classes.0, "single": lp.classes.1, "list": lp.classes.2}},
+        "search": {"c1": spec.c1},
+        "canaries": canaries,
+        "build": {"hnz": env!("CARGO_PKG_VERSION"), "spec": serde_json::to_value(spec)?},
+    });
+    let snap = w.finish(manifest, n as u64, crate::lm::model::MATH_VERSION, concat!("hnz ", env!("CARGO_PKG_VERSION")))?;
+    for p in [&groups_path, &codes_path] {
+        let _ = std::fs::remove_file(p);
+    }
+    let _ = std::fs::remove_dir(tmp);
+    let block = crate::block::Block::open(out)?;
+    let sizes: serde_json::Map<String, serde_json::Value> = block.parts().iter().map(|p| (p.name.clone(), serde_json::json!(p.len))).collect();
+    let total: u64 = std::fs::metadata(&block.path)?.len() + block.external().iter().map(|e| e.len).sum::<u64>();
+    Ok(serde_json::json!({
+        "out": out.display().to_string(), "snapshot": format!("{snap:032x}"), "n_docs": n, "n_late": n_late,
+        "records": {"lm": n_lm, "fallback": n_fallback, "empty": n_empty}, "n_with_vector": n_with_vector,
+        "bytes": {"container": std::fs::metadata(&block.path)?.len(), "total_with_ir": total, "parts": sizes},
+        "seconds": t0.elapsed().as_secs_f64(),
+    }))
+}
+
 fn bytemuck_u64(v: &[u64]) -> &[u8] {
     // SAFETY: u64 has no padding; little-endian is the block's byte order (x86-64)
     unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, v.len() * 8) }
