@@ -1205,3 +1205,28 @@ the multi-day all-HN runs (P5) start after P3.
   (`work/ov_cache`) saves ~20 s of GPU compile per month. Tested on the first 4 months (7,916
   items), then started for all 237 (2026-10-15 20:09) with the frozen binary `work/bin/hnz-p5.exe`.
   The three sample months already have their v2 vectors.
+- **The lid test** (2026-10-15 20:11-20:49): a heartbeat every 5 s (`logs/heartbeat.txt`) shows no
+  gap while the lid was closed on AC power, the LM worker kept finishing months, and Windows logged
+  no Modern Standby after the change. The 2 h freeze earlier that day (17:58-20:08) was on battery,
+  where closing the lid still sleeps on purpose.
+- **Resuming:** `scripts\p5_start.ps1` starts the workers that are not running (it is also in the
+  Startup folder as `hnz-p5.cmd`, so a reboot resumes P5 at logon), `scripts\p5_stop.ps1` stops
+  them, `scripts/p5_build.py status` shows the progress.
+- **Worker speed, first hour — three problems found and fixed:**
+  1. **The embedder starved below normal priority**: 12 docs/s instead of ~200 (14.8 min for a
+     10,000-item month): it needs little CPU, but promptly, to keep the iGPU busy next to the LM
+     worker. Now the GPU feeder runs above normal priority (set by itself: Windows does not pass
+     that class to child processes, and the venv's `python.exe` is a launcher with a child): 134-164
+     docs/s on small months.
+  2. **8 or 16 LM threads make no difference to compression** (77-79 records/s on 2008-07 with
+     either, and with P3's binary too): no regression, but no gain from more threads either.
+  3. **Windows' power throttling (EcoQoS)**: a process without a visible window counts as
+     background work, and on this hybrid CPU Windows runs it on the efficient cores at lower
+     clocks. The same month as P3 (2010-06) compressed at 79 records/s from a hidden process
+     against 128.8 in P3; opting the process out of power throttling
+     (`SetProcessInformation(ProcessPowerThrottling, EXECUTION_SPEED off)`) gave 109, and with the
+     opt-out at the process's start **119 records/s**. `hnz` (the CLI) now opts out at start
+     (`mem::no_power_throttling`), and so does the GPU feeder (`embed_prompts.py --above-normal`).
+     The binary of P5 was replaced by this one at month 2008-07 (the compression code is the same;
+     months before were built at the lower speed). The iGPU working alongside does not slow the
+     compression (with the embedder stopped: the same 66-74 records/s).

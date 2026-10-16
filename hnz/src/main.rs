@@ -731,6 +731,8 @@ fn query_param(url: &str, key: &str) -> Option<String> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    // the CLI runs batch work (builds, packs, evals): full speed even without a visible window
+    hnz::mem::no_power_throttling();
     match cli.cmd {
         Cmd::Build { out, tier, block, level, lm, parquet } => {
             let t0 = Instant::now();

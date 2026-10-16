@@ -350,6 +350,37 @@ pub fn process_memory() -> ProcMem {
     ProcMem::default()
 }
 
+/// Opts this process out of Windows' power throttling (EcoQoS, "efficiency mode"): a process
+/// without a visible window counts as background work, and on a hybrid CPU Windows then runs it on
+/// the efficient cores at lower clocks. Long batch jobs (`hnz build`, `pack`) lost ~40 % of their
+/// speed to it (E34). Returns whether Windows accepted it (always true elsewhere).
+#[cfg(windows)]
+pub fn no_power_throttling() -> bool {
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, ProcessPowerThrottling, SetProcessInformation, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+    };
+    let s = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    let ok = unsafe {
+        SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            &s as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        )
+    };
+    ok != 0
+}
+
+#[cfg(not(windows))]
+pub fn no_power_throttling() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

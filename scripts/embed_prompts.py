@@ -76,6 +76,13 @@ def above_normal_priority():
         k.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
         k.SetPriorityClass(k.GetCurrentProcess(), 0x8000)
 
+        # and out of power throttling (EcoQoS): without a window it counts as background work
+        class State(ctypes.Structure):
+            _fields_ = [('Version', wintypes.DWORD), ('ControlMask', wintypes.DWORD), ('StateMask', wintypes.DWORD)]
+        k.SetProcessInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        s = State(1, 1, 0)
+        k.SetProcessInformation(k.GetCurrentProcess(), 4, ctypes.byref(s), ctypes.sizeof(s))
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
