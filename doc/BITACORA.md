@@ -1258,3 +1258,11 @@ the multi-day all-HN runs (P5) start after P3.
   first 8 months of HN (2006-10..2007-05, two of them empty, groups and frames across months; LM
   segments of P5): `pack` and `pack --stream` give the same file (snapshot `ef8114629703f47c…`,
   25,767 docs), `verify-block --level full` ok.
+- **Incident (2026-10-15 23:09 → 10-16 02:05): the embedding worker hung for ~3 h.** The GPU
+  feeder of 2009-06 started at 23:09, right after two power source changes (23:03 and 23:05: the
+  charger unplugged and plugged back), and stayed blocked in OpenVINO's start with 0.8 s of CPU;
+  the LM worker kept going (alone on the CPU it rose to 104-115 records/s). Restarted, 2009-06
+  embedded in 5.8 min (132 docs/s). The worker now has a watchdog: a month's GPU run that takes
+  longer than 10 min + rows/40 s (~3x normal) is killed and tried again, twice at most.
+- **Deep verify of the first 8 months' block** (the streaming pack, every record decoded and
+  compared with its Parquet source): 0 differences.
