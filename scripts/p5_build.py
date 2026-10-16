@@ -93,12 +93,21 @@ def log(worker, msg):
         f.write(line + '\n')
 
 
-def run(cmd, worker, m):
+def run(cmd, worker, m, timeout=None):
+    """Runs a tool, its output to logs/p5/<worker>-<month>.log; past `timeout` seconds it is
+    killed (with its children) and the result is -1."""
     os.makedirs(os.path.join(LOGS, 'p5'), exist_ok=True)
     with open(os.path.join(LOGS, 'p5', f'{worker}-{m}.log'), 'a', encoding='utf-8') as f:
         f.write(f'$ {" ".join(cmd)}\n')
         f.flush()
-        return subprocess.run(cmd, cwd=ROOT, stdout=f, stderr=subprocess.STDOUT).returncode
+        p = subprocess.Popen(cmd, cwd=ROOT, stdout=f, stderr=subprocess.STDOUT)
+        try:
+            return p.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            subprocess.run(['taskkill', '/PID', str(p.pid), '/T', '/F'], capture_output=True)
+            p.wait()
+            f.write(f'killed after {timeout:.0f} s\n')
+            return -1
 
 
 def wait_for_ram(worker, need):
@@ -160,7 +169,15 @@ def worker_embed(months, hnz, device, min_free):
                 os.replace(os.path.join(tmp, f'{m}.{ext}'), os.path.join(PROMPTS, f'{m}.{ext}'))
             shutil.rmtree(tmp)
         t1 = time.time()
-        rc = run([py, os.path.join(ROOT, 'scripts', 'embed_prompts.py'), PROMPTS, m, '--device', device, '--above-normal'], 'embed', m)
+        # a watchdog: the GPU once hung for hours right after the power source changed; a month
+        # takes ~rows/100 s (sharing the chip with the LM worker), so past 10 min + rows/40 s it is
+        # killed and tried again (twice at most)
+        for attempt in range(3):
+            rc = run([py, os.path.join(ROOT, 'scripts', 'embed_prompts.py'), PROMPTS, m, '--device', device, '--above-normal'],
+                     'embed', m, timeout=600 + rows / 40)
+            if rc != -1:
+                break
+            log('embed', f'{m}: vectors timed out (attempt {attempt + 1})')
         if rc == 0 and emb_done(m):
             os.remove(tok)   # the token ids are only needed to embed (hnz prompts makes them again)
             log('embed', f'{m}: {rows:,} items, prompts {(t1 - t0) / 60:.1f} min, vectors {(time.time() - t1) / 60:.1f} min')
