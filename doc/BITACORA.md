@@ -1266,3 +1266,24 @@ the multi-day all-HN runs (P5) start after P3.
   longer than 10 min + rows/40 s (~3x normal) is killed and tried again, twice at most.
 - **Deep verify of the first 8 months' block** (the streaming pack, every record decoded and
   compared with its Parquet source): 0 differences.
+- **Progress and an incident (10-16 → 10-17):** on 10-17 22:05 the LM worker had 124 of 237
+  months (28.3 % of the items, ~85 records/s next to the embedder), the embedder 154 (43.0 %, ~130
+  docs/s). On 10-16 the laptop ran on battery from 14:57 to 18:47 and was in Modern Standby from
+  ~16:31 to ~18:49 (2013-09 took 160.9 min instead of ~37; 2014-06's vectors 139.8 min): 2.3 h lost,
+  everything resumed by itself. Estimate: embeddings done in ~60 h, LM compression in ~101 h
+  (~2026-10-22), then the pack, the verification and the full-scale measurements.
+
+### E35 — P6 (packaging), in progress (alongside P5's machine time, builds at below-normal priority)
+- **The wheel only needs Windows' own DLLs:** `_hnz.pyd` and `hnz.exe`, built with the WinLibs
+  UCRT toolchain, import only system DLLs (the UCRT `api-ms-win-crt-*`, kernel32, ntdll, psapi,
+  bcryptprimitives, ws2_32) and `python3.dll` (abi3): no MinGW runtime to ship; Windows 10/11
+  have the UCRT.
+- **asyncio API:** `asearch`, `aget`, `aembed` (the blocking calls on a worker thread; the work runs
+  without the GIL). Test: the same answers as the blocking calls, four searches at once.
+- **`hnz serve` on the library's `Archive`** (it used the engine directly): `--ram` (the same
+  budget and plan as `hnz.open`), `--threads` (requests at once), `--host`; `/search` takes the
+  library's parameters (q, k, from/since, to/until, type, by, mode, full, dead, rerank,
+  deadline_ms, depth, w_bm25, c_bm25) and answers its JSON (`search(…, raw=True)`); `/item/<id>`,
+  `/stats`, `/memory`; 400 for a bad query, 503 when busy. Checked on the sample block.
+- **User guide** `hnz/py/README.md` (the package's description): install, quick start, the API,
+  the HTTP server and a FastAPI example, performance.

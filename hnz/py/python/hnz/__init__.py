@@ -15,6 +15,7 @@ the `ram` budget given to `open()`; what does not fit is read from disk on deman
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import importlib.util
 import json
@@ -244,6 +245,20 @@ class Archive:
     def embed(self, text: str) -> list[float]:
         """768-dimensional vector (EmbeddingGemma 2) of a query text."""
         return self._live().embed(text)
+
+    # asyncio: the same calls on a worker thread (the heavy work runs without the GIL, so several
+    # of them run at once, within the archive's admission control)
+    async def asearch(self, query: str = '', **kw) -> Union[SearchResult, dict]:
+        """`search` for asyncio code (e.g. an `async def` FastAPI endpoint): same arguments."""
+        return await asyncio.to_thread(self.search, query, **kw)
+
+    async def aget(self, id: int, *, raw: bool = False) -> Union[Item, dict, None]:
+        """`get` for asyncio code."""
+        return await asyncio.to_thread(self.get, id, raw=raw)
+
+    async def aembed(self, text: str) -> list[float]:
+        """`embed` for asyncio code."""
+        return await asyncio.to_thread(self.embed, text)
 
     def stats(self) -> dict:
         """Archive summary (segments, dates, documents) and `memory()`."""

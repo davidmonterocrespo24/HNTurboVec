@@ -201,3 +201,19 @@ def test_process_memory_with_reranks(floor):
     assert r['ops'] > 8, r
     assert r['end']['peak_working_set'] - r['base']['working_set'] <= 1.03 * ram, r
     assert r['budget']['peak'] <= ram
+
+
+def test_async_api(hn):
+    """asearch / aget / aembed: the same answers as the blocking calls, several at once."""
+    import asyncio
+
+    async def main():
+        rs = await asyncio.gather(*(hn.asearch(q, k=5, raw=True) for q in QUERIES))
+        it = await hn.aget(rs[0]['results'][0]['id'])
+        v = await hn.aembed(QUERIES[0])
+        return rs, it, v
+
+    rs, it, v = asyncio.run(main())
+    assert [ids_scores(r) for r in rs] == [ids_scores(hn.search(q, k=5, raw=True)) for q in QUERIES]
+    assert it is not None and it.id == rs[0]['results'][0]['id']
+    assert len(v) == 768
