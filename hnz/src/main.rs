@@ -249,7 +249,8 @@ enum Cmd {
         json: bool,
         query: Vec<String>,
     },
-    /// Servidor HTTP: GET /search?q=..&k=10&from=2015&to=2018&mode=hybrid, /item/<id>, página en /
+    /// HTTP server: GET /search?q=…&k=10&from=2015&to=2018&mode=hybrid, /item/<id>, /stats, /memory;
+    /// a search page at /
     Serve {
         #[arg(long, default_value = "out")]
         root: PathBuf,
@@ -258,12 +259,16 @@ enum Cmd {
         /// address to listen on (127.0.0.1 = this machine only; 0.0.0.0 = every interface)
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
-        /// RAM budget for everything hnz holds, e.g. 2GB (as `hnz.open(…, ram=)`; default: no limit)
-        #[arg(long)]
-        ram: Option<String>,
-        /// requests served at the same time
+        /// RAM budget for everything hnz holds, e.g. 2GB, or "none" for no limit (as
+        /// `hnz.open(…, ram=)`)
+        #[arg(long, default_value = "2GB")]
+        ram: String,
+        /// requests served at the same time (1-256)
         #[arg(long, default_value_t = 8)]
         threads: usize,
+        /// seconds a request may wait for its turn before answering 503
+        #[arg(long, default_value_t = 30.0)]
+        timeout: f64,
         #[command(flatten)]
         m: ModelArgs,
     },
@@ -290,6 +295,10 @@ enum Cmd {
         /// rerank: only the default setting (P4) and the keyword mode
         #[arg(long)]
         quick: bool,
+        /// rerank: only items of the eval file's month (the YYYY-MM in its name), so a block of all
+        /// of HN is scored like a block of that month alone
+        #[arg(long)]
+        within_month: bool,
     },
     /// Prueba del nivel frío sobre un segmento zstd: comprime y descomprime (en lote) una muestra
     /// Exporta a JSONL el texto de cada ítem tal como lo ve el LM (para entrenar/evaluar un LM de HN)
@@ -527,7 +536,8 @@ fn rerank_embedder(eng: &Engine, m: &ModelArgs) -> Result<hnz::embed::Embedder> 
 }
 
 /// `hnz eval --rerank`: P@k and MRR of reranked searches (P4) with several settings.
-fn cmd_eval_rerank(root: &Path, file: &Path, k: usize, m: &ModelArgs, emb: Option<&str>, months: Option<&str>, quick: bool) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn cmd_eval_rerank(root: &Path, file: &Path, k: usize, m: &ModelArgs, emb: Option<&str>, months: Option<&str>, quick: bool, within_month: bool) -> Result<()> {
     use hnz::rerank::{OracleEmbed, RerankCfg};
     let eng = Engine::open(root, &m.models)?;
     let mut qemb = eng.embedder(&m.models, &m.ov_libs)?;
@@ -544,7 +554,8 @@ fn cmd_eval_rerank(root: &Path, file: &Path, k: usize, m: &ModelArgs, emb: Optio
         }
         _ => bail!("--emb ov | oracle:<base con {{m}}>"),
     };
-    let base = Query { k: k + 1, ..Default::default() };
+    let (from, to) = if within_month { eval_month(file)? } else { (None, None) };
+    let base = Query { k: k + 1, from, to, ..Default::default() };
     let d = RerankCfg::default();
     let mut configs: Vec<(String, Query, RerankCfg)> = vec![
         ("híbrida, kv 80, cascada 50 (P4)".into(), base.clone(), d.clone()),
@@ -584,6 +595,19 @@ fn cmd_eval_rerank(root: &Path, file: &Path, k: usize, m: &ModelArgs, emb: Optio
         );
     }
     Ok(())
+}
+
+/// The epoch range [from, to) of the month named in an eval file (e.g. dev-2015-06.jsonl).
+fn eval_month(file: &Path) -> Result<(Option<i64>, Option<i64>)> {
+    let name = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let b = name.as_bytes();
+    let at = (0..b.len().saturating_sub(6))
+        .find(|&i| b[i..i + 4].iter().all(u8::is_ascii_digit) && b[i + 4] == b'-' && b[i + 5..i + 7].iter().all(u8::is_ascii_digit))
+        .with_context(|| format!("--within-month: no hay un mes AAAA-MM en el nombre {}", file.display()))?;
+    let (y, mo): (i64, u32) = (name[at..at + 4].parse()?, name[at + 5..at + 7].parse()?);
+    let next = if mo == 12 { (y + 1, 1) } else { (y, mo + 1) };
+    let day = |y, m| hnz::dates::days_from_civil(y, m, 1) * 86_400;
+    Ok((Some(day(y, mo)), Some(day(next.0, next.1))))
 }
 
 /// The queries of an eval file: (text, story id).
@@ -716,130 +740,31 @@ fn print_results(res: &[hnz::engine::ResultItem]) {
     }
 }
 
-const PAGE: &str = include_str!("page.html");
-
-/// A size such as "2GB", "512MB" or a number of bytes.
+/// A size as `hnz.open(…, ram=)` reads it: "2GB" = 2·10⁹ bytes, "2GiB" = 2³¹, also K, M and T, the
+/// "B" optional, or a number of bytes.
 fn parse_size(s: &str) -> Result<u64> {
-    let t = s.trim().to_ascii_uppercase();
-    let (num, mult) = if let Some(n) = t.strip_suffix("GB") {
-        (n, 1u64 << 30)
-    } else if let Some(n) = t.strip_suffix("MB") {
-        (n, 1u64 << 20)
-    } else if let Some(n) = t.strip_suffix("KB") {
-        (n, 1u64 << 10)
-    } else {
-        (t.as_str(), 1)
+    let t = s.trim();
+    let cut = t.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(t.len());
+    let (num, unit) = t.split_at(cut);
+    let unit = unit.trim().to_ascii_uppercase();
+    let unit = unit.strip_suffix('B').unwrap_or(&unit);
+    let (prefix, base) = match unit.strip_suffix('I') {
+        Some(p) => (p, 1024f64),
+        None => (unit, 1000f64),
     };
-    let v: f64 = num.trim().parse().with_context(|| format!("tamaño inválido: {s:?} (p. ej. 2GB, 512MB)"))?;
+    let exp = match prefix {
+        "" => 0,
+        "K" => 1,
+        "M" => 2,
+        "G" => 3,
+        "T" => 4,
+        _ => bail!("tamaño inválido: {s:?} (p. ej. 2GB, 512MB, 2GiB)"),
+    };
+    let v: f64 = num.parse().with_context(|| format!("tamaño inválido: {s:?} (p. ej. 2GB, 512MB, 2GiB)"))?;
     if !(v.is_finite() && v > 0.0) {
         bail!("tamaño inválido: {s:?}");
     }
-    Ok((v * mult as f64) as u64)
-}
-
-/// One HTTP request of `hnz serve`: JSON with the library's format, or the search page.
-fn serve_one(arch: &hnz::api::Archive, url: &str) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
-    let json = |status: u16, body: String| {
-        tiny_http::Response::from_string(body)
-            .with_status_code(status)
-            .with_header("Content-Type: application/json; charset=utf-8".parse::<tiny_http::Header>().unwrap())
-    };
-    // errors: 400 for a bad query, 503 when busy, 500 otherwise
-    let fail = |e: anyhow::Error| {
-        let status = if e.downcast_ref::<hnz::api::QueryError>().is_some() {
-            400
-        } else if e.downcast_ref::<hnz::api::BusyError>().is_some() {
-            503
-        } else {
-            500
-        };
-        json(status, serde_json::json!({"error": format!("{e:#}")}).to_string())
-    };
-    if url == "/" || url.starts_with("/?") {
-        return tiny_http::Response::from_string(PAGE).with_header("Content-Type: text/html; charset=utf-8".parse::<tiny_http::Header>().unwrap());
-    }
-    if url.starts_with("/search") {
-        let p = |k: &str| query_param(url, k).filter(|x| !x.is_empty());
-        let num = |k: &str| -> Result<Option<f64>> {
-            match p(k) {
-                Some(x) => Ok(Some(x.parse::<f64>().map_err(|_| anyhow::Error::new(hnz::api::QueryError(format!("{k} no es un número: {x:?}"))))?)),
-                None => Ok(None),
-            }
-        };
-        let req = (|| -> Result<hnz::api::SearchRequest> {
-            Ok(hnz::api::SearchRequest {
-                query: p("q").unwrap_or_default(),
-                k: num("k")?.map_or(10, |x| x as usize),
-                since: p("from").or_else(|| p("since")),
-                until: p("to").or_else(|| p("until")),
-                types: p("type").or_else(|| p("types")).map(|x| x.split(',').map(String::from).collect()).unwrap_or_default(),
-                author: p("by").or_else(|| p("author")),
-                mode: p("mode").unwrap_or_else(|| "hybrid".into()),
-                full: p("full").is_some_and(|x| x == "1" || x == "true"),
-                include_dead: p("dead").is_some_and(|x| x == "1" || x == "true"),
-                w_bm25: num("w_bm25")?.map(|x| x as f32),
-                c_bm25: num("c_bm25")?.map(|x| x as f32),
-                rerank: match p("rerank").as_deref() {
-                    Some("1") | Some("true") => Some(true),
-                    Some("0") | Some("false") => Some(false),
-                    _ => None,
-                },
-                deadline_ms: num("deadline_ms")?,
-                rerank_depth: num("depth")?.map(|x| x as usize),
-                ..Default::default()
-            })
-        })();
-        return match req.and_then(|r| arch.search(&r)).and_then(|r| Ok(serde_json::to_string(&r)?)) {
-            Ok(b) => json(200, b),
-            Err(e) => fail(e),
-        };
-    }
-    if let Some(id) = url.strip_prefix("/item/") {
-        let t0 = Instant::now();
-        return match id.parse::<u32>() {
-            Ok(id) => match arch.get(id) {
-                Ok(Some(mut v)) => {
-                    v["ms"] = serde_json::json!(t0.elapsed().as_secs_f64() * 1e3);
-                    json(200, v.to_string())
-                }
-                Ok(None) => json(404, serde_json::json!({"error": "no encontrado"}).to_string()),
-                Err(e) => fail(e),
-            },
-            Err(_) => json(400, serde_json::json!({"error": "id inválido"}).to_string()),
-        };
-    }
-    match url {
-        "/stats" => json(200, arch.stats().to_string()),
-        "/memory" => json(200, arch.memory().to_string()),
-        _ => tiny_http::Response::from_string("not found").with_status_code(404),
-    }
-}
-
-fn query_param(url: &str, key: &str) -> Option<String> {
-    let q = url.split_once('?')?.1;
-    for kv in q.split('&') {
-        let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-        if k == key {
-            let v = v.replace('+', " ");
-            let mut out = Vec::new();
-            let b = v.as_bytes();
-            let mut i = 0;
-            let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
-            while i < b.len() {
-                if b[i] == b'%' && i + 2 < b.len() {
-                    if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
-                        out.push(h * 16 + l);
-                        i += 3;
-                        continue;
-                    }
-                }
-                out.push(b[i]);
-                i += 1;
-            }
-            return Some(String::from_utf8_lossy(&out).to_string());
-        }
-    }
-    None
+    Ok((v * base.powi(exp)) as u64)
 }
 
 fn main() -> Result<()> {
@@ -1158,43 +1083,27 @@ fn main() -> Result<()> {
                 if s.full { ", completos" } else { ", fragmentos" }
             );
         }
-        Cmd::Serve { root, port, host, ram, threads, m } => {
+        Cmd::Serve { root, port, host, ram, threads, timeout, m } => {
             // the library's archive: the same RAM budget, admission control, reranking and JSON as
             // `hnz.open(…)` in Python
-            let ram = match ram.as_deref() {
-                Some(r) => Some(parse_size(r)?),
-                None => None,
-            };
+            let ram = if ram.eq_ignore_ascii_case("none") { None } else { Some(parse_size(&ram)?) };
             let opts = hnz::api::OpenOptions {
                 models: Some(m.models.clone()),
                 ov_libs: Some(m.ov_libs.clone()),
                 preload: true,
                 ram,
-                max_concurrent: threads.max(1),
+                max_concurrent: threads.clamp(1, hnz::serve::MAX_THREADS),
+                timeout,
                 ..Default::default()
             };
             let arch = std::sync::Arc::new(hnz::api::Archive::open(&root, opts)?);
-            let server = std::sync::Arc::new(tiny_http::Server::http((host.as_str(), port)).map_err(|e| anyhow::anyhow!("{e}"))?);
-            eprintln!("hnz: {} docs — http://{host}:{port}/  (GET /search?q=…&k=10&from=2015&to=2018&mode=hybrid, /item/<id>, /stats, /memory)", arch.stats()["docs"]);
-            let workers: Vec<_> = (0..threads.max(1))
-                .map(|_| {
-                    let (arch, server) = (arch.clone(), server.clone());
-                    std::thread::spawn(move || {
-                        for req in server.incoming_requests() {
-                            let url = req.url().to_string();
-                            let resp = serve_one(&arch, &url);
-                            let _ = req.respond(resp);
-                        }
-                    })
-                })
-                .collect();
-            for w in workers {
-                let _ = w.join();
-            }
+            eprintln!("hnz: {} docs - http://{host}:{port}/ (Ctrl+C to stop)", arch.stats()["docs"]);
+            // until the process is stopped (Ctrl+C)
+            hnz::serve::serve(arch, &host, port, threads, || Ok(false))?;
         }
-        Cmd::Eval { root, file, k, m, rerank, emb, months, quick } => {
+        Cmd::Eval { root, file, k, m, rerank, emb, months, quick, within_month } => {
             if rerank {
-                cmd_eval_rerank(&root, &file, k, &m, emb.as_deref(), months.as_deref(), quick)?
+                cmd_eval_rerank(&root, &file, k, &m, emb.as_deref(), months.as_deref(), quick, within_month)?
             } else {
                 cmd_eval(&root, &file, k, &m)?
             }

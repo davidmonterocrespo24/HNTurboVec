@@ -8,7 +8,8 @@ budget you choose.
 
 - **Lossless:** every item's text comes back byte for byte (HN's original HTML).
 - **Hybrid search:** a 256-bit semantic index (EmbeddingGemma 2) and a word index, then a reranking
-  of the best candidates by their first 128 tokens (P@10 0.238 on the evaluation queries).
+  of the best candidates by their first 128 tokens (P@10 0.32 on the evaluation queries within
+  their month; see Performance).
 - **RAM budget:** `ram="2GB"` or `ram="10GB"`: models, indexes, decompression memory, caches and
   every query's working memory fit in it; what does not fit is read from disk.
 - **Thread-safe:** one open archive serves concurrent queries (the work runs without the GIL);
@@ -85,6 +86,7 @@ parent_id, story_id, story_title, score, vscore, bm25, link`.
 | `asearch(…)`, `aget(id)`, `aembed(text)` | the same, for `asyncio` |
 | `stats()` | documents, dates, block snapshot |
 | `memory()` | the RAM ledger (limit, used, peak, per class), the load plan, caches, the process |
+| `serve(host=, port=, threads=, stop=)` | the HTTP server on this archive (see below) |
 | `close()` | frees everything (also on leaving a `with` block) |
 | `hnz.verify_block(path, level)` | checks a block without opening it ("header", "quick", "full") |
 
@@ -93,12 +95,23 @@ Errors: `ValueError` (a bad query), `BusyError`, `BudgetError`, `CorruptBlockErr
 
 ## HTTP server
 
+The `hnz` command, installed with the package (also `python -m hnz`), serves an archive:
+
 ```bash
 hnz serve --root D:\hn\hn-2026-08.hnz --ram 2GB --threads 8 --port 8088
 ```
 `GET /search?q=…&k=10&from=2015&to=2018&type=comment&by=pg&mode=hybrid&deadline_ms=3000` returns
-the same JSON as `search(…, raw=True)`; `GET /item/<id>`, `/stats`, `/memory`; `/` is a search page.
-Bad queries answer 400, `BusyError` 503.
+the same JSON as `search(…, raw=True)` (also `rerank=0`, `depth=60`, `full=1`, `dead=1`, `w_bm25`,
+`c_bm25`); `GET /item/<id>`, `/stats`, `/memory`; `/` is a search page. Bad queries answer 400,
+`BusyError` 503. It listens on this machine only unless `--host 0.0.0.0`; Ctrl+C stops it.
+
+It is a small server meant for this machine or a private network: GET and HEAD only, one request
+per connection, no TLS and no authentication, request heads up to 16 KiB. To expose it on the
+internet, put it behind a reverse proxy (nginx, Caddy) that adds TLS, authentication and rate
+limits.
+
+`Archive.serve(host="127.0.0.1", port=8088, threads=8, stop=None)` runs the same server on an open
+archive, until Ctrl+C or until `stop` (a `threading.Event`) is set.
 
 In a Python web app (FastAPI), share one archive:
 ```python
@@ -113,16 +126,20 @@ async def search(q: str, k: int = 10):
     return await hn.asearch(q, k=k, raw=True)
 ```
 
-## Performance (16-thread laptop CPU, block of 3 sample months; all-HN numbers to come)
+## Performance (16-thread laptop CPU, the block of all of HN, `hnz serve --ram 2GB`)
 
 | | |
 |---|---|
-| Open | ~0.2 s (+ ~3 s to load the embedder, once) |
-| Cold search, reranked | ~2.8 s (decoding the candidates' first tokens is most of it) |
-| Repeated search | ~0.1-0.2 s (decoded prefixes are cached) |
-| First stage only (`rerank=False`) | ~0.1-0.3 s |
-| Concurrent cold searches | ~25 per minute (CPU-bound) |
-| `get()` of a long item | p95 ~0.9 s while 4 reranked searches run |
+| Open | ~4 s with the embedder loaded (`preload=True`) |
+| Cold search, reranked | ~2-4 s (decoding the candidates' first tokens is most of it) |
+| Repeated search | ~1.5-2 s |
+| First stage only (`rerank=False`) | ~0.3-0.5 s |
+| `get()` | ~80-90 ms |
+| Memory | the ledger stays within `ram`; at 2 GB the process uses ~1.4 GB private |
+
+Quality on 300 queries per month whose relevant items are one story's thread: P@10 0.32 within the
+query's month (keyword only: 0.26). Across all 20 years it is ~0.05, because threads on the same
+subject from other years count as misses in that eval.
 
 See [doc/09-rerank.md](../../doc/09-rerank.md) (search), [doc/07-ram.md](../../doc/07-ram.md) (RAM)
 and [doc/08-block.md](../../doc/08-block.md) (the block format).

@@ -1175,7 +1175,7 @@ the multi-day all-HN runs (P5) start after P3.
   stored vectors), cold reranked search ~2.8 s in the library (~4 s in the CLI) on this 16-thread
   laptop, memory within `ram`, 68 Python and 32 Rust tests, adversarial review fixed.
 
-### E34 — P5 (the compact block of all of HN), in progress
+### E34 — P5 (the compact block of all of HN)
 - **User decisions (2026-10-15):** finish everything on this laptop (an RTX 4060 laptop was
   considered: CUDA would embed ~3-4x faster than the iGPU, but the LM compression must stay on a
   CPU, bit-exact); **the LM retrained on 5 % of HN is dropped** (projected ~0.4 % less text, the
@@ -1273,6 +1273,33 @@ the multi-day all-HN runs (P5) start after P3.
   everything resumed by itself. Estimate: embeddings done in ~60 h, LM compression in ~101 h
   (~2026-10-22), then the pack, the verification and the full-scale measurements.
 
+- **P5 done.** Embeddings: 237/237 months on 2026-10-20 08:15 (3 months failed once and were
+  retried by the worker). LM compression: 237/237 months on 2026-10-23 00:45, 0 failures (~75-87
+  records/s next to the embedder, 127-134/s alone at the end).
+- **The block of all of HN** (`hnz pack --stream --spec work/p5/pack-all.json`, run by the
+  resumable `scripts/p6_run.py`, which starts at logon from the Startup folder):
+  `work/p6/hn-2026-08.hnz`, **49,324,111 items** (2006-10 to 2026-08; 47,380,659 LM records,
+  4,103 zstd fallbacks, 1,939,349 empty; 47,384,313 with a vector; 309,761 late items),
+  snapshot `ef11713b247a66bde569c8a6d7a727ee`.
+| Part | Bytes |
+|---|---|
+| text/groups (LM-coded text) | 2,813,292,945 |
+| vec/codes (vector codes, 32 bytes per item with a vector) | 1,516,298,016 |
+| lex/post + fst + norms (word index, 4,223,195 terms) | 365,013,098 |
+| meta/blocks + kids + authors + flags + index + late | 284,744,791 |
+| model/lm + tokenizers | 76,153,274 |
+| other (gsum, idx, prefix fallback, vec/has) | 11,610,896 |
+| container header, directory and padding | 61,067 |
+| **hn.hnzb** | **5,067,174,087** |
+| + embedder IR (embed.bin + embed.xml) | 275,959,344 |
+| **total** | **5,343,133,431** |
+  Pack time 17,602 s, of which ~3.9 h were Modern Standby (the laptop on battery with the lid
+  closed, 2025-06 → 2025-07 took 14,040 s): **~59 min of compute**, peak ~3.2 GB private memory.
+- **Verification of the full block:** `verify-block --level full` (every part's hash, the
+  padding, every canary) ok in 4.4 s; `--level deep --decode 0.005` (every record against its
+  Parquet source, 246,546 records decoded with the LM, 15,748,814 kids lists, the word index)
+  **0 differences** in 581 min (9.7 h; the recent months are the heaviest, 2026-08 alone 314 s).
+
 ### E35 — P6 (packaging), in progress (alongside P5's machine time, builds at below-normal priority)
 - **The wheel only needs Windows' own DLLs:** `_hnz.pyd` and `hnz.exe`, built with the WinLibs
   UCRT toolchain, import only system DLLs (the UCRT `api-ms-win-crt-*`, kernel32, ntdll, psapi,
@@ -1287,3 +1314,63 @@ the multi-day all-HN runs (P5) start after P3.
   `/stats`, `/memory`; 400 for a bad query, 503 when busy. Checked on the sample block.
 - **User guide** `hnz/py/README.md` (the package's description): install, quick start, the API,
   the HTTP server and a FastAPI example, performance.
+- **Own HTTP server instead of tiny_http** (`hnz/src/serve.rs`): a review of `hnz serve` found
+  that one request with a huge `Content-Length` could abort the process, that shutdown could hang,
+  that the port stayed bound after `serve` returned, that queued requests got no answer, and that
+  nothing bounded a slow client. The new server is minimal HTTP/1.1: GET and HEAD only (405
+  otherwise; 400 for a body), `Connection: close`, request head ≤ 16 KiB (431) read within 10 s,
+  the answer written within 30 s, a bounded queue of 4 connections per worker (≤ 256 workers),
+  503 for queued requests when stopping, and the port freed before `serve` returns. The same
+  routes and JSON as before.
+- **`Archive.serve()` and the `hnz` command in the wheel:** `hn.serve(host, port, threads,
+  stop=threading.Event)` (the GIL released; Ctrl+C delivered on the main thread; off the main
+  thread a `stop` event is required), and `hnz serve --root … --ram 2GB --threads 8 --timeout 30`
+  as a console script (also `python -m hnz`). The CLI's `--ram` now reads sizes like the library
+  (`2GB` = 2·10⁹, `2GiB` = 2³¹).
+- **Builds and tests after P5** (`scripts/p6_run.py`, nothing else running): CLI 2.6 min, wheel
+  (`hnz-0.1.0-cp310-abi3-win_amd64.whl`) 1.2 min; Rust lib tests 35/35; Python tests 73/73 (on
+  the sample block, 18.9 min).
+- **Clean install of the previous wheel** (uv into a fresh Python 3.12 venv; `pip` hung on a
+  half-closed IPv6 connection to PyPI's CDN): import, `verify_block`, open, hybrid reranked search,
+  filters, `get`, `embed` and the deadline degrade all passed (timings meaningless: P5 was running).
+- **Server fix found by the new raw-socket test:** a request head of 16-20 KiB that arrived with its
+  end in the read that crossed the 16 KiB limit was accepted (the size was checked only while the
+  end was missing). Now the limit holds however the head arrives (431). Tests: Rust lib 35/35,
+  `test_serve.py` 4/4 (HEAD, 405, 400 for a body, 431, garbage, port in use, Ctrl+C, the `hnz`
+  command); the rebuilt wheel installs in a clean venv and its `hnz` command runs.
+
+### E36 — Quality and latency on the block of all of HN
+- **Eval on the full block** (`hnz eval --rerank --emb ov --quick`, 300 queries per file; the
+  relevant items of a query are the comments of one story's thread). P@10 / MRR:
+| Queries | hybrid, reranked (P4), all of HN | the same, within the query's month | keyword, all of HN | keyword, within the month |
+|---|---|---|---|---|
+| eval 2010-06 | 0.038 / 0.148 | 0.312 / 0.579 | 0.032 / 0.118 | 0.251 / 0.475 |
+| eval 2015-06 | 0.034 / 0.106 | 0.341 / 0.603 | 0.030 / 0.092 | 0.266 / 0.543 |
+| eval 2024-01 | 0.069 / 0.212 | 0.309 / 0.601 | 0.056 / 0.181 | 0.260 / 0.539 |
+| dev 2010-06 | 0.043 / 0.158 | 0.356 / 0.654 | 0.042 / 0.147 | 0.287 / 0.594 |
+| dev 2015-06 | 0.047 / 0.148 | 0.336 / 0.558 | 0.044 / 0.117 | 0.263 / 0.465 |
+| dev 2024-01 | 0.052 / 0.163 | 0.277 / 0.539 | 0.045 / 0.141 | 0.220 / 0.488 |
+| **mean of eval** | **0.047** | **0.321** | 0.039 | 0.259 |
+  Across all of HN the score falls to ~0.05: a query's own thread now competes with 20 years of
+  threads on the same subject, which this eval counts as misses (only one thread is relevant), so
+  it measures finding *that* thread, not finding good answers. Restricted to the query's month
+  (`--within-month`, a date filter like `since`/`until`), the full block scores 0.321, above the
+  3-month block of E33e (0.239, where the other two months were distractors): the full block does
+  not lose quality. The hybrid reranking beats keyword search by +0.06 P@10 within the month.
+  Cost per query ~2.2-2.7 s (60-90 prefixes decoded, ~60 re-embedded); keyword 0.06-0.4 s. Each
+  run of 6 files took 77-85 min.
+- **The installed wheel serving the full block** (`hnz serve --ram 2GB|4GB --threads 4`, clean
+  Python 3.12 venv, nothing else running; 6 queries, k = 10):
+| | `--ram 2GB` | `--ram 4GB` |
+|---|---|---|
+| open + embedder load | 4.0 s | 5.2 s |
+| cold reranked search | 2.2-4.1 s | 2.1-4.0 s |
+| the same search again | 1.5-2.0 s | 1.4-1.8 s |
+| first stage only (`rerank=0`) | 0.44-0.51 s | 0.30-0.41 s |
+| keyword, 2020+, stories | 1.9 s | 2.4 s |
+| `/item/<id>` | 88 ms | 78 ms |
+| ledger used / limit | 1.54 / 2.0 GB | 3.26 / 4.0 GB |
+| process private memory | 1.44 GB | 2.96 GB |
+  The budget holds at both sizes. Open question: the decoded-prefix cache gets only ~250 KB at
+  either budget (the plan gives the extra 2 GB to the index), so a repeated search costs ~1.5 s
+  instead of the ~0.1-0.2 s seen on the sample block; the plan should leave room for that cache.

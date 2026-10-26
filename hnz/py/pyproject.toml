@@ -8,11 +8,17 @@ version = "0.1.0"
 description = "All of Hacker News, compressed losslessly, with hybrid (semantic + keyword) search and verbatim retrieval, within a RAM budget"
 readme = "README.md"
 requires-python = ">=3.10"
-# solo se usan las DLL de OpenVINO (el embedder de consultas); el paquete no se importa
+# only OpenVINO's DLLs are used (the query embedder); the openvino package is never imported
 dependencies = ["openvino>=2025.1"]
 classifiers = ["Programming Language :: Rust", "Operating System :: Microsoft :: Windows"]
+
+[project.scripts]
+# `hnz serve --root <block> ...`: the HTTP server (python/hnz/__main__.py)
+hnz = "hnz.__main__:main"
 
 [tool.maturin]
 python-source = "python"
 module-name = "hnz._hnz"
 features = ["pyo3/extension-module"]
+# the tests import the package from python/: keep their bytecode out of the wheel
+exclude = ["**/__pycache__/**", "**/*.pyc"]

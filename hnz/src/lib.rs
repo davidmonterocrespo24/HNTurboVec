@@ -19,6 +19,7 @@ pub mod plan;
 pub mod prompt;
 pub mod rerank;
 pub mod segment;
+pub mod serve;
 pub mod textstore;
 pub mod tokenize;
 pub mod varint;

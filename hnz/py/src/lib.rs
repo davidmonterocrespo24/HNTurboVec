@@ -78,6 +78,34 @@ impl Archive {
         let inner = self.inner.clone();
         py.detach(move || inner.memory().to_string())
     }
+
+    /// The HTTP server (`hnz::serve`) on host:port with `threads` workers, until Ctrl+C (raised as
+    /// KeyboardInterrupt) or until `stop()` returns true; both are checked every 200 ms.
+    #[pyo3(signature = (host, port, threads, stop=None))]
+    fn serve(&self, py: Python<'_>, host: String, port: u16, threads: usize, stop: Option<Py<PyAny>>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        let mut raised: Option<PyErr> = None;
+        let out = py.detach(|| {
+            hnz::serve::serve(inner, &host, port, threads, || {
+                // signals reach Python's handlers only through the main thread holding the GIL
+                let r = Python::attach(|py| -> PyResult<bool> {
+                    py.check_signals()?;
+                    match &stop {
+                        Some(f) => f.bind(py).call0()?.is_truthy(),
+                        None => Ok(false),
+                    }
+                });
+                Ok(r.unwrap_or_else(|e| {
+                    raised = Some(e);
+                    true
+                }))
+            })
+        });
+        match raised {
+            Some(e) => Err(e),
+            None => out.map_err(to_py),
+        }
+    }
 }
 
 /// Opens an hnz archive. `options` is the JSON of `hnz::api::OpenOptions`.

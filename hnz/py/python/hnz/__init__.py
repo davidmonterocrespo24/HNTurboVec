@@ -21,6 +21,7 @@ import importlib.util
 import json
 import os
 import re
+import threading
 from dataclasses import dataclass
 from typing import Iterable, Iterator, Literal, Optional, Sequence, Union
 
@@ -269,6 +270,26 @@ class Archive:
         cache, working), `plan` (what was loaded into RAM and the size of each pool), `engine` (loaded
         parts, caches and their hit rates), `embedder`, `admission` and `process` (as the OS sees it)."""
         return json.loads(self._live().memory_json())
+
+    def serve(self, *, host: str = '127.0.0.1', port: int = 8088, threads: int = 8,
+              stop: Optional[threading.Event] = None) -> None:
+        """Serves this archive over HTTP until Ctrl+C (KeyboardInterrupt, on the main thread) or
+        until `stop` is set (required on any other thread). `GET /search?q=…&k=10&from=2015&to=2018
+        &type=comment&by=pg&mode=hybrid&deadline_ms=3000` answers the JSON of `search(…, raw=True)`;
+        `/item/<id>`, `/stats` and `/memory` answer theirs; `/` is a search page. A bad query answers
+        400, `BusyError` 503. `threads` (1-256) requests are served at once, within the archive's
+        `max_concurrent`. GET and HEAD only, one request per connection, limits on the request's size
+        and time: meant for this machine (`host="127.0.0.1"`) or a private network (`"0.0.0.0"`
+        listens on every interface); on the internet, put it behind a reverse proxy. When it returns
+        the port is free. The `hnz serve` command (installed with hnz) runs this."""
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ValueError(f'port inválido: {port!r} (1-65535)')
+        if isinstance(threads, bool) or not isinstance(threads, int) or not 1 <= threads <= 256:
+            raise ValueError(f'threads inválido: {threads!r} (entero de 1 a 256)')
+        if stop is None and threading.current_thread() is not threading.main_thread():
+            # Ctrl+C only reaches the main thread: elsewhere nothing could stop it
+            raise ValueError('fuera del hilo principal, serve necesita stop (un threading.Event)')
+        self._live().serve(str(host), port, threads, None if stop is None else stop.is_set)
 
     def close(self) -> None:
         self._a = None
