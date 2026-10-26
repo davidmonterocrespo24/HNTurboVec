@@ -19,6 +19,7 @@ matters is daily use: **fast, accurate and compact**. Implementation in **Rust**
 | [07-ram.md](07-ram.md) | (English) RAM governance (P2): what `ram=` covers, the planner, disk reads, capped LM batch, admission control, measurements. |
 | [08-block.md](08-block.md) | (English) The compact block (P3): byte layout of `hn.hnzb`, parts, manifest, integrity levels, tools (`pack`, `verify-block`, `inspect`), sample measurements. |
 | [09-rerank.md](09-rerank.md) | (English) Reranking (P4): candidates, prefixes decoded by the shared LM service, BM25 over the prefix, cascade re-embedding, keyword mode with frequent words, determinism, quality. |
+| [10-tests.md](10-tests.md) | (English) How to test and approve the Python library: the acceptance script on the full block, the pytest suite file by file, the block and quality checks. |
 
 ## Repository structure
 
