@@ -20,6 +20,13 @@ C:\tmp\hnz-test\Scripts\python -m pip install work\wheels\hnz-0.1.0-cp310-abi3-w
 The wheel pulls `openvino`. If `pip` hangs while downloading, `uv pip install --python
 C:\tmp\hnz-test\Scripts\python.exe <wheel>` does the same.
 
+**`AttributeError: module 'hnz' has no attribute 'open'`** means that Python did not find the
+package and imported the project's `hnz\` folder (the Rust sources) instead: it happens with a
+Python that does not have `hnz` installed (e.g. the system `python`) run from the project root.
+Use the environment where the wheel is installed (`C:\tmp\hnz-test\Scripts\python` or the
+project's `.venv\Scripts\python`). If the console shows `�` for dashes or quotes, set
+`$env:PYTHONIOENCODING = "utf-8"` first.
+
 For level 2, use the project's `.venv` instead: it has `pytest`, `pyarrow` and the package in
 development mode (`hnz/py/python`, with the extension `_hnz.pyd` copied there by the build). To
 rebuild the wheel and that extension: `python scripts/p6_run.py --only wheel` (delete
