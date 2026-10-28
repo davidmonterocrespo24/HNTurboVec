@@ -91,7 +91,7 @@ work\bin\hnz-p6.exe eval --root work\p6\hn-2026-08.hnz --file eval\2024-01.jsonl
 - `--level full` must print `"ok": true, "differences": 0`; `--level deep` compares every record
   with its Parquet source and decodes 0.5 % of them with the LM (last run: 0 differences, 581 min).
 - `eval` prints P@10 and MRR for 300 queries; with `--within-month`, expected ~0.31-0.34 P@10 for
-  the hybrid search and ~0.25-0.27 for keyword (the results are in BITACORA E36).
+  the hybrid search and ~0.25-0.27 for keyword (the results are in EXPERIMENT-LOG E36).
 
 `python scripts/p6_run.py` runs the build, these checks, the tests and the eval as resumable stages
 (`python scripts/p6_run.py status` shows which are done; logs in `logs/p6/`).

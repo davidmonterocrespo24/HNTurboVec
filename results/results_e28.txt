@@ -1,0 +1,16 @@
+== E28a: PQ first stage at 16-18 B/doc vs binary 256 + reranking
+611,640 docs; 900 queries
+  binary 256 bits (hnz)               32 B/doc   P@10 no rerank 0.183 | top-100 0.225 | top-200 0.228
+  OPQ16 + PQ16 (256d)                 16 B/doc   P@10 no rerank 0.079 | top-100 0.158 | top-200 0.177
+  IVF4096 + PQ16 residual (256d)      18 B/doc   P@10 no rerank 0.120 | top-100 0.186 | top-200 0.202
+  OPQ32 + PQ32 (256d)                 32 B/doc   P@10 no rerank 0.140 | top-100 0.211 | top-200 0.219
+== E28b: thread title (and parent) as LM context
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+2024-01: 300 comments, 380 B of text on average
+  alone              64.7 B/comment     1.362 bits/byte  (+0.0 %)
+  title              65.0 B/comment     1.369 bits/byte  (+0.5 %)
+  title + parent     63.3 B/comment     1.333 bits/byte  (-2.2 %)
+2015-06: 300 comments, 427 B of text on average
+  alone              68.9 B/comment     1.289 bits/byte  (+0.0 %)
+  title              69.2 B/comment     1.295 bits/byte  (+0.4 %)
+  title + parent     66.9 B/comment     1.253 bits/byte  (-2.8 %)

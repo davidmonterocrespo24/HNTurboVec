@@ -1,6 +1,6 @@
-//! Motor de consulta: reparte la búsqueda entre segmentos (en paralelo), aplica filtros de fecha
-//! como rangos de docIDs, fusiona vectores + BM25 y arma los resultados con el contexto del hilo.
-//! Los resultados de segmentos del nivel LM se descomprimen TODOS en un mismo lote.
+//! Query engine: spreads the search across segments (in parallel), applies date filters as
+//! docID ranges, fuses vectors + BM25 and builds the results with the thread context.
+//! Results from LM-tier segments are ALL decompressed in one batch.
 
 use crate::blob::{Blob, Residency};
 use crate::bm25::{Bm25, TermPost};
@@ -21,9 +21,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// Tokens que se decodifican por resultado del nivel LM en modo fragmento.
+/// Tokens decoded per LM-tier result in snippet mode.
 pub const SNIPPET_TOKENS: usize = 64;
-/// máximo de resultados por consulta (protege la memoria del servidor)
+/// maximum results per query (protects the server's memory)
 pub const MAX_K: usize = 500;
 /// At most this many query terms count for BM25, the rarest ones (each term opens a cursor per
 /// segment; common terms add little to the score).
@@ -34,7 +34,7 @@ pub const MAX_TERMS: usize = 64;
 fn round_sizes(q: &Query, k: usize, n: usize, mult: usize, c1_min: usize) -> (usize, usize) {
     let mut kc = (k * 20).max(200) * mult;
     if !q.types.is_empty() {
-        kc *= 5; // stories ~14 % de los ítems
+        kc *= 5; // stories are ~14 % of the items
     }
     let kc = kc.min(n);
     let c1 = q.vec_cand.unwrap_or((kc * 10).max(c1_min)).max(kc).min(n);
@@ -134,21 +134,21 @@ impl EngineOptions {
 pub struct Engine {
     pub segs: Vec<Seg>,
     pub total_docs: usize,
-    /// modelos LM de los segmentos fríos (por nombre de fichero)
+    /// LM models of the cold segments (by file name)
     pub lms: HashMap<String, Arc<LmCodec>>,
     /// the LM decoding service of each model (started when first needed): one continuous batch
     /// shared by every query, within the LM pool
     lm_svc: Mutex<HashMap<String, Arc<LmService>>>,
     /// RAM cache of fully decompressed LM-tier records
     cache: Mutex<GenCache<(usize, u32), TextRec>>,
-    /// caché L2 (disco) de registros del nivel LM ya descomprimidos
+    /// L2 (disk) cache of already decompressed LM-tier records
     pub l2: Option<crate::cache::L2>,
     /// already decoded titles of LM-tier stories (thread context)
     titles: Mutex<GenCache<(usize, u32), String>>,
     /// blocks: decoded prompt prefixes of reranked candidates (P4), by document
     pub prefixes: Mutex<GenCache<u32, Arc<crate::rerank::Prefix>>>,
     seg_keys: Vec<u64>,
-    /// por segmento, 1 byte por doc: tipo | dead<<3 | deleted<<4 (filtros sin descomprimir nada)
+    /// per segment, 1 byte per doc: type | dead<<3 | deleted<<4 (filters without decompressing anything)
     flags: Vec<Vec<u8>>,
     pub budget: Arc<Budget>,
     /// memory cap of one LM batch (charged to the budget as working memory)
@@ -178,17 +178,17 @@ pub struct Query {
     pub k: usize,
     /// epoch inclusive
     pub from: Option<i64>,
-    /// epoch exclusivo
+    /// epoch exclusive
     pub to: Option<i64>,
     pub mode: Mode,
-    /// tipos permitidos (vacío = todos): 1 story, 2 comment, 3 poll, 4 pollopt, 5 job
+    /// allowed types (empty = all): 1 story, 2 comment, 3 poll, 4 pollopt, 5 job
     pub types: Vec<u8>,
     pub by: Option<String>,
     pub include_dead: bool,
-    /// fusión: score = v + w * b / (b + c)
+    /// fusion: score = v + w * b / (b + c)
     pub w_bm25: f32,
     pub c_bm25: f32,
-    /// candidatos de la etapa 1 (Hamming) del índice vectorial; None = automático
+    /// stage-1 (Hamming) candidates of the vector index; None = automatic
     pub vec_cand: Option<usize>,
 }
 
@@ -247,13 +247,13 @@ pub struct ResultItem {
     pub points: i32,
     pub title: String,
     pub url: String,
-    /// texto plano (para leer / RAG)
+    /// plain text (for reading / RAG)
     pub text: String,
-    /// HTML original de HN (literal); vacío si `partial`
+    /// original HN HTML (verbatim); empty if `partial`
     pub html: String,
-    /// true = solo el principio del texto (nivel LM en modo fragmento); el completo en /item/<id>
+    /// true = only the start of the text (LM tier in snippet mode); the full text is at /item/<id>
     pub partial: bool,
-    /// "zstd" o "lm"
+    /// "zstd" or "lm"
     pub tier: &'static str,
     pub parent_id: Option<u32>,
     pub story_id: Option<u32>,
@@ -339,12 +339,12 @@ impl Engine {
             segs.push(Seg { s, bm25, vec });
         }
         segs.sort_by_key(|x| x.s.man.id_min);
-        // los segmentos no pueden solaparse (p.ej. seg-2015 junto a seg-2015-06): duplicarían
-        // resultados y romperían la búsqueda por id
+        // segments must not overlap (e.g. seg-2015 next to seg-2015-06): they would duplicate
+        // results and break lookup by id
         for w in segs.windows(2) {
             if w[1].s.man.id_min <= w[0].s.man.id_max {
                 bail!(
-                    "los segmentos {} (ids {}..{}) y {} (ids {}..{}) se solapan: deje solo uno de los dos en {}",
+                    "segments {} (ids {}..{}) and {} (ids {}..{}) overlap: keep only one of them in {}",
                     w[0].s.man.name,
                     w[0].s.man.id_min,
                     w[0].s.man.id_max,
@@ -363,11 +363,11 @@ impl Engine {
                 if !lms.contains_key(f) {
                     let path = models.join(f);
                     let (c, steady, _) = crate::mem::measure(|| LmCodec::load(&path));
-                    let c = c.with_context(|| format!("modelo LM {f}"))?;
+                    let c = c.with_context(|| format!("LM model {f}"))?;
                     model_bytes += steady.max(std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0));
                     lms.insert(f.clone(), Arc::new(c));
                 }
-                l.check_model(&lms[f]).with_context(|| format!("segmento {}", sg.s.man.name))?;
+                l.check_model(&lms[f]).with_context(|| format!("segment {}", sg.s.man.name))?;
             }
         }
         let l2 = match (&opts.l2, lms.is_empty()) {
@@ -377,13 +377,13 @@ impl Engine {
                     Some(c)
                 }
                 Err(e) => {
-                    eprintln!("aviso: caché L2 desactivada ({e})");
+                    eprintln!("warning: L2 cache disabled ({e})");
                     None
                 }
             },
             _ => None,
         };
-        // columna de banderas en RAM (1 B/doc), construida en paralelo una vez al abrir
+        // flag column in RAM (1 B/doc), built in parallel once at open
         let flags: Vec<Vec<u8>> = segs.iter().map(|sg| crate::meta::load_flags(&sg.s.dir, &sg.s.meta)).collect::<Result<_>>()?;
         Ok(Self::assemble(segs, lms, model_bytes, flags, l2, opts, 2000, None))
     }
@@ -420,7 +420,7 @@ impl Engine {
         });
         let codec = codec?;
         if codec.model.id != lm.info.model_id {
-            return Err(incompatible(format!("el modelo LM del bloque es {} y el manifiesto dice {}", codec.model.id, lm.info.model_id)));
+            return Err(incompatible(format!("the block's LM model is {} but the manifest says {}", codec.model.id, lm.info.model_id)));
         }
         let model_bytes = steady.max(block.require("model/lm")?.len);
         let li: crate::bm25::Bm25Info = serde_json::from_value(m["lex"]["info"].clone()).map_err(|e| incompatible(format!("lex.info: {e}")))?;
@@ -430,7 +430,7 @@ impl Engine {
         let vec = VecIndex::from_parts(&block.read_part("vec/has")?, block.blob("vec/codes", res.vectors)?, bits, n)?;
         let flags = block.read_part("meta/flags")?;
         if flags.len() != n {
-            return Err(crate::block::corrupt("meta/flags: tamaño"));
+            return Err(crate::block::corrupt("meta/flags: size"));
         }
         let s = &m["snapshot"];
         let man = crate::segment::Manifest {
@@ -480,8 +480,8 @@ impl Engine {
         block: Option<Arc<crate::block::Block>>,
     ) -> Self {
         let total_docs = segs.iter().map(|x| x.s.man.n_docs).sum();
-        // clave de la L2: nombre + identificador de construcción + nº de docs (si el segmento se
-        // reconstruye, sus entradas antiguas dejan de coincidir)
+        // L2 key: name + build id + number of docs (if the segment is rebuilt, its old entries
+        // stop matching)
         let seg_keys = segs
             .iter()
             .map(|s| crate::cache::seg_key(&s.s.man.name) ^ s.s.man.build_id.rotate_left(13) ^ (s.s.man.n_docs as u64).rotate_left(41))
@@ -529,17 +529,17 @@ impl Engine {
         for c in &cans {
             let d = c["doc"].as_u64().unwrap_or(u64::MAX) as usize;
             if d >= self.total_docs || lm.raw(d).map(|r| xxh(&r)).ok().as_deref() != c["rec"].as_str() {
-                return Err(crate::block::corrupt(format!("canario {}: bytes del registro", c["id"])));
+                return Err(crate::block::corrupt(format!("canary {}: record bytes", c["id"])));
             }
             wants.push((0usize, d, None::<usize>, false));
         }
         let jobs: Vec<Job> = wants.iter().map(|w| Ok(Job { rec: lm.raw(w.1)?.into_owned(), has_check: true, want: Want::Full })).collect::<Result<_>>()?;
         let n = jobs.len();
-        let dec = self.lm_service("block")?.run(jobs, Prio::Interactive).map_err(|e| crate::block::incompatible(format!("canarios: {e:#}")))?;
+        let dec = self.lm_service("block")?.run(jobs, Prio::Interactive).map_err(|e| crate::block::incompatible(format!("canaries: {e:#}")))?;
         for (c, d) in cans.iter().zip(dec) {
-            let Decoded::Text(r, _) = d else { return Err(crate::block::incompatible("canarios: decodificación inesperada")) };
+            let Decoded::Text(r, _) = d else { return Err(crate::block::incompatible("canaries: unexpected decoding")) };
             if xxh(format!("{}\0{}\0{}", r.title, r.url, r.text).as_bytes()).as_str() != c["text"].as_str().unwrap_or_default() {
-                return Err(crate::block::incompatible(format!("canario {}: el texto descomprimido no coincide (¿binario o CPU distintos?)", c["id"])));
+                return Err(crate::block::incompatible(format!("canary {}: the decompressed text does not match (different binary or CPU?)", c["id"])));
             }
         }
         Ok(n)
@@ -568,7 +568,7 @@ impl Engine {
             .unwrap_or_default();
         let want = Want::Prefix { body: crate::prompt::PREFIX_TOKENS, mark: SNIPPET_TOKENS };
         let jobs: Vec<Job> = docs.iter().map(|&d| Ok(Job { rec: lm.raw(d)?.into_owned(), has_check: lm.rec_check(), want })).collect::<Result<_>>()?;
-        let dec = self.lm_service("block")?.run(jobs, Prio::Interactive).map_err(|e| crate::block::incompatible(format!("canarios del embedder: {e:#}")))?;
+        let dec = self.lm_service("block")?.run(jobs, Prio::Interactive).map_err(|e| crate::block::incompatible(format!("embedder canaries: {e:#}")))?;
         let mut out = Vec::new();
         for (&d, x) in docs.iter().zip(dec) {
             if let Decoded::Prefix(p) = x {
@@ -672,7 +672,7 @@ impl Engine {
         if let Some(s) = m.get(name) {
             return Ok(s.clone());
         }
-        let codec = self.lms.get(name).with_context(|| format!("falta el modelo LM {name}"))?.clone();
+        let codec = self.lms.get(name).with_context(|| format!("LM model {name} is missing"))?.clone();
         let s = Arc::new(LmService::new(codec, self.lm_share(name))?);
         m.insert(name.to_string(), s.clone());
         Ok(s)
@@ -744,12 +744,12 @@ impl Engine {
         })
     }
 
-    /// Modelo LM de un segmento del nivel frío.
+    /// LM model of a cold-tier segment.
     pub fn codec_for(&self, si: usize) -> Option<&LmCodec> {
         self.lms.get(self.segs[si].s.man.lm_model.as_ref()?).map(|c| c.as_ref())
     }
 
-    /// ¿Cumple el documento los filtros de la consulta? (las filas deleted nunca se devuelven)
+    /// Does the document pass the query filters? (deleted rows are never returned)
     fn passes(&self, q: &Query, si: usize, row: &MetaRow, author: Option<u32>) -> bool {
         !row.deleted
             && (q.include_dead || !row.dead)
@@ -763,7 +763,7 @@ impl Engine {
             }
     }
 
-    /// Filtros de tipo/dead/deleted con la columna de banderas en RAM (sin descomprimir nada).
+    /// Type/dead/deleted filters using the flag column in RAM (without decompressing anything).
     #[inline]
     fn passes_flags(&self, q: &Query, si: usize, d: u32) -> bool {
         let f = self.flags[si][d as usize];
@@ -771,14 +771,14 @@ impl Engine {
         !deleted && (q.include_dead || !dead) && (q.types.is_empty() || q.types.contains(&typ))
     }
 
-    /// Búsqueda top-k. Los filtros se aplican antes del recorte final:
-    /// - sin texto: listado de lo más reciente a lo más antiguo que cumple los filtros (parada en k);
-    /// - autor o tipos raros (job/poll/pollopt): recorrido exacto de los metadatos del rango;
-    /// - resto: candidatos de vectores + BM25 por segmento, puntuados y filtrados en orden de
-    ///   puntuación con la columna de banderas; si un segmento no llega a k válidos y su lista
-    ///   estaba recortada, se amplía SOLO ese segmento (4x, hasta 16x).
-    /// Las fechas se comprueban exactamente en los bloques extremos del rango; en el interior se
-    /// usa el orden temporal de los ids.
+    /// Top-k search. Filters are applied before the final cut:
+    /// - no text: listing from newest to oldest of what passes the filters (stops at k);
+    /// - author or rare types (job/poll/pollopt): exact scan of the range's metadata;
+    /// - otherwise: vector + BM25 candidates per segment, scored and filtered in score order with
+    ///   the flag column; if a segment does not reach k valid hits and its list was cut, ONLY
+    ///   that segment is widened (4x, up to 16x).
+    /// Dates are checked exactly in the blocks at the ends of the range; inside it, the time order
+    /// of the ids is used.
     pub fn search(&self, q: &Query, qvec: Option<&[f32]>) -> Result<Vec<Hit>> {
         self.search_with(q, qvec, &|_| true)
     }
@@ -818,7 +818,7 @@ impl Engine {
         let has_text = !q.text.trim().is_empty();
         let use_bm25 = q.mode != Mode::Vector && !terms.is_empty();
         let use_vec = q.mode != Mode::Keyword && qvec.is_some() && has_text;
-        // IDF global (df sumado en todos los segmentos)
+        // global IDF (df summed over all segments)
         let n = self.total_docs as f32;
         let mut dfs: Vec<u64> = vec![0; terms.len()];
         for (i, t) in terms.iter().enumerate() {
@@ -836,8 +836,8 @@ impl Engine {
             terms = ix.iter().map(|&i| terms[i].clone()).collect();
             idf = ix.iter().map(|&i| idf[i]).collect();
         }
-        // sin texto: listado de lo más reciente; con texto pero sin señal utilizable (solo palabras
-        // vacías en modo palabras, o sin vector de consulta): ningún resultado
+        // no text: listing of the newest; text but no usable signal (only stop words in keyword
+        // mode, or no query vector): no results
         let listing = !has_text;
         if has_text && !use_bm25 && !use_vec {
             return Ok(Vec::new());
@@ -878,7 +878,7 @@ impl Engine {
                 };
                 let (b0, b1) = (lo as usize / META_BLOCK, (hi as usize - 1) / META_BLOCK);
                 if listing {
-                    // sin señal de texto: lo más reciente primero, con parada temprana
+                    // no text signal: newest first, with early stop
                     let mut out = Vec::with_capacity(k);
                     'blocks: for b in (b0..=b1).rev() {
                         let rows = sg.s.meta.try_block(b)?;
@@ -914,7 +914,7 @@ impl Engine {
                     Ok(cand
                         .iter()
                         .enumerate()
-                        // solo documentos con alguna señal de la consulta: término (palabras) o vector
+                        // only documents with some query signal: a term (keywords) or a vector
                         .filter(|&(i, _)| match q.mode {
                             Mode::Keyword => bs[i] > 0.0,
                             Mode::Vector => vs[i].is_finite(),
@@ -927,7 +927,7 @@ impl Engine {
                         .collect())
                 };
                 if scan {
-                    // recorrido exacto de los metadatos del rango (autor / tipos raros)
+                    // exact scan of the range's metadata (author / rare types)
                     let mut cand: Vec<u32> = Vec::new();
                     for b in b0..=b1 {
                         for (kk, row) in sg.s.meta.try_block(b)?.iter().enumerate() {
@@ -942,7 +942,7 @@ impl Engine {
                     hs.truncate(k);
                     return Ok(Some(hs));
                 }
-                // filas de los bloques extremos (para la comprobación exacta de fechas)
+                // rows of the blocks at the ends of the range (for the exact date check)
                 let edge: HashMap<usize, Vec<MetaRow>> = if q.from.is_some() || q.to.is_some() {
                     [b0, b1].iter().map(|&b| Ok((b, sg.s.meta.try_block(b)?))).collect::<Result<_>>()?
                 } else {
@@ -976,7 +976,7 @@ impl Engine {
                     raw.dedup();
                     let mut hs = score(&raw)?;
                     hs.sort_by(|a, b| b.score.total_cmp(&a.score).then(b.doc.cmp(&a.doc)));
-                    // filtrar en orden de puntuación hasta tener k válidos
+                    // filter in score order until there are k valid hits
                     let mut out = Vec::with_capacity(k);
                     for h in hs {
                         if self.passes_flags(q, si, h.doc) && time_ok(h.doc) {
@@ -999,7 +999,7 @@ impl Engine {
             })
             .collect::<Result<_>>()?;
         let mut hits: Vec<Hit> = per_seg.into_iter().flatten().flatten().collect();
-        // a igual puntuación (p.ej. listado sin texto), lo más reciente primero
+        // on equal score (e.g. a listing with no text), newest first
         hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(b.seg.cmp(&a.seg)).then(b.doc.cmp(&a.doc)));
         hits.truncate(k);
         Ok(hits)
@@ -1038,7 +1038,7 @@ impl Engine {
     /// by the rare-term score (`rare`: postings and idf), among those that pass the query's
     /// filters, without repeats. A round is widened (x4, up to x16) while filters leave too few.
     pub fn candidates(&self, q: &Query, qvec: Option<&[f32]>, rare: &[(TermPost, f32)], kv: usize, kb: usize, grow: &(dyn Fn(u64) -> bool + Sync)) -> Result<Vec<Cand>> {
-        let sg = self.segs.first().context("no hay segmentos")?;
+        let sg = self.segs.first().context("there are no segments")?;
         let n_docs = sg.s.man.n_docs;
         let lo = match q.from {
             Some(t) => sg.s.meta.try_doc_at_time(t)?,
@@ -1133,7 +1133,7 @@ impl Engine {
         Ok(docs.iter().zip(s1).map(|(&doc, s)| Cand { doc, s1: if s.is_finite() { s } else { 0.0 }, has_vec: s.is_finite() }).collect())
     }
 
-    /// Busca un id de HN en todo el archivo: (segmento, doc, metadatos).
+    /// Looks up an HN id in the whole archive: (segment, doc, metadata).
     pub fn find_meta(&self, id: u32) -> Result<Option<(usize, usize, MetaRow)>> {
         let Some(si) = self.segs.partition_point(|s| s.s.man.id_min <= id).checked_sub(1) else { return Ok(None) };
         let sg = &self.segs[si];
@@ -1146,15 +1146,15 @@ impl Engine {
         Ok((row.id == id).then_some((si, doc, row)))
     }
 
-    /// Textos de varios documentos: zstd directo, LM en un único lote (con cachés L1/L2).
-    /// `limit`: tokens máximos para el nivel LM (fragmento); `title_only`: solo títulos.
+    /// Texts of several documents: zstd directly, LM in a single batch (with L1/L2 caches).
+    /// `limit`: max tokens for the LM tier (snippet); `title_only`: titles only.
     pub fn texts(&self, docs: &[(usize, usize)], limit: Option<usize>, title_only: bool) -> Result<Vec<(TextRec, bool)>> {
         let w: Vec<(usize, usize, Option<usize>, bool)> = docs.iter().map(|&(s, d)| (s, d, limit, title_only)).collect();
         self.texts_each(&w)
     }
 
-    /// Igual que `texts` pero con (segmento, doc, límite, solo_título) por documento: todo lo que
-    /// haya que decodificar con el LM va en UN solo lote.
+    /// Like `texts` but with (segment, doc, limit, title_only) per document: everything that
+    /// needs LM decoding goes in ONE batch.
     pub fn texts_each(&self, wants: &[(usize, usize, Option<usize>, bool)]) -> Result<Vec<(TextRec, bool)>> {
         let mut out: Vec<Option<(TextRec, bool)>> = vec![None; wants.len()];
         // 1) RAM caches (under the locks, no I/O)
@@ -1188,7 +1188,7 @@ impl Engine {
                 },
             }
         }
-        // agrupar lo pendiente por modelo LM (normalmente uno solo)
+        // group what is pending by LM model (usually just one)
         let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
         for &i in &pending {
             let f = self.segs[wants[i].0].s.man.lm_model.clone().unwrap_or_default();
@@ -1213,7 +1213,7 @@ impl Engine {
                 .into_iter()
                 .map(|d| match d {
                     Decoded::Text(t, p) => Ok((t, p)),
-                    Decoded::Prefix(_) => anyhow::bail!("decodificación inesperada"),
+                    Decoded::Prefix(_) => anyhow::bail!("unexpected decoding"),
                 })
                 .collect::<Result<_>>()?;
             {
@@ -1250,8 +1250,8 @@ impl Engine {
         }
     }
 
-    /// id de la story raíz del hilo de un documento (él mismo si no tiene padre).
-    /// `None` si la cadena de padres sale del archivo (padre en un mes no cargado).
+    /// id of the root story of a document's thread (the document itself if it has no parent).
+    /// `None` if the parent chain leaves the archive (a parent in a month that is not loaded).
     pub fn root_id(&self, seg: usize, doc: u32) -> Result<Option<u32>> {
         let row = self.segs[seg].s.meta.try_row(doc as usize)?;
         let (mut id, mut parent) = (row.id, row.parent);
@@ -1266,7 +1266,7 @@ impl Engine {
         Ok(None)
     }
 
-    /// Resultados completos. `full=false`: en el nivel LM solo se decodifica un fragmento.
+    /// Full results. `full=false`: in the LM tier only a snippet is decoded.
     pub fn fetch(&self, hits: &[Hit], full: bool) -> Result<Vec<ResultItem>> {
         self.fetch_with(hits, full, &HashMap::new())
     }
@@ -1290,7 +1290,7 @@ impl Engine {
             (!full).then(|| (crate::lm::store::snippet_of(&String::from_utf8_lossy(&p.bytes[..p.snippet_end]), p.flags as u64), true))
         };
         let rows: Vec<MetaRow> = hits.iter().map(|h| self.segs[h.seg].s.meta.try_row(h.doc as usize)).collect::<Result<_>>()?;
-        // contexto del hilo: story raíz de cada comentario (títulos en un solo lote)
+        // thread context: root story of each comment (titles in a single batch)
         let roots: Vec<Option<u32>> = hits
             .iter()
             .zip(&rows)
@@ -1307,7 +1307,7 @@ impl Engine {
                 root_docs.push((si, doc));
             }
         }
-        // resultados (fragmento o completo) + títulos de las stories: un solo lote para el LM
+        // results (snippet or full) + story titles: a single batch for the LM
         let limit = if full { None } else { Some(SNIPPET_TOKENS) };
         let mut wants: Vec<(usize, usize, Option<usize>, bool)> = hits.iter().map(|h| (h.seg, h.doc as usize, limit, false)).collect();
         wants.extend(root_docs.iter().map(|&(si, d)| (si, d, None, true)));

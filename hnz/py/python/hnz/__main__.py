@@ -29,9 +29,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     a = ap.parse_args(argv)
     # checked before the archive's open, which takes seconds
     if not 1 <= a.port <= 65535:
-        ap.error(f'--port inválido: {a.port} (1-65535)')
+        ap.error(f'invalid --port: {a.port} (1-65535)')
     if not 1 <= a.threads <= 256:
-        ap.error(f'--threads inválido: {a.threads} (1-256)')
+        ap.error(f'invalid --threads: {a.threads} (1-256)')
     ram = None if a.ram.lower() == 'none' else a.ram
     with hnz.open(a.root, ram=ram, preload=True, max_concurrent=a.threads, timeout=a.timeout) as hn:
         print(f'hnz: {hn.stats()["docs"]} docs - http://{a.host}:{a.port}/ (Ctrl+C to stop)', file=sys.stderr, flush=True)

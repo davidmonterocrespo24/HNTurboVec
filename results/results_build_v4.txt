@@ -1,0 +1,49 @@
+== binary from commit 88ffc5c, 2026-10-13 15:51
+-- 2024-01 (zstd)
+read 382681 items (including 0 deleted rows, kept as metadata) in 0.6s
+  zstd text 3.3s; HTML transformed: modern 98.2%, old 0.0%, raw 1.8%
+  BM25: 178736 terms, 8893154 postings (1.7s)
+segment seg-2024-01 (zstd) done: 382681 docs in 5.9s
+vectors: 364891/382681 docs with embedding, 768 bits (1.7s)
+OK: 382681 records identical to the original (3.5s)
+-- 2010-06 (lm, in out_v4) and 2015-06 (lm, in out) in parallel
+[2010-06]
+read 82729 items (including 2366 deleted rows, kept as metadata) in 0.2s
+  LM text 1324.6s: 82721 records with LM, 8 with zstd fallback, 77.4 tokens/rec, 60.4 B/rec
+  BM25: 74374 terms, 1920121 postings (1.1s)
+segment seg-2010-06 (lm) done: 82729 docs in 1326.1s
+[2015-06]
+read 171636 items (including 5246 deleted rows, kept as metadata) in 0.7s
+  LM text 2079.2s: 171612 records with LM, 24 with zstd fallback, 79.4 tokens/rec, 63.0 B/rec
+  BM25: 117778 terms, 4124511 postings (0.7s)
+segment seg-2015-06 (lm) done: 171636 docs in 2081.6s
+-- 2010-06: new binary vs verified v3 (previous binary)
+  lm.bin identical
+  lm.idx identical
+  lm.json identical
+  meta.bin identical
+  meta.idx identical
+  authors.zst identical
+  bm25.fst identical
+  bm25.post identical
+  bm25.norms identical
+  bm25.json identical
+vectors: 80362/82729 docs with embedding, 512 bits (0.3s)
+  vec.bin identical
+  out/seg-2010-06 replaced (with meta.flags.zst)
+vectors: 166387/171636 docs with embedding, 512 bits (0.7s)
+out/seg-2010-06/meta.flags.zst
+out/seg-2015-06/meta.flags.zst
+out/seg-2024-01/meta.flags.zst
+== done 16:26 (pending: verify of 2015-06)
+-- full verification of 2015-06 (final binary), 19:52
+  verified 20000/171636 (27 rec/s)
+  verified 40000/171636 (28 rec/s)
+  verified 60000/171636 (28 rec/s)
+  verified 80000/171636 (28 rec/s)
+  verified 100000/171636 (29 rec/s)
+  verified 120000/171636 (29 rec/s)
+  verified 140000/171636 (28 rec/s)
+  verified 160000/171636 (29 rec/s)
+OK: 171636 records identical to the original (5971.1s)
+exit=0

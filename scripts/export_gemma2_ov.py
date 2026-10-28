@@ -1,5 +1,5 @@
-"""Exporta SOLO la parte de texto de google/embeddinggemma-2 (transformer + pooling + normalize)
-a OpenVINO IR con formas estaticas, para ejecutarla en la iGPU Arc / NPU / CPU."""
+"""Exports ONLY the text part of google/embeddinggemma-2 (transformer + pooling + normalize)
+to OpenVINO IR with static shapes, to run it on the Arc iGPU / NPU / CPU."""
 import os, sys, time
 import numpy as np, torch, openvino as ov
 from sentence_transformers import SentenceTransformer
@@ -24,12 +24,12 @@ w = TextEmb(st).eval()
 ids = torch.randint(10, 1000, (BATCH, SEQ)); mask = torch.ones(BATCH, SEQ, dtype=torch.long)
 with torch.no_grad():
     ref = w(ids, mask)
-print('salida torch', tuple(ref.shape))
+print('torch output',tuple(ref.shape))
 t0 = time.time()
 m = ov.convert_model(w, example_input=(ids, mask), input=[([BATCH, SEQ], ov.Type.i64), ([BATCH, SEQ], ov.Type.i64)])
 ov.save_model(m, OUT, compress_to_fp16=True)
-print(f'guardado {OUT} en {time.time()-t0:.0f}s')
+print(f'saved {OUT} in {time.time()-t0:.0f}s')
 core = ov.Core()
 cm = core.compile_model(OUT, 'CPU')
 o = cm([ids.numpy(), mask.numpy()])[0]
-print('coseno OV-CPU vs torch:', float(np.mean(np.sum(o * ref.numpy(), 1) / np.linalg.norm(o, axis=1) / np.linalg.norm(ref.numpy(), axis=1))))
+print('cosine OV-CPU vs torch:', float(np.mean(np.sum(o * ref.numpy(), 1) / np.linalg.norm(o, axis=1) / np.linalg.norm(ref.numpy(), axis=1))))

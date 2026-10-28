@@ -1,4 +1,4 @@
-# hnz — Compressed Hacker News with hybrid search
+# hnz: Compressed Hacker News with hybrid search
 
 Minimum-size HN archive with semantic + keyword search, date/author/type filters and verbatim
 retrieval of the results. Design and measurements in [`../doc/`](../doc/).

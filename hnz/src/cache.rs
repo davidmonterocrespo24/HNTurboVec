@@ -211,11 +211,11 @@ impl L2 {
     /// Like `open`, indexing at most the `max_entries` newest records (the file is append-only:
     /// later records are newer).
     pub fn open_limited(path: &Path, cap_bytes: u64, max_entries: usize) -> Result<Self> {
-        // OJO (Windows): un fichero abierto en modo append no admite set_len (acceso denegado);
-        // se abre en lectura/escritura y cada escritura hace seek al final.
+        // NOTE (Windows): a file opened in append mode does not allow set_len (access denied),
+        // so it is opened read/write and every write seeks to the end.
         let mut oo = OpenOptions::new();
         oo.read(true).write(true).create(true);
-        // acceso exclusivo: dos procesos escribiendo el mismo fichero lo corromperían
+        // exclusive access: two processes writing the same file would corrupt it
         #[cfg(windows)]
         {
             use std::os::windows::fs::OpenOptionsExt;
@@ -292,7 +292,7 @@ impl L2 {
     pub fn get(&self, seg: u64, doc: u32) -> Option<TextRec> {
         let mut g = self.inner.lock().ok()?;
         let &(off, len) = g.index.get(&(seg, doc))?;
-        // leer también la cabecera y comprobar que es el registro pedido
+        // read the header too and check that it is the requested record
         let mut b = vec![0u8; 16 + len as usize];
         g.file.seek(SeekFrom::Start(off.checked_sub(16)?)).ok()?;
         g.file.read_exact(&mut b).ok()?;

@@ -75,20 +75,20 @@ pub fn verify(path: &Path, level: &str, spec: Option<&Path>, decode: &str) -> Re
         "quick" => 1,
         "full" => 2,
         "deep" => 3,
-        o => bail!("--level debe ser header, quick, full o deep (es {o:?})"),
+        o => bail!("--level must be header, quick, full or deep (got {o:?})"),
     };
     let decode: Option<f64> = match decode {
         "none" => None,
         "all" => Some(1.0),
         f => match f.parse::<f64>() {
             Ok(x) if x > 0.0 && x <= 1.0 => Some(x),
-            _ => bail!("--decode debe ser una fracción en (0, 1], all o none (es {f:?})"),
+            _ => bail!("--decode must be a fraction in (0, 1], all or none (got {f:?})"),
         },
     };
     if !path.exists() {
-        bail!("no existe {}", path.display());
+        bail!("{} does not exist", path.display());
     }
-    let file = Block::locate(path).ok_or_else(|| crate::block::incompatible(format!("{} no es un bloque hnz (falta {})", path.display(), crate::block::FILE_NAME)))?;
+    let file = Block::locate(path).ok_or_else(|| crate::block::incompatible(format!("{} is not an hnz block ({} is missing)", path.display(), crate::block::FILE_NAME)))?;
     let t0 = Instant::now();
     let mut checks = Vec::new();
     let mut diffs = Diffs::default();
@@ -138,16 +138,16 @@ fn deep(block: &Arc<Block>, eng: &Engine, spec_path: Option<&Path>, decode: Opti
     use crate::meta::META_BLOCK;
     let spec: PackSpec = match spec_path {
         Some(p) => serde_json::from_str(&std::fs::read_to_string(p).with_context(|| format!("{}", p.display()))?)?,
-        None => serde_json::from_value(block.manifest()["build"]["spec"].clone()).context("el bloque no guarda su especificación de pack: use --spec")?,
+        None => serde_json::from_value(block.manifest()["build"]["spec"].clone()).context("the block does not record its pack spec: pass --spec")?,
     };
     // a problem in a source file is not a problem of the block: its error loses the block's types
-    let src = |e: anyhow::Error| anyhow::anyhow!("fuente: {e:#}");
+    let src = |e: anyhow::Error| anyhow::anyhow!("source: {e:#}");
     let man = block.manifest();
     let n = block.n_docs as usize;
     let sg = &eng.segs[0];
     let meta = &sg.s.meta;
-    let TextSource::Lm(lm) = &sg.s.text else { bail!("el texto del bloque no es del nivel LM") };
-    let vec = sg.vec.as_ref().context("el bloque no tiene vectores")?;
+    let TextSource::Lm(lm) = &sg.s.text else { bail!("the block text is not in the LM tier") };
+    let vec = sg.vec.as_ref().context("the block has no vectors")?;
     let bits = man["vec"]["bits"].as_u64().unwrap_or(0) as usize;
 
     // ---- metadata: every block (1,024 at a time), order, flags, late ids, index, lookups
@@ -562,7 +562,7 @@ pub fn inspect(path: &Path, project: Option<u64>, lex: Option<&Path>, id: Option
     if let Some(id) = id {
         let eng = open_engine(&block)?;
         let sg = &eng.segs[0];
-        let TextSource::Lm(lm) = &sg.s.text else { bail!("el texto del bloque no es del nivel LM") };
+        let TextSource::Lm(lm) = &sg.s.text else { bail!("the block text is not in the LM tier") };
         let at = |name: &str| block.part(name).map_or(0, |p| p.off);
         out["locate"] = match sg.s.meta.try_doc_of_id(id)? {
             None => json!({"id": id, "found": false}),

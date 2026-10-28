@@ -73,7 +73,7 @@ impl Default for OpenOptions {
     }
 }
 
-/// Una búsqueda. Fechas como en la CLI: "2015", "2015-06", "2015-06-01" (ambos extremos inclusive).
+/// A search. Dates as in the CLI: "2015", "2015-06", "2015-06-01" (both ends inclusive).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
 pub struct SearchRequest {
@@ -81,15 +81,15 @@ pub struct SearchRequest {
     pub k: usize,
     pub since: Option<String>,
     pub until: Option<String>,
-    /// límites exactos en segundos epoch UTC (ambos inclusive); excluyen a since/until
+    /// exact limits in UTC epoch seconds (both inclusive); not allowed together with since/until
     pub since_ts: Option<i64>,
     pub until_ts: Option<i64>,
-    /// story, comment, job, poll, pollopt (vacío = todos)
+    /// story, comment, job, poll, pollopt (empty = all)
     pub types: Vec<String>,
     pub author: Option<String>,
     /// hybrid | vector | keyword
     pub mode: String,
-    /// texto completo también en el nivel LM (si no, fragmento de 64 tokens)
+    /// full text for the LM tier too (otherwise a 64-token snippet)
     pub full: bool,
     pub include_dead: bool,
     /// weight and saturation of BM25 in the fusion `vector + w·b/(b + c)`; None = the defaults
@@ -151,7 +151,7 @@ pub struct SearchResponse {
     pub warning: Option<String>,
 }
 
-/// Error en los argumentos de una consulta (en Python: ValueError).
+/// An error in a query's arguments (in Python: ValueError).
 #[derive(Debug)]
 pub struct QueryError(pub String);
 impl std::fmt::Display for QueryError {
@@ -169,26 +169,26 @@ pub const MAX_QUERY_BYTES: usize = 8192;
 
 fn check_text(text: &str) -> Result<()> {
     if text.len() > MAX_QUERY_BYTES {
-        return Err(anyhow::Error::new(QueryError(format!("consulta demasiado larga: {} bytes (máximo {MAX_QUERY_BYTES})", text.len()))));
+        return Err(anyhow::Error::new(QueryError(format!("query too long: {} bytes (maximum {MAX_QUERY_BYTES})", text.len()))));
     }
     Ok(())
 }
 
-/// Valida una consulta y la traduce a la del motor.
+/// Validates a query and turns it into the engine's query.
 pub fn make_query(r: &SearchRequest) -> Result<Query> {
     let bad = |m: String| anyhow::Error::new(QueryError(m));
     check_text(&r.query)?;
     if r.k == 0 || r.k > MAX_K {
-        return Err(bad(format!("k debe estar entre 1 y {MAX_K} (es {})", r.k)));
+        return Err(bad(format!("k must be between 1 and {MAX_K} (got {})", r.k)));
     }
     if r.c_bm25.is_some_and(|c| !(c.is_finite() && c > 0.0)) || r.w_bm25.is_some_and(|w| !(w.is_finite() && w >= 0.0)) {
-        return Err(bad(format!("c_bm25 debe ser > 0 y w_bm25 >= 0 (son {:?} y {:?})", r.c_bm25, r.w_bm25)));
+        return Err(bad(format!("c_bm25 must be > 0 and w_bm25 >= 0 (got {:?} and {:?})", r.c_bm25, r.w_bm25)));
     }
     if r.rerank_depth.is_some_and(|d| d == 0 || d > crate::rerank::MAX_DEPTH) {
-        return Err(bad(format!("rerank_depth debe estar entre 1 y {} (es {:?})", crate::rerank::MAX_DEPTH, r.rerank_depth)));
+        return Err(bad(format!("rerank_depth must be between 1 and {} (got {:?})", crate::rerank::MAX_DEPTH, r.rerank_depth)));
     }
     if r.deadline_ms.is_some_and(|d| !(d.is_finite() && d > 0.0 && d <= 3.6e6)) {
-        return Err(bad(format!("deadline_ms debe estar entre 0 y 3.600.000 (es {:?})", r.deadline_ms)));
+        return Err(bad(format!("deadline_ms must be between 0 and 3,600,000 (got {:?})", r.deadline_ms)));
     }
     let mut types = Vec::new();
     for t in &r.types {
@@ -198,30 +198,30 @@ pub fn make_query(r: &SearchRequest) -> Result<Query> {
             "poll" => 3,
             "pollopt" => 4,
             "job" => 5,
-            o => return Err(bad(format!("tipo desconocido: {o} (story, comment, job, poll, pollopt)"))),
+            o => return Err(bad(format!("unknown type: {o} (use story, comment, job, poll or pollopt)"))),
         });
     }
     let mode = match r.mode.as_str() {
         "hybrid" => Mode::Hybrid,
         "vector" => Mode::Vector,
         "keyword" => Mode::Keyword,
-        o => return Err(bad(format!("modo desconocido: {o} (hybrid, vector, keyword)"))),
+        o => return Err(bad(format!("unknown mode: {o} (use hybrid, vector or keyword)"))),
     };
     let date = |s: &Option<String>, end: bool, name: &str| -> Result<Option<i64>> {
         match s {
-            Some(x) => dates::parse(x, end).map(Some).ok_or_else(|| bad(format!("fecha {name} inválida: {x:?} (2015, 2015-06 o 2015-06-01)"))),
+            Some(x) => dates::parse(x, end).map(Some).ok_or_else(|| bad(format!("invalid {name} date: {x:?} (use 2015, 2015-06 or 2015-06-01)"))),
             None => Ok(None),
         }
     };
     if (r.since.is_some() && r.since_ts.is_some()) || (r.until.is_some() && r.until_ts.is_some()) {
-        return Err(bad("indique since o since_ts (y until o until_ts), no ambos".into()));
+        return Err(bad("give since or since_ts (and until or until_ts), not both".into()));
     }
     let from = match r.since_ts {
         Some(t) => Some(t),
         None => date(&r.since, false, "since")?,
     };
     let to = match r.until_ts {
-        Some(t) => Some(t.checked_add(1).ok_or_else(|| bad("until_ts fuera de rango".into()))?),
+        Some(t) => Some(t.checked_add(1).ok_or_else(|| bad("until_ts out of range".into()))?),
         None => date(&r.until, true, "until")?,
     };
     Ok(Query {
@@ -302,7 +302,7 @@ fn default_models(root: &Path) -> Result<PathBuf> {
             return Ok(c);
         }
     }
-    bail!("no se encuentran los modelos junto a {} (indique models=...)", root.display())
+    bail!("no models found next to {} (pass models=...)", root.display())
 }
 
 /// Embedder files: the int8 version if present (half the size, ~2.5x faster, cosine 0.9998).
@@ -326,7 +326,7 @@ impl Archive {
             "header" => crate::block::VerifyLevel::Header,
             "quick" => crate::block::VerifyLevel::Quick,
             "full" => crate::block::VerifyLevel::Full,
-            o => return Err(anyhow::Error::new(QueryError(format!("verify debe ser header, quick o full (es {o:?})")))),
+            o => return Err(anyhow::Error::new(QueryError(format!("verify must be header, quick or full (got {o:?})")))),
         };
         // a compact block (P3), or a folder of segments
         let block = match crate::block::Block::locate(root) {
@@ -336,23 +336,23 @@ impl Archive {
         // first, the folder must have segments (the most likely error: wrong folder)
         let has_segments = root.is_dir()
             && std::fs::read_dir(root)
-                .with_context(|| format!("no se puede leer {}", root.display()))?
+                .with_context(|| format!("cannot read {}", root.display()))?
                 .filter_map(|e| e.ok())
                 .any(|e| e.path().join("manifest.json").exists());
         if block.is_some() && has_segments {
-            bail!("{} contiene un bloque (hn.hnzb) y también carpetas de segmentos: use una cosa u otra", root.display());
+            bail!("{} contains a block (hn.hnzb) and also segment folders: keep one or the other", root.display());
         }
         if block.is_none() && !has_segments {
             let hint = if root.join("manifest.json").exists() {
-                " (esa carpeta ES un segmento: indique la carpeta que contiene los segmentos)"
+                " (that folder IS a segment: pass the folder that contains the segments)"
             } else {
                 ""
             };
-            bail!("no hay segmentos (carpetas con manifest.json) en {}{hint}", root.display());
+            bail!("no segments (folders with manifest.json) in {}{hint}", root.display());
         }
         let timeout = Duration::try_from_secs_f64(opts.timeout).ok().filter(|_| opts.max_concurrent > 0).ok_or_else(|| {
             anyhow::Error::new(QueryError(format!(
-                "timeout debe ser un número de segundos >= 0 (y razonable) y max_concurrent >= 1 (son {} y {})",
+                "timeout must be a number of seconds >= 0 (and reasonable) and max_concurrent >= 1 (got {} and {})",
                 opts.timeout, opts.max_concurrent
             )))
         })?;
@@ -370,15 +370,15 @@ impl Archive {
         }
         let mut eng = match &block {
             Some(b) => Engine::open_block(b.clone(), eopts)?,
-            None => Engine::open_with(root, &models, eopts).with_context(|| format!("abriendo {}", root.display()))?,
+            None => Engine::open_with(root, &models, eopts).with_context(|| format!("opening {}", root.display()))?,
         };
         if eng.segs.is_empty() {
             let hint = if root.join("manifest.json").exists() {
-                " (esa carpeta ES un segmento: indique la carpeta que contiene los segmentos)"
+                " (that folder IS a segment: pass the folder that contains the segments)"
             } else {
                 ""
             };
-            bail!("no hay segmentos (carpetas con manifest.json) en {}{hint}", root.display());
+            bail!("no segments (folders with manifest.json) in {}{hint}", root.display());
         }
         let emb_est = match &block {
             Some(b) => {
@@ -402,7 +402,7 @@ impl Archive {
         };
         let plan = plan::plan(&input)?;
         for &(si, p) in &plan.resident {
-            eng.promote(si, p).with_context(|| format!("cargando {} de {}", p.name(), eng.segs[si].s.man.name))?;
+            eng.promote(si, p).with_context(|| format!("loading {} of {}", p.name(), eng.segs[si].s.man.name))?;
         }
         eng.set_lm_pool(plan.lm_pool);
         // with a persistent cache, its RAM index takes 1/8 of the cache share (newest entries kept)
@@ -410,7 +410,7 @@ impl Archive {
             let max_entries = (plan.cache / 8 / crate::cache::L2_ENTRY_BYTES) as usize;
             match crate::cache::L2::open_limited(&d.join("hnz-cache.bin"), opts.cache_dir_bytes, max_entries) {
                 Ok(l2) => eng.set_l2(l2),
-                Err(e) => eprintln!("aviso: caché persistente desactivada ({e})"),
+                Err(e) => eprintln!("warning: persistent cache disabled ({e})"),
             }
         }
         eng.set_cache_bytes(plan.cache);
@@ -457,7 +457,7 @@ impl Archive {
         }
         if let Some((t, msg, kind)) = last.as_ref() {
             if t.elapsed() < EMB_RETRY {
-                let m = format!("el embedder no se pudo cargar hace {:.0} s: {msg}", t.elapsed().as_secs_f64());
+                let m = format!("the embedder failed to load {:.0} s ago: {msg}", t.elapsed().as_secs_f64());
                 return Err(match kind {
                     1 => crate::block::corrupt(m),
                     2 => crate::block::incompatible(m),
@@ -494,7 +494,7 @@ impl Archive {
         // measurements with other threads working can fall short: never below 60 % of the estimate
         let keep = mem.steady.max(reserved * 3 / 5);
         if mem.peak > reserved {
-            eprintln!("aviso: el embedder llegó a {} al cargarse (reservados {})", human(mem.peak), human(reserved));
+            eprintln!("warning: the embedder reached {} while loading ({} reserved)", human(mem.peak), human(reserved));
         }
         c.resize(keep);
         let cache = self.eng.cache_bytes();
@@ -504,7 +504,7 @@ impl Archive {
     }
 
     fn spawn_embedder(&self) -> Result<(mpsc::Sender<EmbedJob>, EmbMem)> {
-        let libs = self.ov_libs.clone().context("falta la carpeta de OpenVINO (ov_libs o la variable HNZ_OV_LIBS)")?;
+        let libs = self.ov_libs.clone().context("the OpenVINO folder is missing (set ov_libs or the HNZ_OV_LIBS variable)")?;
         let models = self.models.clone();
         // a block: its IR files (checked against their hashes) and the tokenizer inside it, read
         // in the embedder's thread so the measured load includes them and frees the tokenizer
@@ -604,14 +604,14 @@ impl Archive {
                 }
             }
         })?;
-        let mem = ready_rx.recv().map_err(|_| anyhow!("el hilo del embedder terminó al arrancar"))??;
+        let mem = ready_rx.recv().map_err(|_| anyhow!("the embedder thread stopped while starting"))??;
         Ok((tx, mem))
     }
 
     fn embed_inner(&self, text: &str) -> Result<Vec<f32>> {
         let (rtx, rrx) = mpsc::channel();
-        self.embedder()?.send(EmbedJob::Query(text.to_string(), rtx)).map_err(|_| anyhow!("el embedder no está disponible"))?;
-        rrx.recv().map_err(|_| anyhow!("el embedder no respondió"))?
+        self.embedder()?.send(EmbedJob::Query(text.to_string(), rtx)).map_err(|_| anyhow!("the embedder is not available"))?;
+        rrx.recv().map_err(|_| anyhow!("the embedder did not answer"))?
     }
 
     /// The vectors of document prompts (P4 reranking), waiting at most until `deadline`: Ok(None)
@@ -622,7 +622,7 @@ impl Archive {
         }
         let (rtx, rrx) = mpsc::channel();
         let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.embedder()?.send(EmbedJob::Docs(prompts, rtx, cancel.clone())).map_err(|_| anyhow!("el embedder no está disponible"))?;
+        self.embedder()?.send(EmbedJob::Docs(prompts, rtx, cancel.clone())).map_err(|_| anyhow!("the embedder is not available"))?;
         let got = match deadline {
             Some(d) => match rrx.recv_timeout(d.saturating_duration_since(Instant::now())) {
                 Ok(r) => r,
@@ -630,9 +630,9 @@ impl Archive {
                     cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                     return Ok(None);
                 }
-                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(anyhow!("el embedder no respondió")),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(anyhow!("the embedder did not answer")),
             },
-            None => rrx.recv().map_err(|_| anyhow!("el embedder no respondió"))?,
+            None => rrx.recv().map_err(|_| anyhow!("the embedder did not answer"))?,
         };
         got.map(Some)
     }
@@ -683,7 +683,7 @@ impl Archive {
                 Some(false) => false,
                 Some(true) => {
                     if !self.can_rerank()? {
-                        return Err(anyhow::Error::new(QueryError("rerank no disponible: hace falta un bloque compacto con prompts v2 y un embedder de formas dinámicas".into())));
+                        return Err(anyhow::Error::new(QueryError("rerank not available: it needs a compact block with v2 prompts and an embedder with dynamic shapes".into())));
                     }
                     true
                 }

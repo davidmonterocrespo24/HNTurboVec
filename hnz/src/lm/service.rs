@@ -49,7 +49,7 @@ impl Ticket {
         match self.rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
             Ok(x) => Ok(Some(x)),
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow!("el decodificador LM se detuvo")),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow!("the LM decoder stopped")),
         }
     }
 
@@ -57,7 +57,7 @@ impl Ticket {
     pub fn wait_all(self) -> Result<Vec<Decoded>> {
         let mut out: Vec<Option<Decoded>> = (0..self.n).map(|_| None).collect();
         for _ in 0..self.n {
-            let (i, r) = self.recv().ok_or_else(|| anyhow!("el decodificador LM se detuvo"))?;
+            let (i, r) = self.recv().ok_or_else(|| anyhow!("the LM decoder stopped"))?;
             out[i] = Some(r?);
         }
         Ok(out.into_iter().map(|x| x.expect("one result per job")).collect())
@@ -264,7 +264,7 @@ fn serve(codec: &LmCodec, pool: u64, rx: mpsc::Receiver<Msg>) {
             }
             Err(_) => {
                 for s in run.evict_all() {
-                    deliver(&mut subs, s.tag, Err(anyhow!("fallo interno al decodificar con el LM")));
+                    deliver(&mut subs, s.tag, Err(anyhow!("internal error while decoding with the LM")));
                 }
                 // the batch's state is unknown after a panic: start a fresh one
                 let p = run.pool_bytes();

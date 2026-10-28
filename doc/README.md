@@ -9,13 +9,13 @@ matters is daily use: **fast, accurate and compact**. Implementation in **Rust**
 
 | Document | Contents |
 |---|---|
-| [BITACORA.md](BITACORA.md) | **Chronological record of ALL experiments** (what was tried, script, result). Check it before trying something, so as not to repeat it. |
-| [01-almacenamiento-texto.md](01-almacenamiento-texto.md) | Text/metadata compression: zstd, blocks, ordering, LM as a compressor. |
-| [02-busqueda.md](02-busqueda.md) | Search indexes: vectors (binary, PQ, RaBitQ, turbovec), BM25, real quality, embedding models. |
-| [03-etiquetas-jerarquia.md](03-etiquetas-jerarquia.md) | Idea of ~1000 tags + a graph of levels: compression, routing, hierarchy. |
-| [04-investigacion-arxiv.md](04-investigacion-arxiv.md) | Papers reviewed (priority to Google/Microsoft), what is useful and what is not. |
-| [05-arquitectura.md](05-arquitectura.md) | The system built in Rust: format, query, caches, robustness, sizes. |
-| [06-libreria.md](06-libreria.md) | Design of the library for backends (Python, RAM budget, compact block); pending approval. |
+| [EXPERIMENT-LOG.md](EXPERIMENT-LOG.md) | **Chronological record of ALL experiments** (what was tried, script, result). Check it before trying something, so as not to repeat it. |
+| [01-text-storage.md](01-text-storage.md) | Text/metadata compression: zstd, blocks, ordering, LM as a compressor. |
+| [02-search.md](02-search.md) | Search indexes: vectors (binary, PQ, RaBitQ, turbovec), BM25, real quality, embedding models. |
+| [03-tags-hierarchy.md](03-tags-hierarchy.md) | Idea of ~1000 tags + a graph of levels: compression, routing, hierarchy. |
+| [04-arxiv-research.md](04-arxiv-research.md) | Papers reviewed (priority to Google/Microsoft), what is useful and what is not. |
+| [05-architecture.md](05-architecture.md) | The system built in Rust: format, query, caches, robustness, sizes. |
+| [06-library.md](06-library.md) | Design of the library for backends (Python, RAM budget, compact block); pending approval. |
 | [07-ram.md](07-ram.md) | (English) RAM governance (P2): what `ram=` covers, the planner, disk reads, capped LM batch, admission control, measurements. |
 | [08-block.md](08-block.md) | (English) The compact block (P3): byte layout of `hn.hnzb`, parts, manifest, integrity levels, tools (`pack`, `verify-block`, `inspect`), sample measurements. |
 | [09-rerank.md](09-rerank.md) | (English) Reranking (P4): candidates, prefixes decoded by the shared LM service, BM25 over the prefix, cascade re-embedding, keyword mode with frequent words, determinism, quality. |
@@ -28,10 +28,10 @@ matters is daily use: **fast, accurate and compact**. Implementation in **Rust**
 |---|---|
 | `hnz/` | Rust engine (library + CLI `hnz.exe`) and Python package in `hnz/py` (`import hnz`) |
 | `scripts/` | Tools to build the archive: download, pipeline, models, LM training |
-| `experimentos/` | Experiment scripts (`bench_*.py`, `make_eval.py`) cited in the log |
-| `resultados/` | Experiment outputs (`results_*.txt`) |
+| `experiments/` | Experiment scripts (`bench_*.py`, `make_eval.py`) cited in the log |
+| `results/` | Experiment outputs (`results_*.txt`) |
 | `eval/` | Evaluation query sets (title → thread comments) |
-| `doc/` | This documentation; `doc/investigacion/` = prior research (Hermes) |
+| `doc/` | This documentation; `doc/research/` = prior research (Hermes) |
 | `data/`, `emb/`, `models/`, `out/` | Not in git: dataset, embeddings, models and built archive |
 
 ## Current status
@@ -52,7 +52,7 @@ matters is daily use: **fast, accurate and compact**. Implementation in **Rust**
 - [x] Whole dataset downloaded (`scripts/download_hn.py`: 239 months, 12.42 GB, SHA-256 checked).
 - [x] LM trained on HN on the iGPU: −9% text at the same cost (E29).
 - [x] **Compact profile** plan measured (E27-E29): **~5 GB** for all of HN (5.74 lossless, 5.24
-      with −1%) with ~4 s queries; documented in [05-arquitectura.md](05-arquitectura.md), not
+      with −1%) with ~4 s queries; documented in [05-architecture.md](05-architecture.md), not
       implemented for now.
 - [x] Python library `import hnz` (P1, E30) and **RAM governance** (P2, E31): everything hnz holds
       stays within `ram=`; what does not fit is read from disk with identical results; process
@@ -101,7 +101,7 @@ get worse: similar threads from other years count as misses (E26).
   byte by byte if interrupted (just run it again), pinned dataset version and SHA-256 of each file.
 - Embeddings cached in `emb/` (`*.npy`) so as not to recompute them.
 - Hugging Face downloads with `HF_HUB_DISABLE_XET=1`: the `hf_xet` downloader dies mid-download
-  on this machine (E26); `scripts/pipeline.py`, `scripts/prepare_models.py` and `experimentos/bench_rerank.py` set it.
+  on this machine (E26); `scripts/pipeline.py`, `scripts/prepare_models.py` and `experiments/bench_rerank.py` set it.
 - Machine: Intel Core Ultra 7 265H (16 cores, Arc 140T iGPU, NPU), 31 GB RAM, no NVIDIA GPU.
 - Rust: toolchain `stable-x86_64-pc-windows-gnu` (user install, without Visual Studio); the
   binary requires an x86-64-v3 CPU (AVX2).

@@ -1,6 +1,0 @@
-382,681 registros
-transformacion HTML: 0.9453 reversibles, texto 125.0 MB -> 118.6 MB (5.4s)
-orden-id                                     blk=16     raw= 334.2 B/reg ->  125.5 B/reg  x2.66  comp   32.2s  leer 1 bloque       11 us  | 49.3M ->  6.19 GB
-orden-HILO                                   blk=16     raw= 335.2 B/reg ->  123.9 B/reg  x2.71  comp   32.6s  leer 1 bloque       10 us  | 49.3M ->  6.11 GB
-orden-TEMA                                   blk=16     raw= 336.0 B/reg ->  124.5 B/reg  x2.70  comp   32.6s  leer 1 bloque        9 us  | 49.3M ->  6.14 GB
-orden-HILO agrupado por TEMA                 blk=16     raw= 335.4 B/reg ->  123.5 B/reg  x2.71  comp   33.3s  leer 1 bloque       10 us  | 49.3M ->  6.09 GB

@@ -1,0 +1,34 @@
+read 382681 items (0 deleted skipped) in 0.8s
+  zstd text 3.3s; HTML transformed: modern 98.2%, old 0.0%, raw 1.8%
+  BM25: 178736 terms, 8893154 postings (1.7s)
+segment seg-2024-01 (zstd) done: 382681 docs in 5.9s
+vectors: 364891/382681 docs with embedding, 768 bits (2.0s)
+OK: 382681 records identical to the original (3.4s)
+read 82729 items (2366 deleted skipped) in 0.2s
+  LM: 5000/82729 records (147 rec/s, ~9 min left)
+  LM: 10000/82729 records (144 rec/s, ~8 min left)
+  LM: 15000/82729 records (139 rec/s, ~8 min left)
+  LM: 20000/82729 records (136 rec/s, ~8 min left)
+  LM: 25000/82729 records (135 rec/s, ~7 min left)
+  LM: 30000/82729 records (135 rec/s, ~6 min left)
+  LM: 35000/82729 records (135 rec/s, ~6 min left)
+  LM: 40000/82729 records (134 rec/s, ~5 min left)
+  LM: 45000/82729 records (134 rec/s, ~5 min left)
+  LM: 50000/82729 records (134 rec/s, ~4 min left)
+  LM: 55000/82729 records (134 rec/s, ~3 min left)
+  LM: 60000/82729 records (134 rec/s, ~3 min left)
+  LM: 65000/82729 records (133 rec/s, ~2 min left)
+  LM: 70000/82729 records (134 rec/s, ~2 min left)
+  LM: 75000/82729 records (134 rec/s, ~1 min left)
+  LM: 80000/82729 records (133 rec/s, ~0 min left)
+  LM text 621.7s: 82721 records with LM, 8 with zstd fallback, 77.4 tokens/rec, 60.4 B/rec
+  BM25: 74374 terms, 1920121 postings (0.4s)
+segment seg-2010-06 (lm) done: 82729 docs in 622.5s
+vectors: 80362/82729 docs with embedding, 512 bits (0.2s)
+  verified 20000/82729 (31 rec/s)
+  verified 40000/82729 (31 rec/s)
+  verified 60000/82729 (30 rec/s)
+  verified 80000/82729 (30 rec/s)
+OK: 82729 records identical to the original (2768.3s)
+read 171636 items (5246 deleted skipped) in 0.6s
+(stopped here on purpose: 2015-06 was built with the final binary, see results_build_v4.txt)

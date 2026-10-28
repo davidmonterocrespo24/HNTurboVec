@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[derive(Parser)]
-#[command(name = "hnz", about = "Hacker News comprimido con búsqueda híbrida")]
+#[command(name = "hnz", about = "Hacker News, compressed, with hybrid search")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -25,46 +25,46 @@ enum ModeArg {
 
 #[derive(Clone, Copy, ValueEnum, PartialEq, Eq, Debug)]
 enum TierArg {
-    /// caliente/templado: zstd en bloques (lectura en µs)
+    /// hot/warm: zstd in blocks (reads in µs)
     Zstd,
-    /// frío: LM + codificación aritmética (máxima compresión)
+    /// cold: LM + arithmetic coding (maximum compression)
     Lm,
 }
 
 #[derive(clap::Args, Clone)]
 struct ModelArgs {
-    /// carpeta de modelos (EmbeddingGemma 2 IR + tokenizer, LM .hnzlm)
+    /// models folder (EmbeddingGemma 2 IR + tokenizer, LM .hnzlm)
     #[arg(long, env = "HNZ_MODELS", default_value = "models")]
     models: PathBuf,
-    /// carpeta con openvino_c.dll
+    /// folder with openvino_c.dll
     #[arg(long, env = "HNZ_OV_LIBS", default_value = ".venv/Lib/site-packages/openvino/libs")]
     ov_libs: PathBuf,
 }
 
 #[derive(clap::Args, Clone)]
 struct SearchArgs {
-    /// nº de resultados
+    /// number of results
     #[arg(short, long, default_value_t = 10)]
     k: usize,
     /// P4: rerank the candidates by their prefix (compact blocks with prompts v2 and an embedder
     /// of dynamic shapes)
     #[arg(long)]
     rerank: bool,
-    /// desde (2015 | 2015-06 | 2015-06-01), inclusive
+    /// from (2015 | 2015-06 | 2015-06-01), inclusive
     #[arg(long)]
     from: Option<String>,
-    /// hasta (2018 | 2018-12 | 2018-12-31), inclusive
+    /// to (2018 | 2018-12 | 2018-12-31), inclusive
     #[arg(long)]
     to: Option<String>,
     #[arg(long, value_enum, default_value = "hybrid")]
     mode: ModeArg,
-    /// tipos: story,comment,job,poll
+    /// types: story,comment,job,poll
     #[arg(long, value_delimiter = ',')]
     r#type: Vec<String>,
-    /// solo de este autor
+    /// only by this author
     #[arg(long)]
     by: Option<String>,
-    /// incluir ítems "dead"
+    /// include "dead" items
     #[arg(long)]
     dead: bool,
     /// BM25's weight in the fusion `vector + w·b/(b + c)` (default 0.15)
@@ -73,7 +73,7 @@ struct SearchArgs {
     /// BM25's saturation in the fusion (default 20 in stage 1, 40 when reranked)
     #[arg(long)]
     c_bm25: Option<f32>,
-    /// texto completo también para el nivel LM (por defecto: fragmento de 64 tokens)
+    /// full text for the LM tier too (default: a 64-token snippet)
     #[arg(long)]
     full: bool,
     /// P4: answer within this many milliseconds from the start of the search; a reranking not
@@ -90,7 +90,7 @@ struct SearchArgs {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Construye un segmento (meta + texto + BM25) a partir de Parquet mensuales
+    /// Builds a segment (meta + text + BM25) from monthly Parquet files
     Build {
         #[arg(long)]
         out: PathBuf,
@@ -100,25 +100,25 @@ enum Cmd {
         block: usize,
         #[arg(long, default_value_t = 19)]
         level: i32,
-        /// modelo LM para --tier lm
+        /// LM model for --tier lm
         #[arg(long, default_value = "models/lm-pythia-70m.hnzlm")]
         lm: PathBuf,
         parquet: Vec<PathBuf>,
     },
-    /// Cambia el nivel de un segmento (p.ej. zstd -> lm al envejecer) usando sus propios textos.
-    /// Reconstruye en una carpeta temporal, verifica y sustituye; conserva los vectores.
+    /// Changes a segment's tier (e.g. zstd -> lm as it ages) using its own texts.
+    /// Rebuilds in a temporary folder, verifies, then swaps it in; keeps the vectors.
     Retier {
         #[arg(long)]
         seg: PathBuf,
         #[arg(long, value_enum)]
         tier: TierArg,
-        /// verificar TODOS los documentos del segmento nuevo (por defecto, una muestra de 2.000)
+        /// verify ALL documents of the new segment (default: a sample of 2,000)
         #[arg(long)]
         verify_all: bool,
-        /// borrar el original al terminar (solo con --verify-all; si no, queda como <seg>.old)
+        /// delete the original when done (only with --verify-all; otherwise it stays as <seg>.old)
         #[arg(long)]
         delete_old: bool,
-        /// bits de los vectores del segmento nuevo (por defecto 512 al enfriar a lm, si no los mismos)
+        /// vector bits of the new segment (default: 512 when cooling to lm, otherwise unchanged)
         #[arg(long)]
         bits: Option<usize>,
         #[arg(long, default_value_t = 16)]
@@ -134,7 +134,7 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
         /// download registry to copy each file's SHA-256 from
-        #[arg(long, default_value = "data/_descargas.json")]
+        #[arg(long, default_value = "data/_downloads.json")]
         registry: PathBuf,
         parquet: Vec<PathBuf>,
     },
@@ -209,34 +209,34 @@ enum Cmd {
         max_df_ratio: f64,
         parquet: Vec<PathBuf>,
     },
-    /// Reconstruye el índice BM25 de un segmento con otras opciones (para medir tamaño/calidad)
+    /// Rebuilds a segment's BM25 index with other options (to measure size/quality)
     Rebm25 {
         #[arg(long)]
         seg: PathBuf,
-        /// postings booleanos (sin frecuencia del término)
+        /// boolean postings (no term frequency)
         #[arg(long)]
         no_tf: bool,
-        /// no indexar términos presentes en más de esta fracción de documentos
+        /// do not index terms found in more than this fraction of documents
         #[arg(long, default_value_t = 1.0)]
         max_df: f32,
         #[arg(long, env = "HNZ_MODELS", default_value = "models")]
         models: PathBuf,
     },
-    /// Añade el índice vectorial (binario) a un segmento a partir de embeddings
+    /// Adds the (binary) vector index to a segment from embeddings
     Index {
         #[arg(long)]
         seg: PathBuf,
-        /// embeddings float16 (N x 768) de embed_month.py
+        /// float16 embeddings (N x 768) from embed_month.py
         #[arg(long)]
         emb: PathBuf,
-        /// ids (uint32) correspondientes a los embeddings
+        /// ids (uint32) matching the embeddings
         #[arg(long)]
         ids: PathBuf,
-        /// bits por vector (MRL: 768, 512, 256)
+        /// bits per vector (MRL: 768, 512, 256)
         #[arg(long, default_value_t = 768)]
         bits: usize,
     },
-    /// Busca en todos los segmentos de una carpeta
+    /// Searches all segments of a folder
     Search {
         #[arg(long, default_value = "out")]
         root: PathBuf,
@@ -244,7 +244,7 @@ enum Cmd {
         s: SearchArgs,
         #[command(flatten)]
         m: ModelArgs,
-        /// salida JSON
+        /// JSON output
         #[arg(long)]
         json: bool,
         query: Vec<String>,
@@ -272,7 +272,7 @@ enum Cmd {
         #[command(flatten)]
         m: ModelArgs,
     },
-    /// Evalúa la calidad (P@k, MRR) con consultas JSONL {"q":..., "story": id} (relevantes = su hilo)
+    /// Evaluates quality (P@k, MRR) with JSONL queries {"q":..., "story": id} (relevant = its thread)
     Eval {
         #[arg(long, default_value = "out")]
         root: PathBuf,
@@ -300,16 +300,16 @@ enum Cmd {
         #[arg(long)]
         within_month: bool,
     },
-    /// Prueba del nivel frío sobre un segmento zstd: comprime y descomprime (en lote) una muestra
-    /// Exporta a JSONL el texto de cada ítem tal como lo ve el LM (para entrenar/evaluar un LM de HN)
+    /// Exports each item's text to JSONL as the LM sees it (to train or evaluate an HN LM)
     Lmdump {
         #[arg(long)]
         out: PathBuf,
-        /// tomar 1 de cada N ítems (muestreo uniforme por id)
+        /// take 1 of every N items (uniform sampling by id)
         #[arg(long, default_value_t = 1)]
         every: usize,
         parquet: Vec<PathBuf>,
     },
+    /// Tests the cold tier on a zstd segment: compresses and decompresses (in batches) a sample
     Lmtest {
         #[arg(long)]
         seg: PathBuf,
@@ -320,7 +320,7 @@ enum Cmd {
         #[arg(long, default_value_t = 10)]
         batch: usize,
     },
-    /// Muestra un ítem por id de HN
+    /// Shows an item by its HN id
     Get {
         #[arg(long, default_value = "out")]
         root: PathBuf,
@@ -328,7 +328,7 @@ enum Cmd {
         m: ModelArgs,
         id: u32,
     },
-    /// Comprueba que TODOS los registros se recuperan idénticos al Parquet original
+    /// Checks that ALL records come back identical to the original Parquet
     Verify {
         #[arg(long)]
         seg: PathBuf,
@@ -336,14 +336,14 @@ enum Cmd {
         models: PathBuf,
         parquet: Vec<PathBuf>,
     },
-    /// Tamaño por componente y bytes/ítem (de un segmento o de toda la carpeta)
+    /// Size per component and bytes/item (of one segment or the whole folder)
     Stats {
         #[arg(long)]
         seg: Option<PathBuf>,
         #[arg(long, default_value = "out")]
         root: PathBuf,
     },
-    /// Latencia de lectura aleatoria (zstd: registros sueltos; LM: lotes de 10)
+    /// Random read latency (zstd: single records; LM: batches of 10)
     Bench {
         #[arg(long)]
         seg: PathBuf,
@@ -356,10 +356,10 @@ enum Cmd {
 
 fn make_query(text: &str, s: &SearchArgs) -> Result<Query> {
     if s.c_bm25.is_some_and(|c| !(c.is_finite() && c > 0.0)) || s.w_bm25.is_some_and(|w| !(w.is_finite() && w >= 0.0)) {
-        bail!("--c-bm25 debe ser > 0 y --w-bm25 >= 0 (son {:?} y {:?})", s.c_bm25, s.w_bm25);
+        bail!("--c-bm25 must be > 0 and --w-bm25 >= 0 (got {:?} and {:?})", s.c_bm25, s.w_bm25);
     }
     if s.deadline_ms.is_some_and(|d| !(d.is_finite() && d > 0.0 && d <= 3.6e6)) {
-        bail!("--deadline-ms debe estar entre 0 y 3.600.000 (es {:?})", s.deadline_ms);
+        bail!("--deadline-ms must be between 0 and 3,600,000 (got {:?})", s.deadline_ms);
     }
     let types = s
         .r#type
@@ -370,18 +370,18 @@ fn make_query(text: &str, s: &SearchArgs) -> Result<Query> {
             "poll" => Ok(3),
             "pollopt" => Ok(4),
             "job" => Ok(5),
-            o => bail!("tipo desconocido: {o}"),
+            o => bail!("unknown type: {o} (use story, comment, poll, pollopt or job)"),
         })
         .collect::<Result<Vec<u8>>>()?;
     Ok(Query {
         text: text.to_string(),
         k: s.k,
         from: match &s.from {
-            Some(f) => Some(dates::parse(f, false).context("fecha --from inválida")?),
+            Some(f) => Some(dates::parse(f, false).context("invalid --from date")?),
             None => None,
         },
         to: match &s.to {
-            Some(t) => Some(dates::parse(t, true).context("fecha --to inválida")?),
+            Some(t) => Some(dates::parse(t, true).context("invalid --to date")?),
             None => None,
         },
         mode: match s.mode {
@@ -449,7 +449,7 @@ fn cmd_lmtest(seg: &Path, lm: &Path, n: usize, batch: usize) -> Result<()> {
     let s = Segment::open(seg)?;
     let t0 = Instant::now();
     let codec = LmCodec::load(lm)?;
-    eprintln!("modelo {} cargado en {:.0} ms", codec.model.id, t0.elapsed().as_secs_f64() * 1e3);
+    eprintln!("model {} loaded in {:.0} ms", codec.model.id, t0.elapsed().as_secs_f64() * 1e3);
     let docs = rand_docs(n, s.man.n_docs, 0x2545F4914F6CDD1D);
     let recs: Vec<hnz::textstore::TextRec> = docs.iter().map(|&d| s.zstd_text(d)).collect::<Result<_>>()?;
     let raw: usize = recs.iter().map(|r| r.title.len() + r.url.len() + r.text.len() + 2).sum();
@@ -458,17 +458,17 @@ fn cmd_lmtest(seg: &Path, lm: &Path, n: usize, batch: usize) -> Result<()> {
     let te = t1.elapsed().as_secs_f64();
     {
         let p: Vec<f64> = hnz::lm::model::PROF.iter().map(|x| x.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e9).collect();
-        let hilos = rayon::current_num_threads() as f64;
+        let threads = rayon::current_num_threads() as f64;
         eprintln!(
-            "  [perfil codificación, s de CPU] matmul capas {:.1}, atención {:.1}, cabeza {:.1}, resto (softmax+codificador+tokenizar) {:.1} de {:.1}",
-            p[0], p[1], p[2], (te * hilos - p[0] - p[1] - p[2]).max(0.0), te * hilos
+            "  [encoding profile, CPU s] layer matmul {:.1}, attention {:.1}, head {:.1}, rest (softmax+coder+tokenize) {:.1} of {:.1}",
+            p[0], p[1], p[2], (te * threads - p[0] - p[1] - p[2]).max(0.0), te * threads
         );
     }
     let bytes: usize = enc.iter().map(|e| e.0.len()).sum();
     let toks: u64 = enc.iter().map(|e| e.1).sum();
     let nfb = enc.iter().filter(|e| (e.0[0] >> 3) & 1 == 1).count();
     println!(
-        "codificar: {} registros, {:.1} B/reg crudo -> {:.1} B/reg ({:.3} bits/byte), {:.1} tokens/reg, {} con zstd de reserva | {:.0} reg/s ({:.0} tok/s) con {} hilos",
+        "encode: {} records, {:.1} B/rec raw -> {:.1} B/rec ({:.3} bits/byte), {:.1} tokens/rec, {} with fallback zstd | {:.0} rec/s ({:.0} tok/s) with {} threads",
         n,
         raw as f64 / n as f64,
         bytes as f64 / n as f64,
@@ -490,7 +490,7 @@ fn cmd_lmtest(seg: &Path, lm: &Path, n: usize, batch: usize) -> Result<()> {
         for (j, (o, _)) in out.iter().enumerate() {
             if *o != recs[bi * batch + j] {
                 if bad < 3 {
-                    eprintln!("DIFERENCIA doc {}:\n  orig {:?}\n  dec  {:?}", docs[bi * batch + j], recs[bi * batch + j], o);
+                    eprintln!("MISMATCH doc {}:\n  orig {:?}\n  dec  {:?}", docs[bi * batch + j], recs[bi * batch + j], o);
                 }
                 bad += 1;
             }
@@ -498,7 +498,7 @@ fn cmd_lmtest(seg: &Path, lm: &Path, n: usize, batch: usize) -> Result<()> {
     }
     times.sort_by(|a, b| a.total_cmp(b));
     println!(
-        "decodificar en lotes de {}: mediana {:.0} ms/lote, p90 {:.0} ms ({:.1} s total) | errores: {}",
+        "decode in batches of {}: median {:.0} ms/batch, p90 {:.0} ms ({:.1} s total) | errors: {}",
         batch,
         times[times.len() / 2],
         times[times.len() * 9 / 10],
@@ -506,16 +506,16 @@ fn cmd_lmtest(seg: &Path, lm: &Path, n: usize, batch: usize) -> Result<()> {
         bad
     );
     if bad > 0 {
-        bail!("{bad} registros no coinciden");
+        bail!("{bad} records do not match");
     }
     Ok(())
 }
 
-/// Bits de los vectores: múltiplo de 64 (la etapa 1 compara palabras de 64 bits; MRL de
-/// EmbeddingGemma 2: 768/512/256/128).
+/// Vector bits: a multiple of 64 (stage 1 compares 64-bit words; EmbeddingGemma 2's MRL:
+/// 768/512/256/128).
 fn check_bits(bits: usize) -> Result<()> {
     if bits == 0 || bits % 64 != 0 {
-        bail!("--bits debe ser múltiplo de 64 (p.ej. 768, 512, 256), no {bits}");
+        bail!("--bits must be a multiple of 64 (e.g. 768, 512, 256), not {bits}");
     }
     Ok(())
 }
@@ -525,11 +525,11 @@ fn check_bits(bits: usize) -> Result<()> {
 fn rerank_embedder(eng: &Engine, m: &ModelArgs) -> Result<hnz::embed::Embedder> {
     let ok = eng.block.as_ref().is_some_and(|b| b.manifest()["vec"]["prompt_version"].as_u64() == Some(2));
     if !ok {
-        bail!("rerank no disponible: hace falta un bloque compacto con prompts v2");
+        bail!("rerank not available: it needs a compact block with v2 prompts");
     }
     let mut e = eng.embedder(&m.models, &m.ov_libs)?;
     if !e.can_embed_docs() {
-        bail!("rerank no disponible: el embedder del bloque tiene formas fijas");
+        bail!("rerank not available: the block's embedder has fixed shapes (it needs dynamic shapes)");
     }
     hnz::embed::check_chain(&mut e, &eng.embed_checks()?)?;
     Ok(e)
@@ -552,26 +552,26 @@ fn cmd_eval_rerank(root: &Path, file: &Path, k: usize, m: &ModelArgs, emb: Optio
             let bases: Vec<PathBuf> = months.context("--months")?.split(',').map(|mm| PathBuf::from(pat.replace("{m}", mm.trim()))).collect();
             Box::new(OracleEmbed::open(&bases)?)
         }
-        _ => bail!("--emb ov | oracle:<base con {{m}}>"),
+        _ => bail!("--emb must be ov or oracle:<base with {{m}}>"),
     };
     let (from, to) = if within_month { eval_month(file)? } else { (None, None) };
     let base = Query { k: k + 1, from, to, ..Default::default() };
     let d = RerankCfg::default();
     let mut configs: Vec<(String, Query, RerankCfg)> = vec![
-        ("híbrida, kv 80, cascada 50 (P4)".into(), base.clone(), d.clone()),
-        ("híbrida, todos re-embebidos (E30c)".into(), base.clone(), RerankCfg { embed_top: None, ..d.clone() }),
-        ("híbrida, cascada 30".into(), base.clone(), RerankCfg { embed_top: Some(30), ..d.clone() }),
+        ("hybrid, kv 80, cascade 50 (P4)".into(), base.clone(), d.clone()),
+        ("hybrid, all re-embedded (E30c)".into(), base.clone(), RerankCfg { embed_top: None, ..d.clone() }),
+        ("hybrid, cascade 30".into(), base.clone(), RerankCfg { embed_top: Some(30), ..d.clone() }),
         // more or fewer vector candidates (E33e step 1b): more reach deeper, fewer decode less
-        ("híbrida, kv 100, cascada 50".into(), base.clone(), RerankCfg { kv: 100, ..d.clone() }),
-        ("híbrida, kv 60, cascada 40".into(), base.clone(), RerankCfg::with_depth(60)),
-        ("híbrida, solo R0 (sin re-embeber)".into(), base.clone(), RerankCfg { embed_top: Some(0), ..d.clone() }),
-        ("vector, re-embebidos".into(), Query { mode: Mode::Vector, ..base.clone() }, d.clone()),
-        ("palabras (frecuentes entre candidatos)".into(), Query { mode: Mode::Keyword, ..base.clone() }, d.clone()),
+        ("hybrid, kv 100, cascade 50".into(), base.clone(), RerankCfg { kv: 100, ..d.clone() }),
+        ("hybrid, kv 60, cascade 40".into(), base.clone(), RerankCfg::with_depth(60)),
+        ("hybrid, R0 only (no re-embedding)".into(), base.clone(), RerankCfg { embed_top: Some(0), ..d.clone() }),
+        ("vector, re-embedded".into(), Query { mode: Mode::Vector, ..base.clone() }, d.clone()),
+        ("keyword (frequent among candidates)".into(), Query { mode: Mode::Keyword, ..base.clone() }, d.clone()),
     ];
     if quick {
-        configs.retain(|c| c.0.contains("(P4)") || c.0.starts_with("palabras"));
+        configs.retain(|c| c.0.contains("(P4)") || c.0.starts_with("keyword"));
     }
-    println!("{:<40} {:>7} {:>7} {:>9} {:>8} {:>8}", "configuración", "P@k", "MRR", "ms/cons.", "decod.", "embeb.");
+    println!("{:<40} {:>7} {:>7} {:>9} {:>8} {:>8}", "setting", "P@k", "MRR", "ms/query", "decoded", "embedded");
     for (name, tmpl, cfg) in &configs {
         let t = Instant::now();
         let (mut p, mut mrr, mut dec, mut emb_n) = (0f64, 0f64, 0usize, 0usize);
@@ -603,7 +603,7 @@ fn eval_month(file: &Path) -> Result<(Option<i64>, Option<i64>)> {
     let b = name.as_bytes();
     let at = (0..b.len().saturating_sub(6))
         .find(|&i| b[i..i + 4].iter().all(u8::is_ascii_digit) && b[i + 4] == b'-' && b[i + 5..i + 7].iter().all(u8::is_ascii_digit))
-        .with_context(|| format!("--within-month: no hay un mes AAAA-MM en el nombre {}", file.display()))?;
+        .with_context(|| format!("--within-month: no YYYY-MM month in the file name {}", file.display()))?;
     let (y, mo): (i64, u32) = (name[at..at + 4].parse()?, name[at + 5..at + 7].parse()?);
     let next = if mo == 12 { (y + 1, 1) } else { (y, mo + 1) };
     let day = |y, m| hnz::dates::days_from_civil(y, m, 1) * 86_400;
@@ -614,7 +614,7 @@ fn eval_month(file: &Path) -> Result<(Option<i64>, Option<i64>)> {
 fn read_eval(file: &Path) -> Result<Vec<(String, u32)>> {
     let raw = std::fs::read(file)?;
     if raw.starts_with(&[0xFF, 0xFE]) || raw.starts_with(&[0xFE, 0xFF]) {
-        bail!("{} está en UTF-16: genérelo con experimentos/make_eval.py --out (UTF-8)", file.display());
+        bail!("{} is UTF-16: generate it with experiments/make_eval.py --out (UTF-8)", file.display());
     }
     let text = String::from_utf8(raw)?;
     text.trim_start_matches('\u{feff}')
@@ -653,9 +653,9 @@ fn cmd_eval(root: &Path, file: &Path, k: usize, m: &ModelArgs) -> Result<()> {
     let eng = Engine::open(root, &m.models)?;
     let mut emb = eng.embedder(&m.models, &m.ov_libs)?;
     let raw = std::fs::read(file)?;
-    // tolerar BOM UTF-8 (PowerShell) y rechazar UTF-16 con un mensaje claro
+    // accept a UTF-8 BOM (PowerShell) and reject UTF-16 with a clear message
     if raw.starts_with(&[0xFF, 0xFE]) || raw.starts_with(&[0xFE, 0xFF]) {
-        bail!("{} está en UTF-16: genérelo con experimentos/make_eval.py --out (UTF-8)", file.display());
+        bail!("{} is UTF-16: generate it with experiments/make_eval.py --out (UTF-8)", file.display());
     }
     let text = String::from_utf8(raw)?;
     let qs: Vec<(String, u32)> = text
@@ -669,18 +669,18 @@ fn cmd_eval(root: &Path, file: &Path, k: usize, m: &ModelArgs) -> Result<()> {
         .collect();
     let t0 = Instant::now();
     let vecs: Vec<Vec<f32>> = qs.iter().map(|q| emb.embed_query(&q.0)).collect::<Result<_>>()?;
-    eprintln!("{} consultas embebidas en {:.1} ms/consulta", qs.len(), t0.elapsed().as_secs_f64() * 1e3 / qs.len() as f64);
+    eprintln!("{} queries embedded at {:.1} ms/query", qs.len(), t0.elapsed().as_secs_f64() * 1e3 / qs.len() as f64);
     let mut configs: Vec<(String, Query)> = Vec::new();
     let base = Query { k: k + 1, ..Default::default() };
-    configs.push(("vector (2 etapas)".into(), Query { mode: Mode::Vector, ..base.clone() }));
-    configs.push(("vector exacto (asimétrico total)".into(), Query { mode: Mode::Vector, vec_cand: Some(usize::MAX / 2), ..base.clone() }));
-    configs.push(("palabras (BM25)".into(), Query { mode: Mode::Keyword, ..base.clone() }));
+    configs.push(("vector (2 stages)".into(), Query { mode: Mode::Vector, ..base.clone() }));
+    configs.push(("exact vector (full asymmetric)".into(), Query { mode: Mode::Vector, vec_cand: Some(usize::MAX / 2), ..base.clone() }));
+    configs.push(("keyword (BM25)".into(), Query { mode: Mode::Keyword, ..base.clone() }));
     for &w in &[0.05f32, 0.1, 0.15, 0.25, 0.4] {
         for &c in &[5.0f32, 10.0, 20.0] {
-            configs.push((format!("híbrida w={w} c={c}"), Query { mode: Mode::Hybrid, w_bm25: w, c_bm25: c, ..base.clone() }));
+            configs.push((format!("hybrid w={w} c={c}"), Query { mode: Mode::Hybrid, w_bm25: w, c_bm25: c, ..base.clone() }));
         }
     }
-    println!("{:<36} {:>7} {:>7} {:>9}", "configuración", "P@k", "MRR", "ms/cons.");
+    println!("{:<36} {:>7} {:>7} {:>9}", "setting", "P@k", "MRR", "ms/query");
     for (name, tmpl) in &configs {
         let t = Instant::now();
         let (mut p, mut mrr) = (0f64, 0f64);
@@ -693,7 +693,7 @@ fn cmd_eval(root: &Path, file: &Path, k: usize, m: &ModelArgs) -> Result<()> {
             for h in &hits {
                 let row = eng.segs[h.seg].s.meta.row(h.doc as usize);
                 if row.id == *story {
-                    continue; // la propia story no cuenta
+                    continue; // the story itself does not count
                 }
                 n += 1;
                 if n > k {
@@ -722,7 +722,7 @@ fn print_results(res: &[hnz::engine::ResultItem]) {
         let head = if !r.title.is_empty() {
             r.title.clone()
         } else {
-            format!("re: {}", r.story_title.clone().unwrap_or_else(|| "(hilo)".into()))
+            format!("re: {}", r.story_title.clone().unwrap_or_else(|| "(thread)".into()))
         };
         println!(
             "\n#{} [{} | {} | {} | {} pts | {}] score {:.3} (v {:.3}, bm25 {:.2})",
@@ -758,11 +758,11 @@ fn parse_size(s: &str) -> Result<u64> {
         "M" => 2,
         "G" => 3,
         "T" => 4,
-        _ => bail!("tamaño inválido: {s:?} (p. ej. 2GB, 512MB, 2GiB)"),
+        _ => bail!("invalid size: {s:?} (e.g. 2GB, 512MB, 2GiB)"),
     };
-    let v: f64 = num.parse().with_context(|| format!("tamaño inválido: {s:?} (p. ej. 2GB, 512MB, 2GiB)"))?;
+    let v: f64 = num.parse().with_context(|| format!("invalid size: {s:?} (e.g. 2GB, 512MB, 2GiB)"))?;
     if !(v.is_finite() && v > 0.0) {
-        bail!("tamaño inválido: {s:?}");
+        bail!("invalid size: {s:?} (it must be a positive number, e.g. 2GB)");
     }
     Ok((v * base.powi(exp)) as u64)
 }
@@ -775,7 +775,7 @@ fn main() -> Result<()> {
         Cmd::Build { out, tier, block, level, lm, parquet } => {
             let t0 = Instant::now();
             let (items, deleted) = segment::load_items(&parquet)?;
-            eprintln!("leídos {} ítems (incluidas {} filas deleted, que se guardan como metadatos) en {:.1}s", items.len(), deleted, t0.elapsed().as_secs_f64());
+            eprintln!("read {} items (including {} deleted rows, kept as metadata) in {:.1}s", items.len(), deleted, t0.elapsed().as_secs_f64());
             let name = out.file_name().unwrap().to_string_lossy().to_string();
             let codec;
             let t = match tier {
@@ -786,25 +786,25 @@ fn main() -> Result<()> {
                 }
             };
             let m = segment::build(&items, deleted, &out, &name, t)?;
-            eprintln!("segmento {} ({}) listo: {} docs en {:.1}s", m.name, m.text_tier, m.n_docs, t0.elapsed().as_secs_f64());
+            eprintln!("segment {} ({}) ready: {} docs in {:.1}s", m.name, m.text_tier, m.n_docs, t0.elapsed().as_secs_f64());
         }
         Cmd::Retier { seg, tier, block, level, lm, verify_all, delete_old, bits } => {
             if let Some(b) = bits {
                 check_bits(b)?;
             }
             let t0 = Instant::now();
-            // ruta canónica con nombre de carpeta (p.ej. "--seg ." no sirve: no tiene nombre)
+            // canonical path with a folder name ("--seg ." does not work: it has no name)
             let seg = std::fs::canonicalize(&seg).with_context(|| format!("{}", seg.display()))?;
-            let name = seg.file_name().context("--seg debe ser la carpeta de un segmento")?.to_string_lossy().to_string();
+            let name = seg.file_name().context("--seg must be a segment folder")?.to_string_lossy().to_string();
             if let Ok(cwd) = std::env::current_dir().and_then(std::fs::canonicalize) {
                 if cwd.starts_with(&seg) {
-                    bail!("el directorio actual está dentro del segmento ({}): ejecute retier desde otra carpeta (Windows no puede renombrarlo)", cwd.display());
+                    bail!("the current directory is inside the segment ({}): run retier from another folder (Windows cannot rename it)", cwd.display());
                 }
             }
             let tmp = seg.with_file_name(format!("{name}.retier"));
             let old = seg.with_file_name(format!("{name}.old"));
             if old.exists() {
-                bail!("ya existe {} de un retier anterior: revíselo y bórrelo antes de continuar", old.display());
+                bail!("{} already exists from an earlier retier: check it and delete it before you continue", old.display());
             }
             let s = Segment::open(&seg)?;
             let models = lm.parent().unwrap_or(Path::new(".")).to_path_buf();
@@ -812,7 +812,7 @@ fn main() -> Result<()> {
                 TextSource::Lm(_) => Some(LmCodec::load(&models.join(s.man.lm_model.as_ref().context("lm_model")?))?),
                 _ => None,
             };
-            // reconstruir todos los ítems desde el propio segmento
+            // rebuild every item from the segment itself
             let mut items = Vec::with_capacity(s.man.n_docs);
             match &s.text {
                 TextSource::Zstd(ts) => {
@@ -833,14 +833,14 @@ fn main() -> Result<()> {
                         Ok(())
                     })?;
                     for (d, t) in texts.into_iter().enumerate() {
-                        items.push(segment::join(&s.meta.row(d), t.context("registro sin decodificar")?, &s.meta.authors));
+                        items.push(segment::join(&s.meta.row(d), t.context("record not decoded")?, &s.meta.authors));
                     }
                 }
             }
             if items.len() != s.man.n_docs {
-                bail!("se leyeron {} ítems de {} esperados: se conserva el segmento", items.len(), s.man.n_docs);
+                bail!("read {} items, expected {}: the segment is kept", items.len(), s.man.n_docs);
             }
-            eprintln!("leídos {} ítems del segmento ({:.1}s)", items.len(), t0.elapsed().as_secs_f64());
+            eprintln!("read {} items from the segment ({:.1}s)", items.len(), t0.elapsed().as_secs_f64());
             let codec;
             let t = match tier {
                 TierArg::Zstd => Tier::Zstd { block, level },
@@ -849,11 +849,11 @@ fn main() -> Result<()> {
                     Tier::Lm { codec: &codec, model_file: lm.file_name().unwrap().to_string_lossy().to_string() }
                 }
             };
-            // construir en <seg>.retier y verificar; si algo falla, se borra y el original queda intacto
+            // build in <seg>.retier and verify; if anything fails, it is deleted and the original stays intact
             let result = (|| -> Result<segment::Manifest> {
                 let mut m = segment::build(&items, s.man.deleted_skipped, &tmp, &s.man.name, t)?;
                 if s.man.vec_bits > 0 {
-                    // MRL: los primeros `bits` signos son el vector truncado -> se recortan los códigos
+                    // MRL: the first `bits` signs are the truncated vector -> the codes are cut
                     let new_bits = bits.unwrap_or(if tier == TierArg::Lm { 512 } else { s.man.vec_bits }).min(s.man.vec_bits);
                     let (ob, nb) = (s.man.vec_bits / 8, new_bits / 8);
                     let codes = std::fs::read(seg.join("vec.bin"))?;
@@ -863,7 +863,7 @@ fn main() -> Result<()> {
                     m.vec_bits = new_bits;
                     segment::write_manifest(&tmp, &m)?;
                 }
-                // conservar el registro de meses de pipeline.py, con el nivel nuevo
+                // keep the month record of pipeline.py, with the new tier
                 if let Ok(txt) = std::fs::read_to_string(seg.join("sources.json")) {
                     if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&txt) {
                         v["tier"] = serde_json::Value::String(m.text_tier.clone());
@@ -876,7 +876,7 @@ fn main() -> Result<()> {
                     TextSource::Zstd(_) => {
                         for &d in &docs {
                             if ns.item(d, None)? != items[d] {
-                                bail!("verificación fallida en el doc {d}");
+                                bail!("verification failed at doc {d}");
                             }
                         }
                     }
@@ -893,11 +893,11 @@ fn main() -> Result<()> {
                             Ok(())
                         })?;
                         if let Some(d) = bad {
-                            bail!("verificación fallida en el doc {d}");
+                            bail!("verification failed at doc {d}");
                         }
                     }
                 }
-                eprintln!("verificados {} de {} documentos ({})", docs.len(), items.len(), if verify_all { "todos" } else { "muestra" });
+                eprintln!("verified {} of {} documents ({})", docs.len(), items.len(), if verify_all { "all" } else { "sample" });
                 Ok(m)
             })();
             let m = match result {
@@ -905,26 +905,26 @@ fn main() -> Result<()> {
                 Err(e) => {
                     let _ = std::fs::remove_dir_all(&tmp);
                     let _ = std::fs::remove_dir_all(seg.with_file_name(format!("{name}.retier.building")));
-                    return Err(e.context("retier abortado; el segmento original no se ha modificado"));
+                    return Err(e.context("retier aborted; the original segment was not changed"));
                 }
             };
             drop(s);
             std::fs::rename(&seg, &old)?;
             if let Err(e) = std::fs::rename(&tmp, &seg) {
                 let _ = std::fs::rename(&old, &seg);
-                return Err(anyhow::anyhow!(e).context("no se pudo sustituir el segmento; se ha restaurado el original"));
+                return Err(anyhow::anyhow!(e).context("could not swap in the new segment; the original was restored"));
             }
             if delete_old && verify_all {
                 std::fs::remove_dir_all(&old)?;
-                eprintln!("segmento {} ahora en nivel {} ({:.1}s); original borrado", m.name, m.text_tier, t0.elapsed().as_secs_f64());
+                eprintln!("segment {} now in tier {} ({:.1}s); original deleted", m.name, m.text_tier, t0.elapsed().as_secs_f64());
             } else {
                 eprintln!(
-                    "segmento {} ahora en nivel {} ({:.1}s); el original queda en {} (el motor lo ignora; bórrelo cuando quiera{})",
+                    "segment {} now in tier {} ({:.1}s); the original stays in {} (the engine ignores it; delete it when you like{})",
                     m.name,
                     m.text_tier,
                     t0.elapsed().as_secs_f64(),
                     old.display(),
-                    if delete_old { ": --delete-old solo actúa con --verify-all" } else { "" }
+                    if delete_old { ": --delete-old only acts with --verify-all" } else { "" }
                 );
             }
         }
@@ -1001,7 +1001,7 @@ fn main() -> Result<()> {
             let info = b.write_opts(&seg, !no_tf, max_df)?;
             let sz: u64 = ["bm25.fst", "bm25.post", "bm25.norms"].iter().map(|f| std::fs::metadata(seg.join(f)).map(|m| m.len()).unwrap_or(0)).sum();
             eprintln!(
-                "BM25 (tf={}, max_df={}): {} términos, {} postings, {:.1} B/doc ({:.1}s)",
+                "BM25 (tf={}, max_df={}): {} terms, {} postings, {:.1} B/doc ({:.1}s)",
                 !no_tf,
                 max_df,
                 info.n_terms,
@@ -1020,7 +1020,7 @@ fn main() -> Result<()> {
             let mut man = s.man.clone();
             man.vec_bits = bits;
             segment::write_manifest(&seg, &man)?;
-            eprintln!("vectores: {matched}/{} docs con embedding, {bits} bits ({:.1}s)", doc_ids.len(), t1.elapsed().as_secs_f64());
+            eprintln!("vectors: {matched}/{} docs with an embedding, {bits} bits ({:.1}s)", doc_ids.len(), t1.elapsed().as_secs_f64());
         }
         Cmd::Search { root, s, m, json, query } => {
             let text = query.join(" ");
@@ -1053,9 +1053,9 @@ fn main() -> Result<()> {
                         ..d
                     };
                     let o = hnz::rerank::search(&eng, &q, v, &cfg, &std::sync::Mutex::new(e), deadline, &|_| true)?;
-                    eprintln!("[reordenado: {} candidatos, {} prefijos decodificados ({} tokens), {} re-embebidos; etapa 1 {:.0} ms, decodificación {:.0} ms, embebido y fusión {:.0} ms]{}",
+                    eprintln!("[reranked: {} candidates, {} prefixes decoded ({} tokens), {} re-embedded; stage 1 {:.0} ms, decoding {:.0} ms, embedding and fusion {:.0} ms]{}",
                         o.report.candidates, o.report.decoded, o.report.tokens, o.report.embedded, o.report.ms_stage1, o.report.ms_decode, o.report.ms_embed,
-                        o.warning.map(|w| format!(" aviso: {w}")).unwrap_or_default());
+                        o.warning.map(|w| format!(" warning: {w}")).unwrap_or_default());
                     (o.hits, o.prefixes)
                 }
                 _ => (eng.search(&q, qv.as_deref())?, Default::default()),
@@ -1071,7 +1071,7 @@ fn main() -> Result<()> {
             }
             let n_lm = res.iter().filter(|r| r.tier == "lm").count();
             eprintln!(
-                "\n[{} docs en {} segmentos | abrir {:.0} ms, cargar modelos {:.0} ms | embedding {:.1} ms, búsqueda {:.1} ms, recuperar+descomprimir {:.1} ms ({} del nivel LM{})]",
+                "\n[{} docs in {} segments | open {:.0} ms, load models {:.0} ms | embedding {:.1} ms, search {:.1} ms, fetch+decompress {:.1} ms ({} from the LM tier{})]",
                 eng.total_docs,
                 eng.segs.len(),
                 t_open.as_secs_f64() * 1e3,
@@ -1080,7 +1080,7 @@ fn main() -> Result<()> {
                 t_search.as_secs_f64() * 1e3,
                 t_fetch.as_secs_f64() * 1e3,
                 n_lm,
-                if s.full { ", completos" } else { ", fragmentos" }
+                if s.full { ", full" } else { ", snippets" }
             );
         }
         Cmd::Serve { root, port, host, ram, threads, timeout, m } => {
@@ -1127,13 +1127,13 @@ fn main() -> Result<()> {
                 }
             }
             w.flush()?;
-            eprintln!("{n} registros escritos en {} ({skipped} omitidos: vacíos o con zstd de reserva)", out.display());
+            eprintln!("{n} records written to {} ({skipped} skipped: empty or with fallback zstd)", out.display());
         }
         Cmd::Get { root, m, id } => {
             let eng = Engine::open(&root, &m.models)?;
             match eng.get(id)? {
                 Some(it) => println!("{}", serde_json::to_string_pretty(&it)?),
-                None => bail!("id {id} no está en el archivo"),
+                None => bail!("id {id} is not in the archive"),
             }
         }
         Cmd::Verify { seg, models, parquet } => {
@@ -1141,25 +1141,25 @@ fn main() -> Result<()> {
             let s = Segment::open(&seg)?;
             let (items, _) = segment::load_items(&parquet)?;
             if items.len() != s.man.n_docs {
-                bail!("nº de docs distinto: parquet {} vs segmento {}", items.len(), s.man.n_docs);
+                bail!("doc count differs: parquet {} vs segment {}", items.len(), s.man.n_docs);
             }
             let bad: usize = match &s.text {
                 TextSource::Zstd(ts) => {
                     let total: usize = (0..ts.n_blocks()).map(|b| (s.man.n_docs - b * ts.block).min(ts.block)).sum();
                     if ts.n_blocks() * ts.block < s.man.n_docs || total != s.man.n_docs {
-                        bail!("text.idx tiene {} bloques: no cubren los {} documentos", ts.n_blocks(), s.man.n_docs);
+                        bail!("text.idx has {} blocks: they do not cover the {} documents", ts.n_blocks(), s.man.n_docs);
                     }
                     (0..ts.n_blocks())
                     .into_par_iter()
                     .map(|b| {
-                        let texts = ts.get_block(b).expect("bloque de texto");
+                        let texts = ts.get_block(b).expect("text block");
                         let mut bad = 0;
                         for (k, t) in texts.into_iter().enumerate() {
                             let doc = b * ts.block + k;
                             let got = segment::join(&s.meta.row(doc), t, &s.meta.authors);
                             if got != items[doc] {
                                 if bad < 3 {
-                                    eprintln!("DIFERENCIA en id {}:\n  orig {:?}\n  leído {:?}", items[doc].id, items[doc], got);
+                                    eprintln!("MISMATCH at id {}:\n  orig {:?}\n  read {:?}", items[doc].id, items[doc], got);
                                 }
                                 bad += 1;
                             }
@@ -1175,31 +1175,31 @@ fn main() -> Result<()> {
                     let mut seen = 0usize;
                     let owned: Vec<_> = (0..s.man.n_docs).map(|d| ls.raw(d)).collect::<Result<Vec<_>>>()?;
                     let raws: Vec<&[u8]> = owned.iter().map(|c| c.as_ref()).collect();
-                    // lote continuo de 64 huecos: no se espera al registro más largo de cada lote
+                    // continuous batch of 64 slots: no waiting for the longest record of each batch
                     codec.decode_stream(&raws, ls.rec_check(), 64, |d, t| {
                         let got = segment::join(&s.meta.row(d), t, &s.meta.authors);
                         if got != items[d] {
                             if bad < 3 {
-                                eprintln!("DIFERENCIA en id {}:\n  orig {:?}\n  leído {:?}", items[d].id, items[d], got);
+                                eprintln!("MISMATCH at id {}:\n  orig {:?}\n  read {:?}", items[d].id, items[d], got);
                             }
                             bad += 1;
                         }
                         seen += 1;
                         if seen % 20000 == 0 {
-                            eprintln!("  verificados {seen}/{} ({:.0} reg/s)", s.man.n_docs, seen as f64 / t0.elapsed().as_secs_f64());
+                            eprintln!("  verified {seen}/{} ({:.0} rec/s)", s.man.n_docs, seen as f64 / t0.elapsed().as_secs_f64());
                         }
                         Ok(())
                     })?;
                     if seen != s.man.n_docs {
-                        bail!("solo se decodificaron {seen} de {} registros", s.man.n_docs);
+                        bail!("only {seen} of {} records were decoded", s.man.n_docs);
                     }
                     bad
                 }
             };
             if bad > 0 {
-                bail!("{bad} registros difieren");
+                bail!("{bad} records differ");
             }
-            println!("OK: {} registros idénticos al original ({:.1}s)", items.len(), t0.elapsed().as_secs_f64());
+            println!("OK: {} records identical to the original ({:.1}s)", items.len(), t0.elapsed().as_secs_f64());
         }
         Cmd::Stats { seg, root } => {
             let dirs: Vec<PathBuf> = match seg {
@@ -1221,21 +1221,21 @@ fn main() -> Result<()> {
                 let m = segment::read_manifest(d)?;
                 let sz = segment::sizes(d)?;
                 let total: u64 = sz.iter().map(|x| x.1).sum();
-                println!("segmento {}: {} docs, nivel {}, {:.1} B/doc", m.name, m.n_docs, m.text_tier, total as f64 / m.n_docs as f64);
+                println!("segment {}: {} docs, tier {}, {:.1} B/doc", m.name, m.n_docs, m.text_tier, total as f64 / m.n_docs as f64);
                 for (f, b) in &sz {
                     if dirs.len() == 1 {
                         println!("  {:<16} {:>12} B  {:>7.2} B/doc", f, b, *b as f64 / m.n_docs as f64);
                     }
                     let kind = if f.starts_with("text") || f.starts_with("lm.") {
-                        "texto"
+                        "text"
                     } else if f.starts_with("meta") || f.starts_with("authors") {
-                        "metadatos"
+                        "metadata"
                     } else if f.starts_with("bm25") {
                         "BM25"
                     } else if f.starts_with("vec") {
-                        "vectores"
+                        "vectors"
                     } else {
-                        "otros"
+                        "other"
                     };
                     *by_kind.entry(kind).or_default() += b;
                 }
@@ -1244,9 +1244,9 @@ fn main() -> Result<()> {
             }
             println!("TOTAL: {} docs, {} B = {:.1} B/doc", all_docs, all_bytes, all_bytes as f64 / all_docs as f64);
             for (k, b) in by_kind {
-                println!("  {:<10} {:>7.1} B/doc  -> 49,3M: {:.2} GB", k, b as f64 / all_docs as f64, b as f64 / all_docs as f64 * 49.3e6 / 1e9);
+                println!("  {:<10} {:>7.1} B/doc  -> 49.3M: {:.2} GB", k, b as f64 / all_docs as f64, b as f64 / all_docs as f64 * 49.3e6 / 1e9);
             }
-            println!("  {:<10} {:>7.1} B/doc  -> 49,3M: {:.2} GB", "TOTAL", all_bytes as f64 / all_docs as f64, all_bytes as f64 / all_docs as f64 * 49.3e6 / 1e9);
+            println!("  {:<10} {:>7.1} B/doc  -> 49.3M: {:.2} GB", "TOTAL", all_bytes as f64 / all_docs as f64, all_bytes as f64 / all_docs as f64 * 49.3e6 / 1e9);
         }
         Cmd::Bench { seg, models, n } => {
             let s = Segment::open(&seg)?;
@@ -1259,11 +1259,11 @@ fn main() -> Result<()> {
                         bytes += s.item(d, None)?.text.len();
                     }
                     let dt = t0.elapsed().as_secs_f64();
-                    println!("{} lecturas aleatorias (1 hilo, sin caché): {:.1} µs/registro ({} B de texto)", n, dt / n as f64 * 1e6, bytes);
+                    println!("{} random reads (1 thread, no cache): {:.1} µs/record ({} B of text)", n, dt / n as f64 * 1e6, bytes);
                 }
                 TextSource::Lm(ls) => {
                     let codec = LmCodec::load(&models.join(s.man.lm_model.as_ref().context("lm_model")?))?;
-                    for (label, limit) in [("fragmento (64 tokens)", Some(64usize)), ("completo", None)] {
+                    for (label, limit) in [("snippet (64 tokens)", Some(64usize)), ("full", None)] {
                         let mut times = Vec::new();
                         for c in docs.chunks(10) {
                             let owned: Vec<_> = c.iter().map(|&d| ls.raw(d)).collect::<Result<Vec<_>>>()?;
@@ -1274,7 +1274,7 @@ fn main() -> Result<()> {
                         }
                         times.sort_by(|a, b| a.total_cmp(b));
                         println!(
-                            "nivel LM, lotes de 10 aleatorios, {label}: mediana {:.0} ms, p90 {:.0} ms",
+                            "LM tier, random batches of 10, {label}: median {:.0} ms, p90 {:.0} ms",
                             times[times.len() / 2],
                             times[times.len() * 9 / 10]
                         );

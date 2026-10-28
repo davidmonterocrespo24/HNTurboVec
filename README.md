@@ -140,7 +140,7 @@ Five ideas keep it small:
 
 More detail: [doc/08-block.md](doc/08-block.md) (the block, byte by byte),
 [doc/09-rerank.md](doc/09-rerank.md) (search), [doc/07-ram.md](doc/07-ram.md) (memory) and
-[doc/05-arquitectura.md](doc/05-arquitectura.md) (the engine). The story of how it got here is in
+[doc/05-architecture.md](doc/05-architecture.md) (the engine). The story of how it got here is in
 [doc/POST.md](doc/POST.md).
 
 ## Quality and speed
@@ -227,7 +227,7 @@ cd hnz\py; maturin build --release                      # the wheel
 
 Every long step can resume where it stopped, and `python scripts/p5_build.py status` shows the
 progress. Packing takes about an hour and 3.2 GB of RAM. The reason behind each choice, with its
-numbers and the experiments that failed, is in [doc/BITACORA.md](doc/BITACORA.md) (36 entries).
+numbers and the experiments that failed, is in [doc/EXPERIMENT-LOG.md](doc/EXPERIMENT-LOG.md) (36 entries).
 
 ## Repository map and documentation
 
@@ -235,7 +235,7 @@ numbers and the experiments that failed, is in [doc/BITACORA.md](doc/BITACORA.md
 |---|---|
 | `hnz/` | the Rust engine (library and `hnz` CLI) and the Python package (`hnz/py`) |
 | `scripts/` | dataset download, models, LM training, the resumable build and the checks |
-| `experimentos/`, `resultados/` | the benchmark scripts behind [doc/BITACORA.md](doc/BITACORA.md) and their outputs |
+| `experiments/`, `results/` | the benchmark scripts behind [doc/EXPERIMENT-LOG.md](doc/EXPERIMENT-LOG.md) and their outputs |
 | `eval/` | evaluation query sets (300 queries per month, test and dev) |
 | `doc/` | the documentation; `doc/img/` holds the figures and `doc/diagrams/` the diagram sources |
 | `data/`, `emb/`, `models/`, `work/` | not in git: the dataset, vectors, models and built blocks |
@@ -245,7 +245,7 @@ numbers and the experiments that failed, is in [doc/BITACORA.md](doc/BITACORA.md
 | [hnz/py/README.md](hnz/py/README.md) | the Python library: API, HTTP server, performance |
 | [doc/POST.md](doc/POST.md) | the write-up: how all of HN fits in 5.3 GB ([web version](https://davidmonterocrespo24.github.io/HNTurboVec/)) |
 | [doc/README.md](doc/README.md) | project status and the index of the design documents |
-| [doc/BITACORA.md](doc/BITACORA.md) | the experiment log, E00 to E36 |
+| [doc/EXPERIMENT-LOG.md](doc/EXPERIMENT-LOG.md) | the experiment log, E00 to E36 |
 | [doc/08-block.md](doc/08-block.md), [doc/09-rerank.md](doc/09-rerank.md), [doc/07-ram.md](doc/07-ram.md) | the block format, search, memory |
 | [doc/10-tests.md](doc/10-tests.md) | how to test and approve the library |
 

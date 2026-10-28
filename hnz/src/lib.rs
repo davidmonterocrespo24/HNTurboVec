@@ -1,4 +1,4 @@
-//! hnz: Hacker News comprimido al máximo, con búsqueda híbrida y recuperación literal.
+//! hnz: Hacker News compressed as far as possible, with hybrid search and exact retrieval.
 pub mod api;
 pub mod blob;
 pub mod block;

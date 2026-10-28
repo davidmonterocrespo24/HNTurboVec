@@ -1,17 +1,17 @@
-//! Matemática DETERMINISTA para el LM: solo operaciones IEEE básicas (+ - * / sqrt) en un orden
-//! fijo, sin libm (exp/erf propias). Mismo binario => mismos bits en cualquier CPU x86-64.
+//! DETERMINISTIC math for the LM: only basic IEEE operations (+ - * / sqrt) in a fixed order,
+//! no libm (our own exp/erf). Same binary => same bits on any x86-64 CPU.
 
 const LN2_HI: f32 = 0.693_145_75;
 const LN2_LO: f32 = 1.428_606_8e-6;
-const MAGIC: f32 = 12_582_912.0; // 1.5 * 2^23: redondeo al par más cercano sumando/restando
+const MAGIC: f32 = 12_582_912.0; // 1.5 * 2^23: adding and then subtracting it rounds to nearest even
 
-/// Redondeo al entero más cercano (par en empates) para |x| < 2^22, sin libm.
+/// Rounds to the nearest integer (ties to even) for |x| < 2^22, without libm.
 #[inline(always)]
 pub fn round_even(x: f32) -> f32 {
     (x + MAGIC) - MAGIC
 }
 
-/// e^x determinista (error relativo ~2e-7). Para x < -87 devuelve 0.
+/// Deterministic e^x (relative error ~2e-7). For x < -87 it returns 0.
 #[inline(always)]
 pub fn exp(x: f32) -> f32 {
     let x = if x < -87.0 { -87.0 } else if x > 88.0 { 88.0 } else { x };
@@ -22,7 +22,7 @@ pub fn exp(x: f32) -> f32 {
     p * f32::from_bits(bits)
 }
 
-/// erf(x) (Abramowitz-Stegun 7.1.26, error < 1.5e-7) con exp propia.
+/// erf(x) (Abramowitz-Stegun 7.1.26, error < 1.5e-7) with our own exp.
 #[inline(always)]
 pub fn erf(x: f32) -> f32 {
     let s = if x < 0.0 { -1.0 } else { 1.0 };
@@ -32,13 +32,13 @@ pub fn erf(x: f32) -> f32 {
     s * y
 }
 
-/// GELU exacta (con erf): 0.5 x (1 + erf(x / sqrt 2)).
+/// Exact GELU (with erf): 0.5 x (1 + erf(x / sqrt 2)).
 #[inline(always)]
 pub fn gelu(x: f32) -> f32 {
     0.5 * x * (1.0 + erf(x * std::f32::consts::FRAC_1_SQRT_2))
 }
 
-/// Suma con 8 acumuladores y reducción en árbol fijo (vectorizable y determinista).
+/// Sum with 8 accumulators and a fixed tree reduction (vectorizable and deterministic).
 #[inline]
 pub fn sum(x: &[f32]) -> f32 {
     let mut acc = [0f32; 8];
@@ -56,11 +56,11 @@ pub fn sum(x: &[f32]) -> f32 {
     ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7])) + tail
 }
 
-/// Producto escalar f32 determinista (8 carriles, orden fijo).
+/// Deterministic f32 dot product (8 lanes, fixed order).
 #[inline]
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
-    // mismo orden de operaciones que la versión original (carril j suma los elementos j, j+8, ...),
-    // escrito con chunks_exact para que LLVM vectorice sin comprobaciones de límites
+    // same order of operations as the original version (lane j sums elements j, j+8, ...),
+    // written with chunks_exact so LLVM vectorizes it without bounds checks
     let mut acc = [0f32; 8];
     let ca = a.chunks_exact(8);
     let cb = b[..a.len()].chunks_exact(8);
@@ -77,7 +77,7 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     ((acc[0] + acc[4]) + (acc[1] + acc[5])) + ((acc[2] + acc[6]) + (acc[3] + acc[7])) + tail
 }
 
-/// LayerNorm determinista.
+/// Deterministic LayerNorm.
 pub fn layer_norm(x: &[f32], w: &[f32], b: &[f32], eps: f32, out: &mut [f32]) {
     let n = x.len() as f32;
     let mean = sum(x) / n;
@@ -106,7 +106,7 @@ impl Drop for ScratchRelease {
     }
 }
 
-/// Logits -> frecuencias enteras acumuladas (total ~2^30, todas >= 1). Determinista.
+/// Logits -> cumulative integer frequencies (total ~2^30, all >= 1). Deterministic.
 pub const FREQ_TOTAL: u32 = 1 << 30;
 pub fn logits_to_cum(logits: &[f32], cum: &mut Vec<u64>) {
     let v = logits.len();
@@ -125,7 +125,7 @@ pub fn logits_to_cum(logits: &[f32], cum: &mut Vec<u64>) {
         }
         let s = sum(e);
         let scale = (FREQ_TOTAL - v as u32) as f32 / s;
-        // valores < 2^30: la conversión vía i32 es exacta y vectorizable
+        // values < 2^30: converting through i32 is exact and vectorizable
         for i in 0..v {
             f[i] = 1 + (e[i] * scale) as i32 as u32;
         }
@@ -153,7 +153,7 @@ mod tests {
         }
         for i in -40..=40 {
             let x = i as f32 * 0.1;
-            // erf de referencia por serie (suficiente para |x|<=4)
+            // reference erf from its series (enough for |x|<=4)
             let mut s = 0f64;
             let xx = x as f64;
             let mut term = xx;

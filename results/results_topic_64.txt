@@ -1,0 +1,6 @@
+382,681 records
+HTML transform: 0.9453 reversible, text 125.0 MB -> 118.6 MB (5.6s)
+order-id                                     blk=64     raw= 333.8 B/rec ->  121.4 B/rec  x2.75  comp   78.0s  read 1 block        34 us  | 49.3M ->  5.98 GB
+order-THREAD                                 blk=64     raw= 334.9 B/rec ->  118.0 B/rec  x2.84  comp   80.1s  read 1 block        30 us  | 49.3M ->  5.82 GB
+order-TOPIC                                  blk=64     raw= 335.8 B/rec ->  119.6 B/rec  x2.81  comp   79.8s  read 1 block        29 us  | 49.3M ->  5.90 GB
+order-THREAD grouped by TOPIC                blk=64     raw= 335.1 B/rec ->  117.5 B/rec  x2.85  comp   79.6s  read 1 block        32 us  | 49.3M ->  5.79 GB

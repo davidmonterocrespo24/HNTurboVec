@@ -1,8 +1,8 @@
 # The compact block (P3): `hn.hnzb`
 
 **Status:** format v1.0 implemented and measured on the 3-month sample on 2026-10-15, then
-reviewed (log entry E32 in [BITACORA.md](BITACORA.md)). Design context:
-[06-libreria.md](06-libreria.md); RAM rules: [07-ram.md](07-ram.md). This document is the
+reviewed (log entry E32 in [EXPERIMENT-LOG.md](EXPERIMENT-LOG.md)). Design context:
+[06-library.md](06-library.md); RAM rules: [07-ram.md](07-ram.md). This document is the
 reference for the bytes of the container, the metadata, the vectors, the word index and the
 kids. Three encodings are only named here: the LM's arithmetic-coded records (they need hnz's LM
 decoder for the block's `math_version`), the FST of the `fst` crate and the BitPacker4x blocks of
@@ -171,7 +171,7 @@ EmbeddingGemma 2 embedding of the document's prompt:
   `title: <title or "none"> | text: <the prefix body as plain text>` (a link with its own text
   becomes "text (url)"; whitespace collapsed), cut at 256 Gemma tokens. The url is not embedded.
   `hnz prompts` writes the Gemma token ids; `scripts/embed_prompts.py` embeds them.
-- `prompt_version` 1 (E30a, `experimentos/embed_prefix.py`): the same idea in Python, with the
+- `prompt_version` 1 (E30a, `experiments/embed_prefix.py`): the same idea in Python, with the
   title/url and the body tokenized separately and a 224-token cap.
 
 Documents **with a prompt** have a vector: those that are not deleted and whose LM string (title,

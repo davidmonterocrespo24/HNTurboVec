@@ -1,5 +1,5 @@
-//! Metadatos por columnas (id, time, tipo/dead, parent, autor, score, descendants, poll, parts)
-//! en bloques de 1024 documentos: varints delta/zigzag + zstd. ~6 B/ítem.
+//! Columnar metadata (id, time, type/dead, parent, author, score, descendants, poll, parts)
+//! in blocks of 1024 documents: delta/zigzag varints + zstd. ~6 B/item.
 
 use crate::varint::{put, unzz, zz};
 use anyhow::{Context, Result};
@@ -211,7 +211,7 @@ impl MetaBlockWriter {
     }
 }
 
-/// Escribe meta.bin + meta.idx + authors.zst. `authors` ya ordenados por frecuencia.
+/// Writes meta.bin + meta.idx + authors.zst. `authors` already sorted by frequency.
 pub fn write(dir: &Path, rows: &[MetaRow], authors: &[String]) -> Result<()> {
     use rayon::prelude::*;
     let blocks: Vec<Vec<u8>> = rows
@@ -232,8 +232,8 @@ pub fn write(dir: &Path, rows: &[MetaRow], authors: &[String]) -> Result<()> {
     std::fs::write(dir.join("meta.idx"), idx)?;
     let joined = authors.join("\n");
     std::fs::write(dir.join("authors.zst"), zstd::bulk::compress(joined.as_bytes(), 19)?)?;
-    // columna de banderas (1 B/doc: tipo | dead<<3 | deleted<<4) para filtrar sin descomprimir
-    // bloques; muy repetitiva -> ~0,1 B/doc con zstd
+    // flag column (1 B/doc: type | dead<<3 | deleted<<4) to filter without decompressing
+    // blocks; very repetitive -> ~0.1 B/doc with zstd
     let flags: Vec<u8> = rows.iter().map(flag_byte).collect();
     std::fs::write(dir.join("meta.flags.zst"), zstd::bulk::compress(&flags, 19)?)?;
     Ok(())
@@ -243,8 +243,8 @@ pub fn flag_byte(r: &MetaRow) -> u8 {
     r.typ | ((r.dead as u8) << 3) | ((r.deleted as u8) << 4)
 }
 
-/// Columna de banderas de un segmento: del fichero si existe; si no (segmentos antiguos), se
-/// calcula descomprimiendo todos los bloques de metadatos.
+/// Flag column of a segment: from the file if it exists; otherwise (old segments) it is
+/// computed by decompressing every metadata block.
 pub fn load_flags(dir: &Path, meta: &MetaStore) -> Result<Vec<u8>> {
     let p = dir.join("meta.flags.zst");
     if p.exists() {
@@ -346,11 +346,11 @@ impl MetaStore {
     pub fn from_parts(bin: Blob, idx: &[u8], authors: Authors, exceptions: &[u8], n_docs: usize) -> Result<Self> {
         let bad = |m: &str| crate::block::corrupt(format!("meta/index: {m}"));
         if idx.len() < 8 || (idx.len() - 8) % 20 != 0 {
-            return Err(bad("tamaño"));
+            return Err(bad("size"));
         }
         let nb = (idx.len() - 8) / 20;
         if nb != n_docs.div_ceil(META_BLOCK) {
-            return Err(bad("número de bloques"));
+            return Err(bad("number of blocks"));
         }
         let (mut first_id, mut first_time, mut off) = (Vec::with_capacity(nb), Vec::with_capacity(nb), Vec::with_capacity(nb + 1));
         for b in 0..nb {
@@ -363,17 +363,17 @@ impl MetaStore {
         if off.windows(2).any(|w| w[1] <= w[0]) || *off.last().unwrap() as usize != bin.len()
             || first_time.windows(2).any(|w| w[1] < w[0]) || first_id.windows(2).any(|w| w[1] < w[0])
         {
-            return Err(bad("desplazamientos, fechas o ids fuera de orden"));
+            return Err(bad("offsets, dates or ids out of order"));
         }
         if exceptions.len() % 8 != 0 {
-            return Err(crate::block::corrupt("meta/late: tamaño"));
+            return Err(crate::block::corrupt("meta/late: size"));
         }
         let late: Vec<(u32, u32)> = exceptions
             .chunks_exact(8)
             .map(|c| (u32::from_le_bytes(c[0..4].try_into().unwrap()), u32::from_le_bytes(c[4..8].try_into().unwrap())))
             .collect();
         if late.windows(2).any(|w| w[1].0 <= w[0].0) || late.iter().any(|x| x.1 as usize >= n_docs) {
-            return Err(crate::block::corrupt("meta/late: orden o rango"));
+            return Err(crate::block::corrupt("meta/late: order or range"));
         }
         Ok(Self { bin, first_id, first_time, off, n_docs, authors, enc: 2, late })
     }
@@ -381,12 +381,12 @@ impl MetaStore {
     /// Checked decoding of block `b` (a damaged frame or row is a `CorruptBlockError`).
     pub fn try_block(&self, b: usize) -> Result<Vec<MetaRow>> {
         if b >= self.n_blocks() {
-            return Err(crate::block::corrupt(format!("meta block {b} fuera de rango")));
+            return Err(crate::block::corrupt(format!("meta block {b} out of range")));
         }
         let data = self.bin.get(self.off[b] as usize, (self.off[b + 1] - self.off[b]) as usize)?;
         let n = (self.n_docs - b * META_BLOCK).min(META_BLOCK);
         let raw = unzstd(&data, MAX_BLOCK_RAW).map_err(|e| crate::block::corrupt(format!("meta block {b}: {e}")))?;
-        try_decode_block(&raw, n, self.enc).ok_or_else(|| crate::block::corrupt(format!("meta block {b}: filas")))
+        try_decode_block(&raw, n, self.enc).ok_or_else(|| crate::block::corrupt(format!("meta block {b}: rows")))
     }
 
     /// Row of document `doc`.
@@ -394,7 +394,7 @@ impl MetaStore {
         let mut rows = self.try_block(doc / META_BLOCK)?;
         let k = doc % META_BLOCK;
         if k >= rows.len() {
-            return Err(crate::block::corrupt(format!("doc {doc} fuera de rango")));
+            return Err(crate::block::corrupt(format!("doc {doc} out of range")));
         }
         Ok(rows.swap_remove(k))
     }
@@ -470,19 +470,19 @@ impl MetaStore {
     // Panicking forms of the above, for the build tools (the engine uses the checked ones).
 
     pub fn block(&self, b: usize) -> Vec<MetaRow> {
-        self.try_block(b).expect("leyendo metadatos")
+        self.try_block(b).expect("reading metadata")
     }
 
     pub fn row(&self, doc: usize) -> MetaRow {
-        self.try_row(doc).expect("leyendo metadatos")
+        self.try_row(doc).expect("reading metadata")
     }
 
     pub fn doc_of_id(&self, id: u32) -> Option<usize> {
-        self.try_doc_of_id(id).expect("leyendo metadatos")
+        self.try_doc_of_id(id).expect("reading metadata")
     }
 
     pub fn doc_at_time(&self, t: i64) -> usize {
-        self.try_doc_at_time(t).expect("leyendo metadatos")
+        self.try_doc_at_time(t).expect("reading metadata")
     }
 }
 
@@ -496,7 +496,7 @@ fn unzstd(data: &[u8], cap: u64) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
     zstd::stream::read::Decoder::new(data)?.take(cap + 1).read_to_end(&mut out)?;
     if out.len() as u64 > cap {
-        return Err(std::io::Error::other("bloque descomprimido demasiado grande"));
+        return Err(std::io::Error::other("decompressed block is too large"));
     }
     Ok(out)
 }

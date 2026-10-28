@@ -1,15 +1,15 @@
-//! GPT-NeoX (familia Pythia) en int8 (W8A8) con aritmética determinista.
-//! - `prefill`: todas las posiciones de una secuencia de una vez (para COMPRIMIR).
-//! - `Batch::step`: un token por secuencia para varias secuencias a la vez con KV-cache
-//!   (para DESCOMPRIMIR los resultados de una consulta en lote).
-//! Ambos caminos ejecutan exactamente las mismas operaciones por posición => mismos logits.
+//! GPT-NeoX (Pythia family) in int8 (W8A8) with deterministic arithmetic.
+//! - `prefill`: every position of a sequence at once (to COMPRESS).
+//! - `Batch::step`: one token per sequence for several sequences at once, with a KV cache
+//!   (to DECOMPRESS the results of a query as a batch).
+//! Both paths run exactly the same operations per position => same logits.
 
 use super::kernels::{matmul, quant_row, Q8};
 use super::math::{exp, gelu, layer_norm};
 use anyhow::{bail, Context, Result};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-/// Perfil (ns acumulados): [matmul capas, atención, cabeza, resto]
+/// Profile (accumulated ns): [layer matmuls, attention, head, rest]
 pub static PROF: [AtomicU64; 4] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 #[inline]
 fn prof_add(i: usize, t: std::time::Instant) {
@@ -50,7 +50,7 @@ pub struct Header {
     vocab_bytes_len: usize,
 }
 
-/// Matriz int8: escalas por fila (copiadas, alineadas) + posición de los datos en el fichero.
+/// int8 matrix: per-row scales (copied, aligned) + position of the data in the file.
 struct QMat {
     rows: usize,
     cols: usize,
@@ -87,7 +87,7 @@ pub struct LmModel {
     vocab_off: Vec<u32>,
     vocab_bytes: Vec<u8>,
     pub id: String,
-    /// id de versiones anteriores (muestreo 1/97 bytes): se acepta al abrir segmentos viejos
+    /// id from earlier versions (samples 1 in 97 bytes): accepted when opening old segments
     pub id_legacy: String,
 }
 
@@ -97,50 +97,50 @@ fn f32s(b: &[u8]) -> Vec<f32> {
 
 impl LmModel {
     pub fn load(path: &Path) -> Result<Self> {
-        let data = std::fs::read(path).with_context(|| format!("modelo LM {}", path.display()))?;
+        let data = std::fs::read(path).with_context(|| format!("LM model {}", path.display()))?;
         Self::from_bytes(data)
     }
 
     /// From the bytes of a `.hnzlm` file (its id depends only on these bytes).
     pub fn from_bytes(data: Vec<u8>) -> Result<Self> {
         if data.len() < 12 || &data[..6] != b"HNZLM1" {
-            bail!("no es un .hnzlm");
+            bail!("not a .hnzlm file");
         }
         // every range the header names must lie inside the file (an unexpected file is an error,
         // never a panic)
         let span = |a: usize, len: usize| -> Result<std::ops::Range<usize>> {
-            a.checked_add(len).filter(|&e| e <= data.len()).map(|e| a..e).with_context(|| format!("modelo LM: rango {a}+{len} fuera del fichero"))
+            a.checked_add(len).filter(|&e| e <= data.len()).map(|e| a..e).with_context(|| format!("LM model: range {a}+{len} is outside the file"))
         };
         let hl = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
         let h: Header = serde_json::from_slice(&data[span(12, hl)?])?;
         if h.arch != "gpt_neox" {
-            bail!("arquitectura no soportada: {}", h.arch);
+            bail!("unsupported architecture: {}", h.arch);
         }
         if h.heads == 0 || h.hidden == 0 || h.inter == 0 || h.hidden % h.heads != 0 || h.rotary_ndims > h.hidden / h.heads || h.rotary_ndims % 2 != 0 || h.vocab == 0 || h.max_pos == 0 {
-            bail!("modelo LM: dimensiones incoherentes en la cabecera");
+            bail!("LM model: inconsistent dimensions in the header");
         }
         let base = 12 + hl + ((64 - (12 + hl) % 64) % 64);
         let find = |name: &str| -> Result<TensorInfo> {
-            h.tensors.iter().find(|t| t.name == name).cloned().with_context(|| format!("falta tensor {name}"))
+            h.tensors.iter().find(|t| t.name == name).cloned().with_context(|| format!("missing tensor {name}"))
         };
-        let at = |off: usize| base.checked_add(off).context("modelo LM: desplazamiento");
+        let at = |off: usize| base.checked_add(off).context("LM model: offset");
         let vecf = |name: &str, want: usize| -> Result<Vec<f32>> {
             let t = find(name)?;
             if t.len < want {
-                bail!("modelo LM: {name} tiene {} valores, se esperaban {want}", t.len);
+                bail!("LM model: {name} has {} values, expected {want}", t.len);
             }
-            Ok(f32s(&data[span(at(t.offset)?, t.len.checked_mul(4).context("tamaño")?)?]))
+            Ok(f32s(&data[span(at(t.offset)?, t.len.checked_mul(4).context("size")?)?]))
         };
         let q8 = |name: &str, rows: usize, cols: usize| -> Result<QMat> {
             let t = find(name)?;
             if t.kind != "q8" {
-                bail!("{name} no es q8");
+                bail!("{name} is not q8");
             }
             if t.rows < rows || t.cols != cols {
-                bail!("modelo LM: {name} es {}x{}, se esperaba {rows}x{cols}", t.rows, t.cols);
+                bail!("LM model: {name} is {}x{}, expected {rows}x{cols}", t.rows, t.cols);
             }
-            let s = span(at(t.offset)?, t.rows.checked_mul(4).context("tamaño")?)?;
-            let d = span(s.end, t.rows.checked_mul(t.cols).context("tamaño")?)?;
+            let s = span(at(t.offset)?, t.rows.checked_mul(4).context("size")?)?;
+            let d = span(s.end, t.rows.checked_mul(t.cols).context("size")?)?;
             let rowsum = data[d.clone()].chunks_exact(t.cols).map(|r| r.iter().map(|&b| b as i8 as i32).sum()).collect();
             Ok(QMat { rows: t.rows, cols: t.cols, scales: f32s(&data[s]), rowsum, off: d.start })
         };
@@ -162,11 +162,11 @@ impl LmModel {
                 fc2_b: vecf(&format!("l{l}.fc2.b"), hd)?,
             });
         }
-        let vo = span(at(h.vocab_offsets)?, (h.vocab + 1).checked_mul(4).context("tamaño")?)?;
+        let vo = span(at(h.vocab_offsets)?, (h.vocab + 1).checked_mul(4).context("size")?)?;
         let vocab_off: Vec<u32> = data[vo].chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
         let vocab_bytes = data[span(at(h.vocab_bytes)?, h.vocab_bytes_len)?].to_vec();
         if vocab_off.windows(2).any(|w| w[1] < w[0]) || *vocab_off.last().unwrap() as usize > vocab_bytes.len() {
-            bail!("modelo LM: tabla de bytes de los tokens incoherente");
+            bail!("LM model: inconsistent token byte table");
         }
         let id = format!("{}#full:{:016x}", h.source, fnv_full(&data));
         let id_legacy = format!("{}#{:016x}", h.source, fnv(&data));
@@ -189,12 +189,11 @@ impl LmModel {
 
     fn q8<'a>(&'a self, m: &'a QMat) -> Q8<'a> {
         let bytes = &self.data[m.off..m.off + m.rows * m.cols];
-        // u8 -> i8 (misma representación, alineación 1)
+        // u8 -> i8 (same representation, alignment 1)
         let data = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const i8, bytes.len()) };
         Q8 { rows: m.rows, cols: m.cols, scales: &m.scales, rowsum: &m.rowsum, data }
     }
 
-    /// Bytes de un token (BPE a nivel de byte).
     /// KV-cache bytes per position and sequence (keys + values of all layers, f32).
     pub fn kv_bytes_per_token(&self) -> u64 {
         (2 * self.h.hidden * self.h.layers * 4) as u64
@@ -206,6 +205,7 @@ impl LmModel {
         (2 * self.h.vocab * 4 + 16 * self.h.hidden * 4) as u64
     }
 
+    /// Bytes of a token (byte-level BPE).
     pub fn token_bytes(&self, id: u32) -> &[u8] {
         let i = id as usize;
         &self.vocab_bytes[self.vocab_off[i] as usize..self.vocab_off[i + 1] as usize]
@@ -232,8 +232,8 @@ impl LmModel {
         }
     }
 
-    /// Ejecuta una capa sobre `t` filas (tokens) con posiciones `pos[i]`, usando/actualizando la
-    /// KV-cache de la secuencia `seq_of[i]`. `x`: t x H (se actualiza in situ).
+    /// Runs one layer over `t` rows (tokens) at positions `pos[i]`, using and updating the
+    /// KV cache of sequence `seq_of[i]`. `x`: t x H (updated in place).
     fn layer(&self, l: usize, x: &mut [f32], pos: &[usize], kv: &mut [&mut KvCache], seq_of: &[usize], parallel: bool) {
         let (hd, nh, it) = (self.h.hidden, self.h.heads, self.h.inter);
         let hs = hd / nh;
@@ -245,7 +245,7 @@ impl LmModel {
             layer_norm(&x[i * hd..(i + 1) * hd], &lw.ln1_w, &lw.ln1_b, self.h.eps, &mut a[i * hd..(i + 1) * hd]);
             layer_norm(&x[i * hd..(i + 1) * hd], &lw.ln2_w, &lw.ln2_b, self.h.eps, &mut m[i * hd..(i + 1) * hd]);
         }
-        // --- atención ---
+        // --- attention ---
         let mut aq = vec![0i8; t * hd];
         let mut asx = vec![0f32; t];
         for i in 0..t {
@@ -275,11 +275,11 @@ impl LmModel {
                 let c = kvr[seq_of[i]];
                 let n = pos[i] + 1;
                 let q = &qkv[i * 3 * hd + h * hs..i * 3 * hd + (h + 1) * hs];
-                // s[j] = (Σ_d q[d]·k[j][d]) · escala, con la suma de cada clave en orden d = 0..hs
-                // (definición canónica, MATH_VERSION 2): se vectoriza a lo ancho de las claves
+                // s[j] = (Σ_d q[d]·k[j][d]) · scale, with each key's sum in order d = 0..hs
+                // (canonical definition, MATH_VERSION 2): vectorized across the keys
                 let mut sc = vec![0f32; n];
-                // bloques de 32 claves con los acumuladores en registros a lo largo de las dims;
-                // por clave el orden de sumas es el mismo (d = 0..hs)
+                // blocks of 32 keys with the accumulators in registers across the dims;
+                // for each key the order of the sums is the same (d = 0..hs)
                 let rows: Vec<&[f32]> = (0..hs).map(|d| &c.krow(l, h, d)[..n]).collect();
                 let mut jb = 0;
                 while jb + 32 <= n {
@@ -313,7 +313,7 @@ impl LmModel {
                         mx = *s;
                     }
                 }
-                // exp en un bucle aparte (vectorizable) y suma en el MISMO orden secuencial de siempre
+                // exp in a separate loop (vectorizable), and the sum in the SAME sequential order as always
                 for s in sc.iter_mut() {
                     *s = exp(*s - mx);
                 }
@@ -323,7 +323,7 @@ impl LmModel {
                 }
                 let inv = 1.0 / tot;
                 if hs == 64 {
-                    // 64 acumuladores en registros a lo largo de las claves (mismo orden por dim)
+                    // 64 accumulators in registers across the keys (same order per dim)
                     let mut acc = [0f32; 64];
                     for j in 0..n {
                         let p = sc[j] * inv;
@@ -350,7 +350,7 @@ impl LmModel {
                 let base = super::kernels::SendPtr(att.as_mut_ptr());
                 super::pool::pool().run(t * nh, &|task| {
                     let (i, h) = (task / nh, task % nh);
-                    // SAFETY: cada (fila, cabeza) escribe su trozo disjunto de `att`
+                    // SAFETY: each (row, head) writes its own disjoint chunk of `att`
                     let o = unsafe { std::slice::from_raw_parts_mut(base.get().add(i * hd + h * hs), hs) };
                     one(task, o);
                 });
@@ -389,7 +389,7 @@ impl LmModel {
         let mut f2 = vec![0f32; t * hd];
         matmul(&self.q8(&lw.fc2), &f1q, &f1sx, Some(&lw.fc2_b), &mut f2, parallel);
         prof_add(0, tm);
-        // residual paralelo: h = mlp + attn + h
+        // parallel residual: h = mlp + attn + h
         for i in 0..t * hd {
             x[i] = (f2[i] + ao[i]) + x[i];
         }
@@ -411,7 +411,7 @@ impl LmModel {
         prof_add(2, th);
     }
 
-    /// Logits de todas las posiciones de una secuencia (posición i predice el token i+1).
+    /// Logits of every position of a sequence (position i predicts token i+1).
     pub fn prefill(&self, toks: &[u32], parallel: bool) -> Vec<f32> {
         let t = toks.len();
         let hd = self.h.hidden;
@@ -422,8 +422,8 @@ impl LmModel {
         let pos: Vec<usize> = (0..t).collect();
         let mut cache = KvCache::new(self.h.layers, hd, hd / self.h.heads);
         let seq_of = vec![0usize; t];
-        // causalidad: la fila i solo ve las claves 0..=i -> procesamos por capas con la cache
-        // creciendo fila a fila dentro de `layer` (pos[i] == len antes de añadir).
+        // causality: row i only sees keys 0..=i -> we go layer by layer, with the cache
+        // growing row by row inside `layer` (pos[i] == len before adding).
         for l in 0..self.h.layers {
             let mut refs = [&mut cache];
             self.layer(l, &mut x, &pos, &mut refs, &seq_of, parallel);
@@ -433,9 +433,9 @@ impl LmModel {
         logits
     }
 
-    /// Como `prefill` pero entrega los logits por TROZOS de `chunk` posiciones a `f(pos0, logits)`,
-    /// para no reservar T x vocab floats a la vez (2.000 tokens = 400 MB). Mismos bits: la cabeza
-    /// se calcula fila a fila de forma idéntica.
+    /// Like `prefill`, but hands the logits to `f(pos0, logits)` in CHUNKS of `chunk` positions,
+    /// so it never allocates T x vocab floats at once (2,000 tokens = 400 MB). Same bits: the head
+    /// is computed row by row in exactly the same way.
     pub fn prefill_chunked(&self, toks: &[u32], chunk: usize, mut f: impl FnMut(usize, &[f32])) {
         let t = toks.len();
         let hd = self.h.hidden;
@@ -460,8 +460,8 @@ impl LmModel {
     }
 }
 
-/// Versión de la definición numérica del LM. Cambiarla invalida los segmentos ya comprimidos.
-/// 1: puntuaciones de atención con `dot` por clave · 2: claves transpuestas, suma por dim en orden.
+/// Version of the LM's numeric definition. Changing it invalidates segments already compressed.
+/// 1: attention scores with `dot` per key. 2: transposed keys, summed per dim in order.
 pub const MATH_VERSION: u32 = 2;
 
 /// KV cache of one sequence. Keys TRANSPOSED per layer: [head·dim][position] (capacity doubles as
@@ -516,7 +516,7 @@ impl KvCache {
     }
 }
 
-/// Decodificación en lote: varias secuencias avanzan un token por paso.
+/// Batch decoding: several sequences advance one token per step.
 pub struct Batch<'m> {
     m: &'m LmModel,
     pub caches: Vec<KvCache>,
@@ -537,7 +537,7 @@ impl<'m> Batch<'m> {
         self.caches.len() - 1
     }
 
-    /// Vacía el hueco `slot` (KV-cache y posición) para empezar otra secuencia en él.
+    /// Empties slot `slot` (KV cache and position) to start another sequence in it.
     pub fn reset(&mut self, slot: usize) {
         self.reset_limited(slot, usize::MAX);
     }
@@ -549,8 +549,8 @@ impl<'m> Batch<'m> {
         self.pos[slot] = 0;
     }
 
-    /// Avanza las secuencias `active` con los tokens `toks` (uno por secuencia activa).
-    /// Devuelve los logits (active.len() x vocab).
+    /// Advances the `active` sequences with the tokens `toks` (one per active sequence).
+    /// Returns the logits (active.len() x vocab).
     pub fn step(&mut self, active: &[usize], toks: &[u32], parallel: bool) -> Vec<f32> {
         let m = self.m;
         let hd = m.h.hidden;
@@ -560,7 +560,7 @@ impl<'m> Batch<'m> {
             m.embed(tk, &mut x[i * hd..(i + 1) * hd]);
         }
         let pos: Vec<usize> = active.iter().map(|&a| self.pos[a]).collect();
-        // referencias mutables (disjuntas) a las caches activas; `active` va ordenado
+        // mutable (disjoint) references to the active caches; `active` is sorted
         let mut is_active = vec![false; self.caches.len()];
         for &a in active {
             is_active[a] = true;

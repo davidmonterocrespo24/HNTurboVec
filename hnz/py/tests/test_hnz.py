@@ -149,7 +149,7 @@ def test_int_bounds_are_years(hn):
 
 
 def test_open_empty_folder_fails(tmp_path):
-    with pytest.raises(RuntimeError, match='no hay segmentos'):
+    with pytest.raises(RuntimeError, match='no segments'):
         hnz.open(tmp_path)
 
 

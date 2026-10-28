@@ -1,0 +1,46 @@
+embeddings 4450 docs/s
+k-means 1000 tags: 17s; size per tag: median 329, max 17804
+cost of storing tags: 1 tag = 10 bits/doc -> 0.06 GB; 3 tags -> 0.18 GB
+
+Hierarchy: 1000 tags -> 40 areas. Examples (5 largest areas, 4 tags each):
+  AREA 20 (26,940 docs, 23 tags)
+     - [17804 docs] data
+     - [ 1342 docs] ycombinator, item, dupe, news
+     - [ 1008 docs] wiki, wikipedia, tur, dodecahedron#
+     - [  899 docs] ycombinator, item, news, macroexpanded
+  AREA 26 (25,369 docs, 71 tags)
+     - [ 3192 docs] flagged, dang, flag, title
+     - [  867 docs] copyright, copyrighted, infringement, dmca
+     - [  642 docs] political, opinions, disagree, debate
+     - [  624 docs] misunderstood, beliefs, conversation, arguing
+  AREA 29 (24,844 docs, 54 tags)
+     - [  887 docs] nice, lovely, pleasant, glad
+     - [  805 docs] command, cli, code, python
+     - [  804 docs] pretty, damning, bluey, damn
+     - [  801 docs] cool, neat, cooling, super
+  AREA 7 (24,033 docs, 64 tags)
+     - [  715 docs] decimal, emperor, toast, piss
+     - [  665 docs] bad, bad-faith, faith, oxidative
+     - [  663 docs] housing, homeless, homelessness, rent
+     - [  635 docs] crowd, homeless, population, group
+  AREA 1 (17,374 docs, 45 tags)
+     - [ 1110 docs] code, codes, low-code, no-code
+     - [  760 docs] python, pandas, ruby, cpython
+     - [  755 docs] code, programming, coding, programmers
+     - [  721 docs] syntax, string, foo, int
+
+(B) Routing over 382,681 docs, 300 queries (potion model, float)
+  full search:                               P@10 0.167   scans 100%
+  1 tag(s)/doc, search in  1 tags:           P@10 0.080   scans  0.12%
+  1 tag(s)/doc, search in  3 tags:           P@10 0.106   scans  0.34%
+  1 tag(s)/doc, search in  5 tags:           P@10 0.111   scans  0.56%
+  1 tag(s)/doc, search in 10 tags:           P@10 0.121   scans  1.10%
+  1 tag(s)/doc, search in 20 tags:           P@10 0.131   scans  2.14%
+  1 tag(s)/doc, search in 50 tags:           P@10 0.142   scans  5.25%
+  3 tag(s)/doc, search in  1 tags:           P@10 0.100   scans  0.31%
+  3 tag(s)/doc, search in  3 tags:           P@10 0.124   scans  0.89%
+  3 tag(s)/doc, search in  5 tags:           P@10 0.127   scans  1.45%
+  3 tag(s)/doc, search in 10 tags:           P@10 0.136   scans  2.85%
+  3 tag(s)/doc, search in 20 tags:           P@10 0.144   scans  5.59%
+  3 tag(s)/doc, search in 50 tags:           P@10 0.153   scans 13.31%
+  tags ONLY (no per-doc vectors):            P@10 0.004

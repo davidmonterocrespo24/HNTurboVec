@@ -1,7 +1,7 @@
-"""Genera embeddings EmbeddingGemma 2 (768d) de un mes de HN en la iGPU (OpenVINO), agrupando por
-longitud (buckets 32/64/128/256 tokens). Salida: emb/g2_<mes>.f16.npy (N x 768, float16, mismo orden
-que el parquet filtrado) + emb/g2_<mes>.ids.npy (ids de HN).
-Uso: python scripts/embed_month.py data/2024/2024-01.parquet [GPU|CPU]"""
+"""Generates EmbeddingGemma 2 embeddings (768d) for one month of HN on the iGPU (OpenVINO), grouped by
+length (buckets of 32/64/128/256 tokens). Output: emb/g2_<month>.f16.npy (N x 768, float16, same order
+as the filtered parquet) + emb/g2_<month>.ids.npy (HN ids).
+Usage: python scripts/embed_month.py data/2024/2024-01.parquet [GPU|CPU]"""
 import sys, os, time, re, html
 import numpy as np, pyarrow.parquet as pq, openvino as ov
 from huggingface_hub import hf_hub_download
@@ -16,11 +16,11 @@ ids_all, title, text, deleted = (t[c].to_pylist() for c in ['id', 'title', 'text
 clean = lambda s: re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', ' ', s))).strip()
 keep = [k for k in range(len(ids_all)) if not deleted[k] and (title[k] or text[k])]
 prompts = []
-for k in keep:  # prompt de documento de EmbeddingGemma: "title: X | text: Y"
+for k in keep:  # EmbeddingGemma document prompt: "title: X | text: Y"
     prompts.append(f'title: {clean(title[k]) if title[k] else "none"} | text: {clean(text[k])}')
 enc = tok.encode_batch(prompts)
 lens = np.array([len(e.ids) for e in enc])
-print(f'{month}: {len(keep):,} items con contenido; tokens medios {lens.mean():.0f}, >256: {np.mean(lens > 256):.1%}', flush=True)
+print(f'{month}: {len(keep):,} items with content; mean tokens {lens.mean():.0f}, >256: {np.mean(lens > 256):.1%}', flush=True)
 
 core = ov.Core()
 out = np.zeros((len(keep), 768), np.float16)
@@ -44,11 +44,11 @@ for seq, bs in BUCKETS:
         ids = np.zeros((bs, seq), np.int64); mask = np.zeros((bs, seq), np.int64)
         for j, r in enumerate(rows):
             x = enc[r].ids[:seq]; ids[j, :len(x)] = x; mask[j, :len(x)] = 1
-        if len(rows) < bs: mask[len(rows):, 0] = 1  # filas de relleno validas
+        if len(rows) < bs: mask[len(rows):, 0] = 1  # padding rows must be valid
         q.start_async([ids, mask], rows)
     q.wait_all()
     print(f'  bucket {seq:>3}: {len(sel):>7,} docs  {len(sel)/(time.time()-tb):7.1f} docs/s', flush=True)
 dt = time.time() - t0
 os.makedirs('emb', exist_ok=True)
 np.save(f'emb/g2_{month}.f16.npy', out); np.save(f'emb/g2_{month}.ids.npy', np.array([ids_all[k] for k in keep], np.uint32))
-print(f'TOTAL {len(keep)/dt:.1f} docs/s ({dt/60:.1f} min) -> 49,3M en {49.3e6/(len(keep)/dt)/86400:.1f} dias', flush=True)
+print(f'TOTAL {len(keep)/dt:.1f} docs/s ({dt/60:.1f} min) -> 49.3M in {49.3e6/(len(keep)/dt)/86400:.1f} days', flush=True)

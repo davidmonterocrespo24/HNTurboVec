@@ -17,7 +17,7 @@ pub struct FileStats {
     pub deleted: u64,
     pub id_min: u32,
     pub id_max: u32,
-    /// from the download registry (data/_descargas.json), if given
+    /// from the download registry (data/_downloads.json), if given
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

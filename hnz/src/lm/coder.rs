@@ -1,9 +1,9 @@
-//! Codificador aritmético binario (estilo LZMA, rango de 32 bits, probabilidades de 16 bits).
-//! Un token se codifica como 16 decisiones binarias sobre el árbol del vocabulario (0..65536),
-//! con P(bit) = masa del subárbol izquierdo / masa del nodo, calculada con ENTEROS a partir de
-//! las frecuencias acumuladas del LM -> totalmente determinista.
-//! Al terminar se elige el valor final con más bytes a cero y se recortan (el decodificador
-//! rellena con ceros), y se omite el primer byte (siempre 0 en este esquema).
+//! Binary arithmetic coder (LZMA style, 32-bit range, 16-bit probabilities).
+//! A token is coded as 16 binary decisions over the vocabulary tree (0..65536),
+//! with P(bit) = mass of the left subtree / mass of the node, computed with INTEGERS from
+//! the LM's cumulative frequencies -> fully deterministic.
+//! At the end it picks the final value with the most zero bytes and trims them (the decoder
+//! pads with zeros), and it drops the first byte (always 0 in this scheme).
 
 const TOP: u32 = 1 << 24;
 pub const VOCAB_BITS: u32 = 16;
@@ -45,7 +45,7 @@ impl Encoder {
         self.low = (self.low & 0x00FF_FFFF) << 8;
     }
 
-    /// Codifica `bit` con probabilidad de 0 = p0/65536 (1..=65535).
+    /// Encodes `bit`, with probability of 0 = p0/65536 (1..=65535).
     #[inline]
     pub fn bit(&mut self, p0: u32, bit: u32) {
         let bound = (self.range >> 16) * p0;
@@ -62,7 +62,7 @@ impl Encoder {
     }
 
     pub fn finish(mut self) -> Vec<u8> {
-        // valor dentro de [low, low+range) con más bits bajos a cero
+        // value inside [low, low+range) with the most low bits at zero
         let hi = self.low + self.range as u64 - 1;
         for shift in (0..=32).rev().step_by(8) {
             let mask = (1u64 << shift) - 1;
@@ -76,7 +76,7 @@ impl Encoder {
             self.shift_low();
         }
         let mut out = self.out;
-        out.remove(0); // primer byte siempre 0
+        out.remove(0); // the first byte is always 0
         while out.last() == Some(&0) {
             out.pop();
         }
@@ -149,7 +149,7 @@ fn p0_of(m0: u64, m: u64) -> u32 {
     (p as u32).clamp(1, 65535)
 }
 
-/// Codifica el token `tok` dada la distribución acumulada `cum` (len = vocab+1).
+/// Encodes token `tok` given the cumulative distribution `cum` (len = vocab+1).
 pub fn encode_token(e: &mut Encoder, cum: &[u64], tok: u32) {
     let mut lo = 0usize;
     let mut size = 1usize << VOCAB_BITS;
@@ -225,7 +225,7 @@ mod tests {
         for (c, &t) in dists.iter().zip(&toks) {
             assert_eq!(decode_token(&mut d, c), t);
         }
-        // coste cercano a la entropía: ~0.2 bits para el pico, ~18+ bits para los demás
+        // cost close to the entropy: ~0.2 bits for the peak, ~18+ bits for the rest
         assert!(bytes.len() < 300 * 3, "{} bytes", bytes.len());
     }
 

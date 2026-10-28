@@ -1,5 +1,5 @@
-//! Almacén de texto de los niveles caliente/templado: bloques de B registros, columnar
-//! (títulos | urls | textos transformados), zstd-19 con diccionario entrenado por segmento.
+//! Text store of the hot/warm tiers: blocks of B records, columnar
+//! (titles | urls | transformed texts), zstd-19 with a dictionary trained per segment.
 
 use crate::htmlx::{self, Mode};
 use crate::varint::{get, put};
@@ -14,11 +14,11 @@ use std::path::Path;
 pub struct TextRec {
     pub title: String,
     pub url: String,
-    /// HTML original de HN
+    /// original HN HTML
     pub text: String,
 }
 
-/// Bloque crudo: longitudes (varint) de títulos, urls y textos (len<<1 | crudo) + bytes.
+/// Raw block: lengths (varint) of titles, urls and texts (len<<1 | raw) + bytes.
 fn encode_block(recs: &[(&str, &str, (Mode, String))]) -> Vec<u8> {
     let mut out = Vec::new();
     for r in recs {
@@ -66,12 +66,12 @@ fn decode_block(buf: &[u8], n: usize) -> Result<Vec<TextRec>> {
 }
 
 pub struct BuildStats {
-    /// registros por modo: [moderno, antiguo, crudo]
+    /// records per mode: [modern, legacy, raw]
     pub modes: [usize; 3],
     pub raw_bytes: u64,
 }
 
-/// Escribe text.bin, text.idx (offsets u64) y text.dict.
+/// Writes text.bin, text.idx (u64 offsets) and text.dict.
 pub fn write(dir: &Path, recs: &[(&str, &str, &str)], block: usize, level: i32, dict_size: usize) -> Result<BuildStats> {
     let trans: Vec<(Mode, String)> = recs.par_iter().map(|r| htmlx::transform(r.2)).collect();
     let mut modes = [0usize; 3];
@@ -88,10 +88,10 @@ pub fn write(dir: &Path, recs: &[(&str, &str, &str)], block: usize, level: i32, 
         })
         .collect();
     let raw_bytes: u64 = raw_blocks.iter().map(|b| b.len() as u64).sum();
-    // diccionario entrenado con una muestra de bloques
+    // dictionary trained on a sample of blocks
     let step = (raw_blocks.len() / 4000).max(1);
     let samples: Vec<&[u8]> = raw_blocks.iter().step_by(step).map(|b| &b[..]).collect();
-    let dict = zstd::dict::from_samples(&samples, dict_size).context("entrenando diccionario zstd")?;
+    let dict = zstd::dict::from_samples(&samples, dict_size).context("training the zstd dictionary")?;
     let comp: Vec<Vec<u8>> = raw_blocks
         .par_chunks(64)
         .flat_map_iter(|chunk| {

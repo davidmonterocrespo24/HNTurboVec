@@ -1,6 +1,6 @@
-//! Tokenizador para BM25 (idéntico al indexar y al consultar).
-//! Minúsculas, secuencias alfanuméricas (Unicode), sin apóstrofos ("don't" -> "dont"),
-//! casos especiales de HN: "c++", "c#", "f#". Sin stopwords, sin números largos.
+//! Tokenizer for BM25 (the same at index time and at query time).
+//! Lowercase, alphanumeric runs (Unicode), no apostrophes ("don't" -> "dont"),
+//! HN special cases: "c++", "c#", "f#". No stopwords, no long numbers.
 
 pub const STOPWORDS: &[&str] = &[
     "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", "as", "at", "be",
@@ -24,7 +24,7 @@ fn is_stop(t: &str) -> bool {
     SET.get_or_init(|| STOPWORDS.iter().copied().collect()).contains(t)
 }
 
-/// Llama a `f` con cada término indexable.
+/// Calls `f` with each indexable term.
 pub fn for_each_term(text: &str, mut f: impl FnMut(&str)) {
     let mut tok = String::with_capacity(32);
     let mut chars = text.chars().peekable();
@@ -37,7 +37,7 @@ pub fn for_each_term(text: &str, mut f: impl FnMut(&str)) {
                 }
             }
             Some('\'') | Some('’') if !tok.is_empty() && chars.peek().map_or(false, |n| n.is_alphabetic()) => {
-                // apóstrofo dentro de palabra: se elimina (don't -> dont)
+                // apostrophe inside a word: dropped (don't -> dont)
             }
             other => {
                 if !tok.is_empty() {
@@ -68,7 +68,7 @@ fn emit(tok: &str, f: &mut impl FnMut(&str)) {
     if all_digits && n > 4 {
         return;
     }
-    // letras sueltas: solo nombres de lenguajes (C, R); el resto es ruido
+    // single letters: only language names (C, R); the rest is noise
     if n == 1 && !all_digits && !matches!(tok, "c" | "r") {
         return;
     }

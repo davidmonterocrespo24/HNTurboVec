@@ -1,14 +1,14 @@
-"""E29: continuar el preentrenamiento de pythia-70m con texto de HN (para comprimir mejor el nivel frío).
+"""E29: continue the pretraining of pythia-70m on HN text (to compress the cold tier better).
 
-Misma arquitectura, tokenizador y coste por token que pythia-70m: el motor de Rust y export_lm.py
-sirven sin cambios y la descompresión va igual de rápida. Solo cambia lo bien que predice HN.
-- Datos: JSONL de `hnz lmdump` (el texto EXACTO que codifica el nivel frío: título\\nurl\\ncuerpo en
-  la representación "e"); cada registro es una secuencia propia que empieza en BOS, como al comprimir.
-- Evaluación: bits/byte en meses que NO están en el entrenamiento (2010-06, 2015-06, 2024-01).
-- Reanudable: punto de control (modelo + optimizador + paso) cada --save pasos; al relanzar sigue.
-Uso:
+Same architecture, tokenizer and cost per token as pythia-70m: the Rust engine and export_lm.py
+work unchanged and decompression is just as fast. Only how well it predicts HN changes.
+- Data: JSONL from `hnz lmdump` (the EXACT text the cold tier encodes: title\\nurl\\nbody in
+  the "e" representation); each record is its own sequence starting at BOS, as when compressing.
+- Evaluation: bits/byte on months that are NOT in the training set (2010-06, 2015-06, 2024-01).
+- Resumable: checkpoint (model + optimizer + step) every --save steps; relaunching continues.
+Usage:
   python scripts/train_lm.py --data data_lm/train.jsonl --eval data_lm/eval_*.jsonl --steps 6000 --out models/lm-hn-70m
-  python scripts/train_lm.py ... --probe 20        # solo mide tokens/s
+  python scripts/train_lm.py ... --probe 20        # only measures tokens/s
 """
 import argparse, glob, json, math, os, random, time
 import numpy as np, torch
@@ -21,7 +21,7 @@ def log(*a):
 
 
 def load(path, tok, max_len, limit=None):
-    """[(token ids con BOS al principio, bytes del texto)]"""
+    """[(token ids with BOS first, bytes of the text)]"""
     recs = []
     with open(path, encoding='utf-8') as f:
         for line in f:
@@ -39,7 +39,7 @@ def load(path, tok, max_len, limit=None):
 
 
 def batches(data, batch_tokens, rng):
-    """Lotes de longitud parecida (poco relleno), en orden aleatorio."""
+    """Batches of similar length (little padding), in random order."""
     order = sorted(range(len(data)), key=lambda i: (len(data[i][0]), rng.random()))
     out, cur, longest = [], [], 0
     for i in order:
@@ -56,8 +56,8 @@ def batches(data, batch_tokens, rng):
 
 
 DEV = torch.device('cpu')
-AMP = False   # fp16 mixto en la GPU (pesos y optimizador en float32). OJO: bf16 rompe pythia
-              # (pérdida 5,7 frente a 4,0 en fp32); fp16, su formato nativo, da lo mismo que fp32
+AMP = False   # mixed fp16 on the GPU (weights and optimizer in float32). NOTE: bf16 breaks pythia
+              # (loss 5.7 vs 4.0 in fp32); fp16, its native format, gives the same as fp32
 
 
 def tensors(data, idx, pad):
@@ -75,8 +75,8 @@ def nll_bits(model, x, m, amp=None):
     with torch.autocast(device_type=DEV.type, dtype=torch.float16, enabled=AMP if amp is None else amp):
         logits = model(input_ids=x, attention_mask=m).logits[:, :-1]
     tgt, msk = x[:, 1:], m[:, 1:].bool()
-    # entropía cruzada fusionada en float32 solo sobre las posiciones reales (sin relleno): no se
-    # guarda una copia completa de log-probabilidades (vocabulario de 50k) para el gradiente
+    # fused cross-entropy in float32, only over the real positions (no padding): no full copy
+    # of the log-probabilities (50k vocabulary) is kept for the gradient
     nll = torch.nn.functional.cross_entropy(logits[msk].float(), tgt[msk], reduction='sum')
     return nll / math.log(2), msk.sum()
 
@@ -89,7 +89,7 @@ def evaluate(model, sets, pad):
         bits = nbytes = 0.0
         for idx in batches(data, 8192, random.Random(0)):
             x, m = tensors(data, idx, pad)
-            b, _ = nll_bits(model, x, m, amp=False)   # evaluación exacta en float32
+            b, _ = nll_bits(model, x, m, amp=False)   # exact evaluation in float32
             bits += float(b)
             nbytes += sum(data[i][1] for i in idx)
         res[name] = bits / nbytes
@@ -112,8 +112,8 @@ def main():
     ap.add_argument('--eval-every', type=int, default=500)
     ap.add_argument('--eval-n', type=int, default=1000)
     ap.add_argument('--threads', type=int, default=16)
-    ap.add_argument('--device', default='auto', help='cpu, xpu (iGPU Intel) o auto')
-    ap.add_argument('--fp32', action='store_true', help='sin fp16 mixto en la GPU')
+    ap.add_argument('--device', default='auto', help='cpu, xpu (Intel iGPU) or auto')
+    ap.add_argument('--fp32', action='store_true', help='no mixed fp16 on the GPU')
     ap.add_argument('--probe', type=int, default=0)
     a = ap.parse_args()
     if os.name == 'nt' and not a.probe:
@@ -125,17 +125,17 @@ def main():
     DEV = torch.device('xpu' if a.device == 'auto' and hasattr(torch, 'xpu') and torch.xpu.is_available() else
                        ('cpu' if a.device == 'auto' else a.device))
     AMP = DEV.type != 'cpu' and not a.fp32
-    log(f'dispositivo {DEV}' + (' (fp16 mixto)' if AMP else ''))
+    log(f'device {DEV}' + (' (mixed fp16)' if AMP else ''))
     scaler = torch.amp.GradScaler(DEV.type, enabled=AMP)
     tok = AutoTokenizer.from_pretrained(a.base)
     ck = os.path.join(a.out, 'checkpoint')
     start = os.path.exists(os.path.join(ck, 'state.pt'))
     model = AutoModelForCausalLM.from_pretrained(ck if start else a.base, dtype=torch.float32).to(DEV)
     model.train()
-    log(f'cargando datos de {a.data}')
+    log(f'loading data from {a.data}')
     data = load(a.data, tok, a.max_len)
     ntok = sum(len(d[0]) for d in data)
-    log(f'{len(data):,} registros, {ntok / 1e6:.1f} M tokens ({ntok / len(data):.0f}/registro)')
+    log(f'{len(data):,} records, {ntok / 1e6:.1f} M tokens ({ntok / len(data):.0f}/record)')
     sets = {os.path.basename(p).replace('.jsonl', ''): load(p, tok, a.max_len, a.eval_n) for p in a.eval}
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, betas=(0.9, 0.95), weight_decay=0.01)
     step, rng = 0, random.Random(1234)
@@ -143,9 +143,9 @@ def main():
         st = torch.load(os.path.join(ck, 'state.pt'), weights_only=False, map_location=DEV)
         opt.load_state_dict(st['opt'])
         step, rng = st['step'], st['rng']
-        log(f'reanudando en el paso {step}')
+        log(f'resuming at step {step}')
     elif sets and not a.probe:
-        log('base (pythia-70m sin entrenar): ' + ', '.join(f'{k} {v:.4f} bits/byte' for k, v in evaluate(model, sets, tok.bos_token_id).items()))
+        log('base (pythia-70m untrained): ' + ', '.join(f'{k} {v:.4f} bits/byte' for k, v in evaluate(model, sets, tok.bos_token_id).items()))
     sched = lambda s: a.lr * min(1.0, (s + 1) / a.warmup) * (0.1 + 0.9 * 0.5 * (1 + math.cos(math.pi * min(s, a.steps) / a.steps)))
     queue, t0, seen = [], time.time(), 0
     while step < (a.probe or a.steps):
@@ -167,7 +167,7 @@ def main():
         seen += int(m.sum())
         if step % 20 == 0 or a.probe:
             dt = time.time() - t0
-            log(f'paso {step}: pérdida {float(loss):.4f}, {seen / dt:,.0f} tokens/s, lr {sched(step):.2e}')
+            log(f'step {step}: loss {float(loss):.4f}, {seen / dt:,.0f} tokens/s, lr {sched(step):.2e}')
         if a.probe:
             continue
         if step % a.save == 0 or step == a.steps:
@@ -177,11 +177,11 @@ def main():
             torch.save({'opt': opt.state_dict(), 'step': step, 'rng': rng}, os.path.join(ck, 'state.pt.tmp'))
             os.replace(os.path.join(ck, 'state.pt.tmp'), os.path.join(ck, 'state.pt'))
         if sets and (step % a.eval_every == 0 or step == a.steps):
-            log(f'evaluación paso {step}: ' + ', '.join(f'{k} {v:.4f} bits/byte' for k, v in evaluate(model, sets, tok.bos_token_id).items()))
+            log(f'evaluation step {step}: ' + ', '.join(f'{k} {v:.4f} bits/byte' for k, v in evaluate(model, sets, tok.bos_token_id).items()))
     if not a.probe:
         model.save_pretrained(a.out)
         tok.save_pretrained(a.out)
-        log(f'modelo final en {a.out} (exportar con: python scripts/export_lm.py {a.out} {a.out}.hnzlm)')
+        log(f'final model in {a.out} (export with: python scripts/export_lm.py {a.out} {a.out}.hnzlm)')
 
 
 if __name__ == '__main__':

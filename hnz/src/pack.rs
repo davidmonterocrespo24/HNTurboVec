@@ -37,7 +37,7 @@ pub struct PackSpec {
     pub embed_ir: PathBuf,
     pub bits: usize,
     pub c1: usize,
-    /// prompt definition of the embeddings (1 = experimentos/embed_prefix.py, E30a)
+    /// prompt definition of the embeddings (1 = experiments/embed_prefix.py, E30a)
     pub prompt_version: u32,
 }
 

@@ -1,9 +1,9 @@
-"""Exporta un modelo Pythia (GPT-NeoX) al formato .hnzlm que usa el motor determinista de Rust:
-- matrices en int8 por fila (escala f32 por fila), vectores en f32
-- filas de query_key_value reordenadas a [Q de todas las cabezas | K | V]
-- tabla RoPE (cos/sin) precalculada en f32 (así Rust no usa sin/cos de la libm)
-- vocabulario: bytes de cada token (BPE a nivel de byte)
-Uso: python scripts/export_lm.py EleutherAI/pythia-70m models/lm-pythia-70m.hnzlm"""
+"""Exports a Pythia (GPT-NeoX) model to the .hnzlm format used by the deterministic Rust engine:
+- matrices in int8 per row (one f32 scale per row), vectors in f32
+- query_key_value rows reordered to [Q of all heads | K | V]
+- RoPE table (cos/sin) precomputed in f32 (so Rust does not use sin/cos from libm)
+- vocabulary: the bytes of each token (byte-level BPE)
+Usage: python scripts/export_lm.py EleutherAI/pythia-70m models/lm-pythia-70m.hnzlm"""
 import sys, json, struct, numpy as np, torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -34,7 +34,7 @@ def add(nm, arr, kind):
     pad = (-len(data)) % 64
     blobs.append(data + b'\0' * pad); off += len(data) + pad
 
-# permutación de filas qkv: HF agrupa por cabeza [q_h, k_h, v_h]; nosotros [Q | K | V]
+# qkv row permutation: HF groups by head [q_h, k_h, v_h]; we use [Q | K | V]
 perm = []
 for part in range(3):
     for h in range(NH):
@@ -53,12 +53,12 @@ for l in range(L):
     add(f'l{l}.fc2.w', sd[p + 'mlp.dense_4h_to_h.weight'], 'q8'); add(f'l{l}.fc2.b', sd[p + 'mlp.dense_4h_to_h.bias'], 'f32')
 add('lnf.w', sd['gpt_neox.final_layer_norm.weight'], 'f32'); add('lnf.b', sd['gpt_neox.final_layer_norm.bias'], 'f32')
 add('embed_out', sd['lm_head.weight' if 'lm_head.weight' in sd else 'embed_out.weight'][:V], 'q8')
-# RoPE: angulo[pos][i] = pos * inv_freq[i], i < ROT/2
+# RoPE: angle[pos][i] = pos * inv_freq[i], i < ROT/2
 inv = 1.0 / (RP['rope_theta'] ** (np.arange(0, ROT, 2, dtype=np.float64) / ROT))
 ang = np.outer(np.arange(MAXPOS, dtype=np.float64), inv)
 add('rope_cos', np.cos(ang).astype(np.float32), 'f32'); add('rope_sin', np.sin(ang).astype(np.float32), 'f32')
 
-# vocabulario: bytes de cada id (byte-level BPE de GPT-2/NeoX)
+# vocabulary: the bytes of each id (byte-level BPE of GPT-2/NeoX)
 def bytes_to_unicode():
     bs = list(range(ord('!'), ord('~') + 1)) + list(range(ord('¡'), ord('¬') + 1)) + list(range(ord('®'), ord('ÿ') + 1))
     cs = bs[:]; n = 0
@@ -76,10 +76,10 @@ for i in range(V):
     if t is None or i in special:
         vocab_bytes.append(b'')
     elif i in added:
-        vocab_bytes.append(added[i].encode('utf-8'))  # tokens añadidos: texto literal
+        vocab_bytes.append(added[i].encode('utf-8'))  # added tokens: literal text
     else:
         vocab_bytes.append(bytes(inv_map[c] for c in t))
-# comprobación: decodificar ids con la tabla == decode del tokenizer
+# check: decoding ids with the table == the tokenizer's decode
 for txt in ['Hello world', '  indented' + chr(10) + chr(10) + '  code  ', 'naïve café — “quotes”', 'url <https://x.com/a?b=1>80> end']:
     ids = tok(txt, add_special_tokens=False)['input_ids']
     assert b''.join(vocab_bytes[i] for i in ids).decode('utf-8') == txt, txt
@@ -97,6 +97,6 @@ with open(out, 'wb') as f:
     f.write(b'HNZLM1\0\0'); f.write(struct.pack('<I', len(hj))); f.write(hj)
     pad = (-(12 + len(hj))) % 64; f.write(b'\0' * pad)
     for b in blobs: f.write(b)
-# copia del tokenizer (para codificar desde Rust)
+# copy of the tokenizer (for encoding from Rust)
 tok.backend_tokenizer.save(out.replace('.hnzlm', '.tokenizer.json'))
 print(f'{out}: H={H} heads={NH} layers={L} inter={I} vocab={V} rot={ROT} | {sum(len(b) for b in blobs)/1e6:.1f} MB')

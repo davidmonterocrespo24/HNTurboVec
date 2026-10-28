@@ -1,10 +1,10 @@
-//! Almacén de texto del NIVEL FRÍO: cada registro (título, url, texto) se comprime con el LM +
-//! codificador aritmético, de forma independiente (acceso aleatorio perfecto).
+//! Text store of the COLD TIER: each record (title, url, text) is compressed with the LM +
+//! arithmetic coder, on its own (perfect random access).
 //!
-//! Representación que ve el LM (E15): "título\nurl\ncuerpo", donde el cuerpo es el HTML de HN en
-//! forma compacta y "natural": párrafos como "\n\n", enlaces como <url>, <url>k> (truncado) o
-//! <url|texto>, y etiquetas <i>, <pre><code> literales. Si no es representable sin ambigüedad se
-//! usan los marcadores de control; y si el registro no es apto (muy largo, etc.) se guarda con zstd.
+//! What the LM sees (E15): "title\nurl\nbody", where the body is HN's HTML in a compact,
+//! "natural" form: paragraphs as "\n\n", links as <url>, <url>k> (truncated) or <url|text>,
+//! and literal <i>, <pre><code> tags. If that cannot be represented without ambiguity, the
+//! control markers are used; and if the record is not suitable (too long, etc.) it is stored with zstd.
 
 use super::coder::{decode_token, encode_token, Decoder, Encoder};
 use super::math::logits_to_cum;
@@ -23,13 +23,13 @@ use std::path::Path;
 use tokenizers::Tokenizer;
 
 const GROUP: usize = 32;
-/// máximo de tokens por registro (y nunca más que el contexto del modelo - 1)
+/// most tokens per record (and never more than the model's context - 1)
 const MAX_TOKENS: usize = 2000;
 /// token cap when decoding only the title (HN titles have <= 80 characters: <= 321 tokens with the
 /// newline, even if every byte were a token)
 pub(super) const TITLE_TOKENS: usize = 400;
 
-/// Forma compacta (marcadores de htmlx) -> forma "natural" para el LM. None si sería ambigua.
+/// Compact form (htmlx markers) -> "natural" form for the LM. None if it would be ambiguous.
 pub fn to_lm(c: &str) -> Option<String> {
     if c.contains(['<', '>', '\n']) {
         return None;
@@ -79,7 +79,7 @@ pub fn to_lm(c: &str) -> Option<String> {
                         consumed = j + 1 + k + 1;
                     }
                 }
-                // saltar los caracteres consumidos
+                // skip the consumed characters
                 let end = i + 1 + consumed;
                 while let Some(&(p, _)) = it.peek() {
                     if p < end {
@@ -96,7 +96,7 @@ pub fn to_lm(c: &str) -> Option<String> {
     Some(out)
 }
 
-/// Inverso de `to_lm`.
+/// Inverse of `to_lm`.
 pub fn from_lm(s: &str) -> Option<String> {
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
@@ -157,13 +157,13 @@ pub fn from_lm(s: &str) -> Option<String> {
     Some(out)
 }
 
-/// Texto exacto que codifica el LM para un registro (None si va con zstd de reserva). Sirve para
-/// entrenar o evaluar modelos con la misma representación que usa el nivel frío.
+/// The exact text the LM encodes for a record (None if it goes to the zstd fallback). Useful to
+/// train or evaluate models on the same representation the cold tier uses.
 pub fn lm_text(title: &str, url: &str, text: &str) -> Option<String> {
     lm_string(title, url, text).map(|(s, _)| s)
 }
 
-/// Cadena que ve el LM + banderas. None si el registro no es apto (se guardará con zstd).
+/// The string the LM sees + flags. None if the record is not suitable (it will be stored with zstd).
 fn lm_string(title: &str, url: &str, text: &str) -> Option<(String, u64)> {
     if title.contains('\n') || url.contains('\n') {
         return None;
@@ -186,11 +186,11 @@ fn parse_lm_string(s: &str, flags: u64) -> Result<TextRec> {
     let url = parts.next().unwrap_or("").to_string();
     let body = parts.next().unwrap_or("");
     let mode = Mode::from_bits(flags & 3);
-    let compact = if (flags >> 2) & 1 == 1 { from_lm(body).ok_or_else(|| anyhow!("cuerpo LM inválido"))? } else { body.to_string() };
+    let compact = if (flags >> 2) & 1 == 1 { from_lm(body).ok_or_else(|| anyhow!("invalid LM body"))? } else { body.to_string() };
     Ok(TextRec { title, url, text: if mode == Mode::Raw { compact } else { htmlx::restore(mode, &compact) } })
 }
 
-/// Convierte un prefijo del cuerpo (representación LM, compacta o HTML) en texto legible.
+/// Turns a prefix of the body (LM, compact or HTML representation) into readable text.
 fn plain_prefix(body: &str, flags: u64) -> String {
     let mode = Mode::from_bits(flags & 3);
     if mode == Mode::Raw {
@@ -207,7 +207,7 @@ fn plain_prefix(body: &str, flags: u64) -> String {
         } else if let Some(t) = ["<i>", "</i>", "<pre><code>", "</code></pre>"].iter().find(|t| lmmap && rest.starts_with(**t)) {
             i += t.len();
         } else if lmmap && rest.starts_with('<') {
-            // enlace <url>, <url>k>, <url|texto>: mostrar la url
+            // link <url>, <url>k>, <url|text>: show the url
             let b = &rest[1..];
             let e = b.find(['>', '|']).unwrap_or(b.len());
             out.push_str(&b[..e]);
@@ -277,7 +277,7 @@ impl LmCodec {
     pub fn load(model_path: &Path) -> Result<Self> {
         let model = LmModel::load(model_path)?;
         if model.h.vocab > 1 << super::coder::VOCAB_BITS {
-            bail!("vocabulario de {} tokens: el codificador admite hasta {}", model.h.vocab, 1 << super::coder::VOCAB_BITS);
+            bail!("vocabulary of {} tokens: the coder supports up to {}", model.h.vocab, 1 << super::coder::VOCAB_BITS);
         }
         let tp = model_path.with_extension("tokenizer.json");
         let tok = Tokenizer::from_file(&tp).map_err(|e| anyhow!("tokenizer {}: {e}", tp.display()))?;
@@ -288,7 +288,7 @@ impl LmCodec {
     pub fn from_parts(model: Vec<u8>, tokenizer_json: Option<&[u8]>) -> Result<Self> {
         let model = LmModel::from_bytes(model)?;
         if model.h.vocab > 1 << super::coder::VOCAB_BITS {
-            bail!("vocabulario de {} tokens: el codificador admite hasta {}", model.h.vocab, 1 << super::coder::VOCAB_BITS);
+            bail!("vocabulary of {} tokens: the coder supports up to {}", model.h.vocab, 1 << super::coder::VOCAB_BITS);
         }
         let tok = match tokenizer_json {
             Some(j) => Some(Tokenizer::from_bytes(j).map_err(|e| anyhow!("tokenizer: {e}"))?),
@@ -298,12 +298,12 @@ impl LmCodec {
     }
 
     fn tokenizer(&self) -> &Tokenizer {
-        self.tok.as_ref().expect("este codec se cargó sin tokenizador: solo puede descomprimir")
+        self.tok.as_ref().expect("this codec was loaded without a tokenizer: it can only decompress")
     }
 
-    /// Comprime un registro (un hilo). Devuelve el registro serializado y su nº de tokens.
-    /// Formato: varint(cabecera) [+ 1 byte de comprobación si es LM con tokens] + payload, con
-    /// cabecera = ntok<<4 | codec<<3 | lmmap<<2 | modo (codec 1 = zstd de reserva).
+    /// Compresses one record (one thread). Returns the serialized record and its token count.
+    /// Format: varint(header) [+ 1 check byte if it is LM with tokens] + payload, with
+    /// header = ntok<<4 | codec<<3 | lmmap<<2 | mode (codec 1 = zstd fallback).
     pub fn encode_record(&self, title: &str, url: &str, text: &str) -> (Vec<u8>, u64) {
         let _fp = super::fpenv::FpGuard::new();
         let (ids, head) = match self.plan_record(title, url, text) {
@@ -321,7 +321,7 @@ impl LmCodec {
         let mut enc = Encoder::new();
         let v = self.model.h.vocab;
         let mut cum = Vec::new();
-        // cabeza de vocabulario por trozos de 64 posiciones (~13 MB en vez de T x 200 KB)
+        // vocabulary head in chunks of 64 positions (~13 MB instead of T x 200 KB)
         self.model.prefill_chunked(&seq, 64, |p0, logits| {
             for r in 0..logits.len() / v {
                 logits_to_cum(&logits[r * v..(r + 1) * v], &mut cum);
@@ -370,7 +370,7 @@ impl LmCodec {
             out.extend(zstd::bulk::compress(&raw, 19).expect("zstd"));
             RecPlan::Fallback(out)
         };
-        // registro vacío (p.ej. una fila deleted): solo 1 byte de cabecera, sin LM
+        // empty record (e.g. a deleted row): just 1 header byte, no LM
         if title.is_empty() && url.is_empty() && text.is_empty() {
             return RecPlan::Empty;
         }
@@ -395,18 +395,18 @@ impl LmCodec {
         RecPlan::Lm { ids, head }
     }
 
-    /// Descomprime varios registros EN LOTE (los pesos se leen una vez por paso para todos).
-    /// - `limit`: máximo de tokens del CUERPO por registro (modo fragmento; título y url completos).
-    /// - `title_only`: parar en el primer salto de línea (solo el título).
-    /// - `has_check`: los registros llevan byte de comprobación (segmentos `rec_check`).
-    /// Devuelve (texto, parcial).
+    /// Decompresses several records AS A BATCH (the weights are read once per step for all).
+    /// - `limit`: most BODY tokens per record (snippet mode; title and url in full).
+    /// - `title_only`: stop at the first newline (the title only).
+    /// - `has_check`: the records carry a check byte (`rec_check` segments).
+    /// Returns (text, partial).
     pub fn decode_records(&self, recs: &[&[u8]], parallel: bool, limit: Option<usize>, title_only: bool, has_check: bool) -> Result<Vec<(TextRec, bool)>> {
         let n = recs.len();
         self.decode_records_each(recs, parallel, &vec![limit; n], &vec![title_only; n], &vec![has_check; n])
     }
 
-    /// Como `decode_records` pero con límite, modo "solo título" y comprobación POR REGISTRO, para
-    /// decodificar en un único lote cosas distintas (fragmentos de resultados + títulos de stories).
+    /// Like `decode_records`, but with the limit, the "title only" mode and the check PER RECORD,
+    /// to decode different things in one batch (result snippets + story titles).
     pub fn decode_records_each(
         &self,
         recs: &[&[u8]],
@@ -467,7 +467,7 @@ impl LmCodec {
             .into_iter()
             .map(|d| match d {
                 Decoded::Text(t, p) => Ok((t, p)),
-                Decoded::Prefix(_) => anyhow::bail!("decodificación inesperada"),
+                Decoded::Prefix(_) => anyhow::bail!("unexpected decoding result"),
             })
             .collect()
     }
@@ -572,7 +572,7 @@ impl LmCodec {
             if prof {
                 let p: Vec<f64> = super::model::PROF.iter().map(|x| x.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / 1e6).collect();
                 eprintln!(
-                    "  [perfil] {} pasos: modelo {:.1} ms (matmul capas {:.1}, atención {:.1}, cabeza {:.1}), softmax+decodificador {:.1} ms",
+                    "  [profile] {} steps: model {:.1} ms (layer matmuls {:.1}, attention {:.1}, head {:.1}), softmax+decoder {:.1} ms",
                     steps, t_model * 1e3, p[0], p[1], p[2], t_code * 1e3
                 );
             }
@@ -588,7 +588,7 @@ impl LmCodec {
         Ok(out.into_iter().map(|x| x.unwrap()).collect())
     }
 
-    /// Softmax -> frecuencias -> decodificador aritmético para cada fila activa (en paralelo).
+    /// Softmax -> frequencies -> arithmetic decoder for each active row (in parallel).
     fn sample(&self, logits: &[f32], active: &[usize], decs: &mut [Decoder], parallel: bool) -> Vec<u32> {
         let v = self.model.h.vocab;
         let got: Vec<std::sync::atomic::AtomicU32> = (0..active.len()).map(|_| std::sync::atomic::AtomicU32::new(0)).collect();
@@ -597,7 +597,7 @@ impl LmCodec {
             let j = active[r];
             let mut cum = Vec::new();
             logits_to_cum(&logits[r * v..(r + 1) * v], &mut cum);
-            // SAFETY: `active` no repite índices: cada tarea usa un decodificador distinto
+            // SAFETY: `active` has no repeated indices: each task uses a different decoder
             let d = unsafe { &mut *dec_ptr.get().add(j) };
             got[r].store(decode_token(d, &cum), std::sync::atomic::Ordering::Relaxed);
         };
@@ -609,9 +609,9 @@ impl LmCodec {
         got.into_iter().map(|a| a.into_inner()).collect()
     }
 
-    /// Descompresión masiva con LOTE CONTINUO: `slots` registros a la vez y, cuando uno termina,
-    /// su hueco lo ocupa el siguiente (no se espera al más largo del lote). Llama a
-    /// `sink(índice, texto)` por cada registro. Para verify / retier / rebm25.
+    /// Bulk decompression with CONTINUOUS BATCHING: `slots` records at a time, and when one ends
+    /// the next one takes its slot (no waiting for the longest one in the batch). Calls
+    /// `sink(index, text)` for each record. For verify / retier / rebm25.
     pub fn decode_stream(&self, recs: &[&[u8]], has_check: bool, slots: usize, mut sink: impl FnMut(usize, TextRec) -> Result<()>) -> Result<()> {
         let _fp = super::fpenv::FpGuard::new();
         let slots = slots.max(1);
@@ -624,7 +624,7 @@ impl LmCodec {
         let mut last = vec![self.model.h.bos; slots];
         let mut next = 0usize;
         loop {
-            // rellenar huecos libres (los registros sin LM se resuelven al momento)
+            // fill the free slots (records without LM are resolved right away)
             for s in 0..slots {
                 while slot_rec[s].is_none() && next < recs.len() {
                     let i = next;
@@ -670,10 +670,10 @@ impl LmCodec {
     }
 }
 
-/// Cabecera de un registro del nivel LM.
+/// Header of an LM tier record.
 pub(super) struct RecHead<'a> {
     pub ntok: usize,
-    /// lmmap<<2 | modo
+    /// lmmap<<2 | mode
     pub flags: u64,
     pub zstd: bool,
     pub check: Option<u8>,
@@ -683,7 +683,7 @@ pub(super) struct RecHead<'a> {
 /// The header of a record; a damaged one (unreadable, or more tokens than any record can have,
 /// which would make the decoder run on and on) is a `CorruptBlockError`.
 pub(super) fn parse_head(r: &[u8], has_check: bool, max_tok: usize) -> Result<RecHead<'_>> {
-    let bad = || crate::block::corrupt("cabecera de registro dañada");
+    let bad = || crate::block::corrupt("damaged record header");
     let mut p = 0;
     let h = try_get(r, &mut p).ok_or_else(bad)?;
     let zstd = (h >> 3) & 1 == 1;
@@ -700,7 +700,7 @@ pub(super) fn parse_head(r: &[u8], has_check: bool, max_tok: usize) -> Result<Re
 }
 
 pub(super) fn decode_fallback(payload: &[u8]) -> Result<TextRec> {
-    let bad = || crate::block::corrupt("registro zstd dañado");
+    let bad = || crate::block::corrupt("damaged zstd record");
     let raw = zstd::stream::decode_all(payload).map_err(|_| bad())?;
     let mut q = 0;
     let tl = try_get(&raw, &mut q).ok_or_else(bad)? as usize;
@@ -716,7 +716,7 @@ pub(super) fn decode_fallback(payload: &[u8]) -> Result<TextRec> {
     })
 }
 
-/// Byte de comprobación de un registro LM (detecta una divergencia del modelo o del binario).
+/// Check byte of an LM record (detects a divergence of the model or of the binary).
 pub fn check_byte(b: &[u8]) -> u8 {
     let mut h: u64 = 0xcbf29ce484222325;
     for &x in b {
@@ -733,7 +733,7 @@ fn finish_record(bytes: Vec<u8>, h: &RecHead) -> Result<TextRec> {
 /// The text of a whole decoded record: its check byte verified, then the LM string parsed.
 pub(super) fn finish_bytes(bytes: Vec<u8>, check: Option<u8>, flags: u64) -> Result<TextRec> {
     verify_check(&bytes, check)?;
-    let s = String::from_utf8(bytes).context("UTF-8 inválido al descomprimir (¿modelo distinto?)")?;
+    let s = String::from_utf8(bytes).context("invalid UTF-8 after decompressing (a different model?)")?;
     parse_lm_string(&s, flags)
 }
 
@@ -742,7 +742,7 @@ pub(super) fn verify_check(bytes: &[u8], check: Option<u8>) -> Result<()> {
     if let Some(c) = check {
         if check_byte(bytes) != c {
             // the record's bytes passed their group checksum: this binary decodes them differently
-            return Err(crate::block::incompatible("registro corrupto: la comprobación no coincide (¿modelo LM o binario distinto del que comprimió?)"));
+            return Err(crate::block::incompatible("corrupt record: the check does not match (an LM model or binary other than the one that compressed it?)"));
         }
     }
     Ok(())
@@ -750,13 +750,13 @@ pub(super) fn verify_check(bytes: &[u8], check: Option<u8>) -> Result<()> {
 
 /// The text of a whole LM string (title, url and body on three lines, with the record's flags).
 pub fn text_of(bytes: Vec<u8>, flags: u64) -> Result<TextRec> {
-    let s = String::from_utf8(bytes).context("UTF-8 inválido al descomprimir (¿modelo distinto?)")?;
+    let s = String::from_utf8(bytes).context("invalid UTF-8 after decompressing (a different model?)")?;
     parse_lm_string(&s, flags)
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct LmInfo {
-    /// versión de la definición numérica con la que se comprimió (ver model::MATH_VERSION)
+    /// version of the numeric definition it was compressed with (see model::MATH_VERSION)
     #[serde(default = "math_v1")]
     pub math: u32,
     pub model_id: String,
@@ -765,12 +765,12 @@ pub struct LmInfo {
     pub lm_records: usize,
     pub zstd_records: usize,
     pub tokens: u64,
-    /// los registros LM llevan 1 byte de comprobación tras la cabecera (desde la versión 3)
+    /// LM records carry 1 check byte after the header (since version 3)
     #[serde(default)]
     pub rec_check: bool,
 }
 
-/// Comprime todos los registros (en paralelo, un registro por hilo) y escribe lm.bin/lm.idx/lm.json.
+/// Compresses all records (in parallel, one record per thread) and writes lm.bin/lm.idx/lm.json.
 pub fn write(dir: &Path, codec: &LmCodec, recs: &[(&str, &str, &str)], progress: bool) -> Result<EncStats> {
     let done = std::sync::atomic::AtomicUsize::new(0);
     let t0 = std::time::Instant::now();
@@ -781,7 +781,7 @@ pub fn write(dir: &Path, codec: &LmCodec, recs: &[(&str, &str, &str)], progress:
             let d = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if progress && d % 5000 == 0 {
                 let el = t0.elapsed().as_secs_f64();
-                eprintln!("  LM: {d}/{} registros ({:.0} reg/s, faltan ~{:.0} min)", recs.len(), d as f64 / el, (recs.len() - d) as f64 / (d as f64 / el) / 60.0);
+                eprintln!("  LM: {d}/{} records ({:.0} rec/s, ~{:.0} min left)", recs.len(), d as f64 / el, (recs.len() - d) as f64 / (d as f64 / el) / 60.0);
             }
             x
         })
@@ -922,15 +922,15 @@ impl LmStore {
     pub fn from_parts(bin: Blob, idx: &[u8], gsum: &[u8], info: LmInfo) -> Result<Self> {
         let bad = |m: &str| crate::block::corrupt(format!("text: {m}"));
         if info.group == 0 {
-            return Err(crate::block::incompatible("text: grupo de 0 registros"));
+            return Err(crate::block::incompatible("text: group of 0 records"));
         }
         let ng = info.n_docs.div_ceil(info.group);
         if idx.len() != (ng + 1) * 8 || gsum.len() != ng * 4 {
-            return Err(bad("tamaño del índice"));
+            return Err(bad("index size"));
         }
         let off: Vec<u64> = idx.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
         if off.windows(2).any(|w| w[1] < w[0]) || *off.last().unwrap() as usize != bin.len() {
-            return Err(bad("desplazamientos"));
+            return Err(bad("offsets"));
         }
         let gsum = gsum.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
         Ok(Self { bin, off, info, gsum: Some(gsum) })
@@ -951,7 +951,7 @@ impl LmStore {
     /// Compressed bytes of record `doc` (borrowed if lm.bin is resident; read if not).
     pub fn raw(&self, doc: usize) -> Result<Cow<'_, [u8]>> {
         if doc >= self.info.n_docs || doc / self.info.group + 1 >= self.off.len() {
-            bail!("registro {doc} fuera de rango ({} documentos)", self.info.n_docs);
+            bail!("record {doc} out of range ({} documents)", self.info.n_docs);
         }
         let g = doc / self.info.group;
         let k = doc % self.info.group;
@@ -988,13 +988,13 @@ impl LmStore {
     pub fn check_model(&self, codec: &LmCodec) -> Result<()> {
         if self.info.math != super::model::MATH_VERSION {
             bail!(
-                "el segmento se comprimió con la versión numérica {} del LM y este binario usa la {}: hay que reconstruirlo desde el Parquet (hnz build --tier lm)",
+                "the segment was compressed with LM numeric version {} and this binary uses version {}: rebuild it from the Parquet (hnz build --tier lm)",
                 self.info.math,
                 super::model::MATH_VERSION
             );
         }
         if self.info.model_id != codec.model.id && self.info.model_id != codec.model.id_legacy {
-            bail!("el segmento se comprimió con {} y el modelo cargado es {}", self.info.model_id, codec.model.id);
+            bail!("the segment was compressed with {} and the loaded model is {}", self.info.model_id, codec.model.id);
         }
         Ok(())
     }

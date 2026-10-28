@@ -1,0 +1,12 @@
+2010-06: 80,362 items with content; mean tokens 78, >256: 3.9%
+  bucket  32:  26,519 docs    482.6 docs/s
+  bucket  64:  21,359 docs    223.4 docs/s
+  bucket 128:  19,388 docs    111.4 docs/s
+  bucket 256:  13,096 docs     51.1 docs/s
+TOTAL 125.7 docs/s (10.7 min) -> 49,3M in 4.5 days
+2015-06: 166,387 items with content; mean tokens 80, >256: 4.4%
+  bucket  32:  55,153 docs    441.1 docs/s
+  bucket  64:  43,604 docs    225.0 docs/s
+  bucket 128:  39,403 docs    109.3 docs/s
+  bucket 256:  28,227 docs     53.2 docs/s
+TOTAL 131.3 docs/s (21.1 min) -> 49,3M in 4.3 days

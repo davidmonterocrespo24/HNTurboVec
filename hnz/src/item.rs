@@ -1,4 +1,4 @@
-//! Lectura de los Parquet mensuales del dataset `open-index/hacker-news`.
+//! Reads the monthly Parquet files of the `open-index/hacker-news` dataset.
 
 use anyhow::{bail, Context, Result};
 use arrow::array::{Array, ArrayRef, AsArray, RecordBatch};
@@ -8,9 +8,9 @@ use serde::Serialize;
 use std::fs::File;
 use std::path::Path;
 
-/// Un ítem de HN tal como se guarda (sin pérdida) en el sistema.
-/// Las filas `deleted` se conservan (solo metadatos: tipo, fecha, padre, dead) para no romper la
-/// cadena de los hilos. No se guarda el orden de `kids` (la estructura se reconstruye con `parent`).
+/// An HN item as the system stores it (lossless).
+/// `deleted` rows are kept (metadata only: type, date, parent, dead) so thread chains do not
+/// break. The order of `kids` is not stored (the structure is rebuilt from `parent`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Item {
     pub id: u32,
@@ -19,9 +19,9 @@ pub struct Item {
     pub dead: bool,
     pub deleted: bool,
     pub by: String,
-    /// segundos desde epoch (UTC)
+    /// seconds since epoch (UTC)
     pub time: i64,
-    /// HTML original de HN
+    /// original HN HTML
     pub text: String,
     pub parent: u32,
     pub poll: u32,
@@ -38,7 +38,7 @@ pub struct Loaded {
 }
 
 fn col<'a>(b: &'a RecordBatch, name: &str) -> Result<&'a ArrayRef> {
-    b.column_by_name(name).with_context(|| format!("falta la columna {name}"))
+    b.column_by_name(name).with_context(|| format!("missing column {name}"))
 }
 
 fn strings(a: &ArrayRef) -> Result<Vec<String>> {
@@ -71,7 +71,7 @@ fn lists(a: &ArrayRef) -> Result<Vec<Vec<u32>>> {
 
 /// The `kids` column of a Parquet file: (id, kids in HN's order), sorted by id.
 pub fn read_kids(path: &Path) -> Result<Vec<(u32, Vec<u32>)>> {
-    let f = File::open(path).with_context(|| format!("abriendo {}", path.display()))?;
+    let f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(f)?.with_batch_size(65536).build()?;
     let mut out = Vec::new();
     for batch in reader {
@@ -85,9 +85,9 @@ pub fn read_kids(path: &Path) -> Result<Vec<(u32, Vec<u32>)>> {
     Ok(out)
 }
 
-/// Lee un Parquet mensual. Devuelve todos los ítems (incluidos los `deleted`), ordenados por id.
+/// Reads a monthly Parquet file. Returns every item (including `deleted` ones), sorted by id.
 pub fn read_parquet(path: &Path) -> Result<Loaded> {
-    let f = File::open(path).with_context(|| format!("abriendo {}", path.display()))?;
+    let f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let reader = ParquetRecordBatchReaderBuilder::try_new(f)?.with_batch_size(65536).build()?;
     let mut items = Vec::new();
     let mut deleted = 0usize;
@@ -111,7 +111,7 @@ pub fn read_parquet(path: &Path) -> Result<Loaded> {
                 DataType::Timestamp(TimeUnit::Microsecond, _) => 1_000_000,
                 DataType::Timestamp(TimeUnit::Nanosecond, _) => 1_000_000_000,
                 DataType::Int64 | DataType::Int32 | DataType::UInt32 => 1,
-                other => bail!("la columna time es de tipo {other}: se esperaba una marca de tiempo"),
+                other => bail!("the time column has type {other}: expected a timestamp"),
             };
             let c = arrow::compute::cast(t, &DataType::Int64)?;
             let p = c.as_primitive::<Int64Type>();
@@ -127,7 +127,7 @@ pub fn read_parquet(path: &Path) -> Result<Loaded> {
                 deleted += 1;
             }
             if time_raw[i] % scale != 0 {
-                bail!("id {}: time con fracciones de segundo ({} en unidades de 1/{scale} s), el formato guarda segundos", id[i], time_raw[i]);
+                bail!("id {}: time has fractions of a second ({} in units of 1/{scale} s), the format stores whole seconds", id[i], time_raw[i]);
             }
             items.push(Item {
                 id: id[i] as u32,

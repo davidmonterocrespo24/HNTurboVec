@@ -1,9 +1,9 @@
-//! Índice BM25 compacto por segmento.
-//! - Diccionario de términos: FST (`fst`), valor = offset en postings, o el posting inline si df=1.
-//! - Postings: bloques de 128 (docID delta + tf) empaquetados con BitPacker4x (SIMD-BP128),
-//!   cabeceras de salto (último doc de cada bloque) delante; cola en varints.
-//! - Normas de longitud: 1 byte/doc (escala logarítmica).
-//! - Búsqueda top-k con MaxScore y saltos por rango de docIDs (= rango de fechas).
+//! Compact BM25 index per segment.
+//! - Term dictionary: FST (`fst`), value = offset into the postings, or the posting inline if df=1.
+//! - Postings: blocks of 128 (docID delta + tf) packed with BitPacker4x (SIMD-BP128),
+//!   skip headers (last doc of each block) up front; the tail in varints.
+//! - Length norms: 1 byte/doc (log scale).
+//! - Top-k search with MaxScore and skips by docID range (= date range).
 
 use crate::tokenize;
 use crate::varint::{put, try_get};
@@ -38,10 +38,10 @@ pub struct Bm25Info {
     pub avgdl: f32,
     pub n_terms: usize,
     pub n_postings: u64,
-    /// false = postings booleanos (tf=1), más pequeños
+    /// false = boolean postings (tf=1), smaller
     #[serde(default = "yes")]
     pub with_tf: bool,
-    /// términos con df/n_docs > este valor no se indexan (stopwords automáticas)
+    /// terms with df/n_docs above this value are not indexed (automatic stopwords)
     #[serde(default = "one")]
     pub max_df_ratio: f32,
     /// dictionary value layout: 0 = segment (Single/List), 1 = block v1 (tagged, see `LexWriter`)
@@ -86,7 +86,7 @@ impl Builder {
         Self { dict: HashMap::new(), post: Vec::new(), norms: Vec::new(), total_len: 0 }
     }
 
-    /// Añade documentos consecutivos (docID = nº de documentos ya añadidos).
+    /// Adds consecutive documents (docID = number of documents already added).
     pub fn add_batch(&mut self, texts: &[String]) {
         let start = self.norms.len() as u32;
         let toks: Vec<(Vec<(String, u32)>, u32)> = texts
@@ -302,7 +302,7 @@ impl<'a> Cursor<'a> {
     }
 
     fn damaged(&mut self, what: &str) -> bool {
-        self.fail(format!("postings dañados ({what}) en la posición {}", self.base));
+        self.fail(format!("damaged postings ({what}) at position {}", self.base));
         false
     }
 
@@ -334,13 +334,13 @@ impl<'a> Cursor<'a> {
         let mut last = 0u64;
         let mut plen = Vec::with_capacity(nfull);
         for b in 0..nfull {
-            let Some(dl) = try_get(&h, &mut p) else { return self.damaged("cabecera") };
-            let Some(pl) = try_get(&h, &mut p) else { return self.damaged("cabecera") };
+            let Some(dl) = try_get(&h, &mut p) else { return self.damaged("header") };
+            let Some(pl) = try_get(&h, &mut p) else { return self.damaged("header") };
             // each full block holds 128 increasing documents; its payload is 2 bytes + at most 32
             // bits per document and per frequency
             last += dl;
             if last >= self.n_docs as u64 || (b > 0 && dl < BLK as u64) || (b == 0 && last < BLK as u64 - 1) || !(2..=1026).contains(&pl) {
-                return self.damaged("cabecera");
+                return self.damaged("header");
             }
             self.lasts.push(last as u32);
             plen.push(pl as usize);
@@ -364,17 +364,17 @@ impl<'a> Cursor<'a> {
             let end = if b + 1 < self.nfull { self.pay[b + 1] } else { self.tail_off };
             let Some(data) = self.read(o, end - o) else { return false };
             if data.len() != end - o || data.len() < 2 {
-                return self.damaged("bloque");
+                return self.damaged("block");
             }
             let (db, tb) = (data[0], data[1]);
             let need = 2 + BitPacker4x::compressed_block_size(db) + if self.with_tf { BitPacker4x::compressed_block_size(tb) } else { 0 };
             if db > 32 || tb > 32 || data.len() != need {
-                return self.damaged("bloque");
+                return self.damaged("block");
             }
             let init = if b == 0 { 0 } else { self.lasts[b - 1] };
             let n = bp.decompress_sorted(init, &data[2..], &mut self.docs, db);
             if (b > 0 && self.docs[0] <= init) || self.docs.windows(2).any(|w| w[1] <= w[0]) || self.docs[BLK - 1] != self.lasts[b] {
-                return self.damaged("bloque");
+                return self.damaged("block");
             }
             if self.with_tf {
                 bp.decompress(&data[2 + n..], &mut self.tfs, tb);
@@ -391,17 +391,17 @@ impl<'a> Cursor<'a> {
             let mut p = 0;
             let mut prev = if self.nfull == 0 { 0u64 } else { self.lasts[self.nfull - 1] as u64 };
             for i in 0..cnt {
-                let Some(d) = try_get(&data, &mut p) else { return self.damaged("cola") };
+                let Some(d) = try_get(&data, &mut p) else { return self.damaged("tail") };
                 // increasing documents (only the very first of a list may be doc 0)
                 if d == 0 && (i > 0 || self.nfull > 0) || prev + d >= self.n_docs as u64 {
-                    return self.damaged("cola");
+                    return self.damaged("tail");
                 }
                 prev += d;
                 self.docs[i] = prev as u32;
                 self.tfs[i] = if self.with_tf {
                     match try_get(&data, &mut p) {
                         Some(t) => t.min(u32::MAX as u64) as u32,
-                        None => return self.damaged("cola"),
+                        None => return self.damaged("tail"),
                     }
                 } else {
                     1
@@ -433,7 +433,7 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// Avanza hasta el primer doc >= target.
+    /// Advances to the first doc >= target.
     pub fn advance(&mut self, target: u32) {
         if self.doc() >= target {
             return;
@@ -524,7 +524,7 @@ impl Bm25 {
         let list = |off: usize| -> Result<Option<(TermPost, u32)>> {
             let head = self.post.get(off, 10)?;
             let mut p = 0;
-            let df = try_get(&head, &mut p).ok_or_else(|| crate::block::corrupt(format!("índice de palabras: cabecera de la lista en {off}")))?;
+            let df = try_get(&head, &mut p).ok_or_else(|| crate::block::corrupt(format!("word index: list header at {off}")))?;
             Ok(Some((TermPost::List { off }, df as u32)))
         };
         if self.info.layout == LAYOUT_BLOCK {
@@ -532,7 +532,7 @@ impl Bm25 {
                 TAG_FREQUENT => Ok(Some((TermPost::Frequent, (v >> 2) as u32))),
                 TAG_SINGLE => Ok(Some((TermPost::Single { doc: (v >> 2) as u32, tf: 1 }, 1))),
                 TAG_LIST => list((v >> 2) as usize),
-                _ => Err(crate::block::incompatible(format!("índice de palabras: valor {v} desconocido"))),
+                _ => Err(crate::block::incompatible(format!("word index: unknown value {v}"))),
             };
         }
         if v & 1 == 1 {
@@ -549,7 +549,7 @@ impl Bm25 {
     /// A damaged or unreadable postings list among the cursors -> `CorruptBlockError`.
     fn check<'b, 'c: 'b>(&self, mut cur: impl Iterator<Item = &'b Cursor<'c>>) -> Result<()> {
         match cur.find_map(|c| c.bad()) {
-            Some(why) => Err(crate::block::corrupt(format!("índice de palabras: {why}"))),
+            Some(why) => Err(crate::block::corrupt(format!("word index: {why}"))),
             None => Ok(()),
         }
     }
@@ -566,7 +566,7 @@ impl Bm25 {
         idf * tf * (K1 + 1.0) / (tf + K1 * (1.0 - B + B * dl / self.info.avgdl))
     }
 
-    /// Top-k en [lo, hi) con MaxScore. `terms`: (postings, idf global).
+    /// Top-k in [lo, hi) with MaxScore. `terms`: (postings, global idf).
     pub fn top_k(&self, terms: &[(TermPost, f32)], lo: u32, hi: u32, k: usize) -> Result<Vec<(u32, f32)>> {
         if terms.is_empty() || k == 0 {
             return Ok(Vec::new());
@@ -635,7 +635,7 @@ impl Bm25 {
         Ok(v)
     }
 
-    /// Puntuación BM25 de una lista de docs (ordenados ascendentemente).
+    /// BM25 score of a list of docs (sorted ascending).
     pub fn score_docs(&self, terms: &[(TermPost, f32)], docs: &[u32]) -> Result<Vec<f32>> {
         let mut out = vec![0f32; docs.len()];
         for &(t, idf) in terms {

@@ -160,7 +160,7 @@ def test_concurrent_queries_match_sequential(tight):
 
 
 def test_budget_error_below_minimum(floor):
-    with pytest.raises(hnz.BudgetError, match='hacen falta al menos'):
+    with pytest.raises(hnz.BudgetError, match='at least .* is needed'):
         hnz.open(BLOCK, ram=floor // 2)
 
 
@@ -279,7 +279,7 @@ def test_damaged_padding_found_by_full(tmp_path, info):
     flip(d / 'hn.hnzb', gap)
     hnz.open(d).close()
     assert hnz.verify_block(d, 'quick')['ok']
-    with pytest.raises(hnz.CorruptBlockError, match='relleno'):
+    with pytest.raises(hnz.CorruptBlockError, match='nonzero padding'):
         hnz.verify_block(d, 'full')
 
 
@@ -325,7 +325,7 @@ def test_damaged_vectors_or_postings_never_panic(tmp_path, info, floor):
 def test_not_a_block(tmp_path):
     (tmp_path / 'x').mkdir()
     (tmp_path / 'x' / 'hn.hnzb').write_bytes(os.urandom(100_000))
-    with pytest.raises(hnz.IncompatibleBlockError, match='no es un bloque'):
+    with pytest.raises(hnz.IncompatibleBlockError, match='is not an hnz block'):
         hnz.open(tmp_path / 'x')
 
 
@@ -333,7 +333,7 @@ def test_block_next_to_segments_refused(tmp_path):
     d = copy_block(tmp_path)
     (d / 'seg-2024-01').mkdir()
     (d / 'seg-2024-01' / 'manifest.json').write_text('{}')
-    with pytest.raises(RuntimeError, match='una cosa u otra'):
+    with pytest.raises(RuntimeError, match='keep one or the other'):
         hnz.open(d)
 
 

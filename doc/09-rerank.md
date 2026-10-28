@@ -1,6 +1,6 @@
 # Reranking (P4): a compact block's candidates reordered by their prefix
 
-**Status:** done on 2026-10-15 (log entry E33 in [BITACORA.md](BITACORA.md)): quality gate met,
+**Status:** done on 2026-10-15 (log entry E33 in [EXPERIMENT-LOG.md](EXPERIMENT-LOG.md)): quality gate met,
 latency and memory measured, adversarial review fixed, 68 Python and 32 Rust tests pass. Design: a panel of three
 architects and a judge (E33); the measurements it rests on: E30a (prefix embeddings), E30c
 (fusion), E30f (cascade).
@@ -137,7 +137,7 @@ On a disjoint dev set (900 other queries) the means are 0.2437 (kv 100), **0.243
 
 ## Latency (cold, sample block)
 
-Measured with `experimentos/bench_p4_latency.py` (E33e step 4, `resultados/results_e33e_latency.txt`):
+Measured with `experiments/bench_p4_latency.py` (E33e step 4, `results/results_e33e_latency.txt`):
 20 eval queries, each in a new `hnz search --rerank` process (hnz's caches empty, the OS file cache
 warm, model loading not counted), k = 10, on a Core Ultra 7 265H laptop (6 P + 8 E + 2 LP-E cores,
 16 threads) with nothing else running:

@@ -48,7 +48,7 @@ def tight(floor):
 
 
 def test_budget_error_below_minimum(floor):
-    with pytest.raises(hnz.BudgetError, match='hacen falta al menos'):
+    with pytest.raises(hnz.BudgetError, match='at least .* is needed'):
         hnz.open(OUT, ram=floor // 2)
     assert issubclass(hnz.BudgetError, MemoryError) and issubclass(hnz.BusyError, TimeoutError)
 
@@ -146,7 +146,7 @@ def test_request_limits(tight):
     """Review fixes: query length cap, BM25 terms capped (long queries still work), absurd timeouts
     and picklable exceptions."""
     import pickle
-    with pytest.raises(ValueError, match='demasiado larga'):
+    with pytest.raises(ValueError, match='query too long'):
         tight.search('x' * 9000)
     with pytest.raises(ValueError):
         tight.embed('y' * 9000)

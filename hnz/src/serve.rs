@@ -65,7 +65,7 @@ impl Response {
 /// every 200 ms on the calling thread) returns true or an error. The port is released before it
 /// returns; requests in progress finish first.
 pub fn serve(arch: Arc<Archive>, host: &str, port: u16, threads: usize, mut stop: impl FnMut() -> Result<bool>) -> Result<()> {
-    let listener = TcpListener::bind((host, port)).with_context(|| format!("no se pudo escuchar en {host}:{port}"))?;
+    let listener = TcpListener::bind((host, port)).with_context(|| format!("could not listen on {host}:{port}"))?;
     // polled, so that this thread also asks `stop` (in Python, the thread that gets Ctrl+C)
     listener.set_nonblocking(true)?;
     let n = threads.clamp(1, MAX_THREADS);
@@ -79,7 +79,7 @@ pub fn serve(arch: Arc<Archive>, host: &str, port: u16, threads: usize, mut stop
         match std::thread::Builder::new().name(format!("hnz-http-{i}")).spawn(move || worker(&arch, &rx, &stopping)) {
             Ok(w) => workers.push(w),
             Err(e) => {
-                out = Err(anyhow::Error::new(e).context("no se pudo crear un hilo del servidor HTTP"));
+                out = Err(anyhow::Error::new(e).context("could not create an HTTP server thread"));
                 break;
             }
         }
@@ -117,7 +117,7 @@ fn accept_loop(listener: &TcpListener, tx: &SyncSender<TcpStream>, stop: &mut im
                     std::thread::sleep(IDLE);
                     continue;
                 }
-                Err(TrySendError::Disconnected(_)) => return Err(anyhow!("los hilos del servidor HTTP terminaron")),
+                Err(TrySendError::Disconnected(_)) => return Err(anyhow!("the HTTP server threads stopped")),
             }
         }
         match listener.accept() {
@@ -154,10 +154,10 @@ fn worker(arch: &Archive, rx: &Mutex<Receiver<TcpStream>>, stopping: &AtomicBool
 fn connection(arch: &Archive, mut s: TcpStream, stopping: bool) {
     let (resp, head_only) = match read_head(&mut s, if stopping { STOP_HEAD_TIME } else { HEAD_TIME }) {
         Err(_) => return, // the client left, or sent too slowly: nobody to answer
-        Ok(None) => (Response::error(431, "cabecera de la petición demasiado grande"), false),
+        Ok(None) => (Response::error(431, "request header too large"), false),
         Ok(Some(head)) => match parse_head(&head) {
             Err(r) => (r, false),
-            Ok((_, head_only)) if stopping => (Response::error(503, "el servidor se está deteniendo"), head_only),
+            Ok((_, head_only)) if stopping => (Response::error(503, "the server is stopping"), head_only),
             Ok((target, head_only)) => (respond(arch, &target), head_only),
         },
     };
@@ -203,7 +203,7 @@ fn head_end(b: &[u8]) -> Option<usize> {
 
 /// The request's target and whether it is a HEAD, or the error to answer.
 fn parse_head(head: &[u8]) -> std::result::Result<(String, bool), Response> {
-    let bad = || Response::error(400, "petición HTTP inválida");
+    let bad = || Response::error(400, "invalid HTTP request");
     let text = std::str::from_utf8(head).map_err(|_| bad())?;
     let mut lines = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l));
     let mut parts = lines.next().unwrap_or("").split(' ');
@@ -214,14 +214,14 @@ fn parse_head(head: &[u8]) -> std::result::Result<(String, bool), Response> {
         return Err(bad());
     }
     if method != "GET" && method != "HEAD" {
-        return Err(Response::error(405, "solo se aceptan GET y HEAD"));
+        return Err(Response::error(405, "only GET and HEAD are accepted"));
     }
     for line in lines {
         let Some((name, value)) = line.split_once(':') else { continue };
         let name = name.trim();
         // a body is never read: refuse it rather than leave it in the connection
         if name.eq_ignore_ascii_case("transfer-encoding") || (name.eq_ignore_ascii_case("content-length") && value.trim() != "0") {
-            return Err(Response::error(400, "las peticiones GET y HEAD no llevan cuerpo"));
+            return Err(Response::error(400, "GET and HEAD requests have no body"));
         }
     }
     Ok((target.to_string(), method == "HEAD"))
@@ -314,7 +314,7 @@ pub fn respond(arch: &Archive, target: &str) -> Response {
             let p = |k: &str| params.iter().find(|(key, v)| key == k && !v.is_empty()).map(|(_, v)| v.clone());
             let num = |k: &str| -> Result<Option<f64>> {
                 match p(k) {
-                    Some(x) => Ok(Some(x.parse::<f64>().map_err(|_| anyhow::Error::new(QueryError(format!("{k} no es un número: {x:?}"))))?)),
+                    Some(x) => Ok(Some(x.parse::<f64>().map_err(|_| anyhow::Error::new(QueryError(format!("{k} is not a number: {x:?}"))))?)),
                     None => Ok(None),
                 }
             };
@@ -357,13 +357,13 @@ pub fn respond(arch: &Archive, target: &str) -> Response {
                             v["ms"] = serde_json::json!(t0.elapsed().as_secs_f64() * 1e3);
                             Response::json(200, v.to_string())
                         }
-                        Ok(None) => Response::error(404, "no encontrado"),
+                        Ok(None) => Response::error(404, "not found"),
                         Err(e) => fail(e),
                     },
-                    Err(_) => Response::error(400, "id inválido"),
+                    Err(_) => Response::error(400, "invalid id"),
                 }
             }
-            None => Response::error(404, "no encontrado"),
+            None => Response::error(404, "not found"),
         },
     }
 }

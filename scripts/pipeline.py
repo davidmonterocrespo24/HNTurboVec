@@ -1,41 +1,41 @@
-"""Pipeline completo y REANUDABLE para construir el archivo de HN por años.
+"""Full, RESUMABLE pipeline that builds the HN archive year by year.
 
-Pasos por año (se salta lo que ya está hecho):
-  1. descargar los Parquet mensuales de open-index/hacker-news (data/YYYY/YYYY-MM.parquet); un mes
-     que ha cambiado en el dataset (p.ej. el mes en curso, que se publica a medias) se vuelve a bajar
-  2. embeddings EmbeddingGemma 2 en la iGPU (embed_month.py)              -> emb/g2_YYYY-MM.*
-     (se recalculan si su Parquet ha cambiado)
-  3. segmento del año: nivel zstd si es reciente, nivel LM si es antiguo   -> out/seg-YYYY
-     (se reconstruye si cambian los meses o su contenido; nunca solo por el nivel: un segmento ya
-     construido se enfría con `hnz retier`, o con --retier aquí)
-  4. índice vectorial del año: 768 bits en zstd, 512 en LM (E19)
-Un año ya construido e indexado con los mismos meses y tamaños que el dataset no vuelve a bajar
-ni a embeber nada: sus Parquet y embeddings se pueden borrar para ahorrar espacio (salvo los del
-año en curso, que se reconstruye entero cuando el dataset añade un mes). Los segmentos sin
-sources.json (construidos a mano con `hnz build`) no se tocan.
+Steps per year (whatever is already done is skipped):
+  1. download the monthly Parquet files of open-index/hacker-news (data/YYYY/YYYY-MM.parquet); a month
+     that changed in the dataset (e.g. the current month, which is published partially) is downloaded again
+  2. EmbeddingGemma 2 embeddings on the iGPU (embed_month.py)             -> emb/g2_YYYY-MM.*
+     (recomputed if their Parquet changed)
+  3. the year's segment: zstd tier if recent, LM tier if old               -> out/seg-YYYY
+     (rebuilt if the months or their content change; never just because of the tier: a segment
+     that is already built is cooled with `hnz retier`, or with --retier here)
+  4. the year's vector index: 768 bits in zstd, 512 in LM (E19)
+A year that is already built and indexed with the same months and sizes as the dataset is not
+downloaded or embedded again: its Parquet files and embeddings can be deleted to save space (except
+those of the current year, which is rebuilt in full when the dataset adds a month). Segments without
+sources.json (built by hand with `hnz build`) are left alone.
 
-Ejemplos (con el entorno .venv activado, o con .venv\\Scripts\\python en vez de python):
-  python scripts/pipeline.py --years 2006-2026                       # todo HN (caliente = últimos 2 años)
-  python scripts/pipeline.py --years 2024 --steps download,embed     # solo preparar 2024
-  python scripts/pipeline.py --years 2006-2015 --all-zstd            # rápido (horas); enfriar luego con --retier
-  python scripts/pipeline.py --years 2006-2024 --steps build --retier   # enfriar a LM los años fríos ya construidos
-  python scripts/pipeline.py --years 2026 --offline                  # sin conexión: solo Parquet locales
+Examples (with the .venv environment active, or with .venv\\Scripts\\python instead of python):
+  python scripts/pipeline.py --years 2006-2026                       # all of HN (hot = last 2 years)
+  python scripts/pipeline.py --years 2024 --steps download,embed     # only prepare 2024
+  python scripts/pipeline.py --years 2006-2015 --all-zstd            # fast (hours); cool later with --retier
+  python scripts/pipeline.py --years 2006-2024 --steps build --retier   # cool the cold years already built to LM
+  python scripts/pipeline.py --years 2026 --offline                  # offline: local Parquet files only
 
-La compresión LM de todo HN tarda días en CPU: una estrategia práctica es construir todo con
---all-zstd y enfriar después los años viejos con --retier (o `hnz retier --tier lm`), que
-conserva el original como <seg>.old salvo con --delete-old (verifica todo antes de borrarlo).
-Si el dataset no responde, el pipeline se detiene (no pasa a modo sin conexión en silencio); con
---offline el límite caliente/frío sale del último año visto en línea (out/pipeline_state.json).
-Los segmentos de un mismo out/ no pueden solaparse: no mezcle segmentos mensuales (seg-YYYY-MM) y
-anuales (seg-YYYY) del mismo periodo.
+LM compression of all of HN takes days on CPU. A practical strategy is to build everything with
+--all-zstd and later cool the old years with --retier (or `hnz retier --tier lm`), which keeps the
+original as <seg>.old unless --delete-old is given (it verifies everything before deleting it).
+If the dataset does not respond, the pipeline stops (it does not silently switch to offline mode).
+With --offline, the hot/cold boundary comes from the last year seen online (out/pipeline_state.json).
+Segments in the same out/ must not overlap: do not mix monthly segments (seg-YYYY-MM) and
+yearly segments (seg-YYYY) for the same period.
 """
 import argparse, glob, json, os, re, subprocess, sys, time
 import numpy as np
-# el descargador hf_xet de huggingface_hub muere a mitad de descarga en este Windows (exit 127,
-# E26): se usa la descarga HTTP de siempre (también reanudable). Se hereda en los subprocesos.
+# huggingface_hub's hf_xet downloader dies mid-download on this Windows machine (exit 127,
+# E26): use the classic HTTP download instead (also resumable). Subprocesses inherit this.
 os.environ.setdefault('HF_HUB_DISABLE_XET', '1')
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # raíz del proyecto
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # project root
 HNZ = os.path.join(ROOT, 'hnz', 'target', 'release', 'hnz.exe' if os.name == 'nt' else 'hnz')
 PY = sys.executable
 REPO = 'open-index/hacker-news'
@@ -55,13 +55,13 @@ def years_arg(s):
 
 _listing = None
 _online = True
-STATE = os.path.join(ROOT, 'out', 'pipeline_state.json')   # último año visto en el dataset
+STATE = os.path.join(ROOT, 'out', 'pipeline_state.json')   # last year seen in the dataset
 
 
 def listing():
-    """Ficheros mensuales del dataset: {año: {ruta relativa: tamaño}} (solo YYYY/YYYY-MM.parquet).
-    Con --offline (o HF_HUB_OFFLINE=1), los Parquet locales. Un fallo de red NO pasa a modo sin
-    conexión en silencio: el límite caliente/frío y las descargas dependen del listado real."""
+    """Monthly files of the dataset: {year: {relative path: size}} (only YYYY/YYYY-MM.parquet).
+    With --offline (or HF_HUB_OFFLINE=1), the local Parquet files. A network failure does NOT
+    silently switch to offline mode: the hot/cold boundary and the downloads depend on the real listing."""
     global _listing
     if _listing is None:
         if _online:
@@ -70,8 +70,8 @@ def listing():
                 tree = HfApi().list_repo_tree(REPO, path_in_repo='data', repo_type='dataset', recursive=True)
                 files = [(f.path, f.size) for f in tree if getattr(f, 'size', None) is not None]
             except Exception as e:
-                raise SystemExit(f'no se pudo listar el dataset {REPO} ({type(e).__name__}: {str(e)[:200]}): '
-                                 'reintente, o use --offline para trabajar solo con los Parquet locales')
+                raise SystemExit(f'could not list the dataset {REPO} ({type(e).__name__}: {str(e)[:200]}): '
+                                 'retry, or use --offline to work with the local Parquet files only')
         else:
             files = [(os.path.relpath(p, ROOT).replace(os.sep, '/'), os.path.getsize(p))
                      for p in glob.glob(os.path.join(ROOT, 'data', '*', '*.parquet'))]
@@ -87,8 +87,8 @@ def listing():
 
 
 def year_done(year):
-    """¿seg-YYYY ya está construido e indexado con los mismos meses y tamaños que el dataset?
-    Entonces no hay que bajar ni embeber nada (sus Parquet y embeddings pueden estar borrados)."""
+    """Is seg-YYYY already built and indexed with the same months and sizes as the dataset?
+    Then there is nothing to download or embed (its Parquet files and embeddings may be deleted)."""
     seg = os.path.join(ROOT, 'out', f'seg-{year}')
     man, side = os.path.join(seg, 'manifest.json'), os.path.join(seg, 'sources.json')
     if not (os.path.exists(man) and os.path.exists(side)):
@@ -99,20 +99,20 @@ def year_done(year):
     avail = {os.path.basename(f): s for f, s in listing().get(year, {}).items()}
     if _online:
         return built == avail
-    # sin conexión solo se ven los Parquet locales: hecho si ninguno es nuevo o distinto
+    # offline, only the local Parquet files are visible: done if none is new or different
     return all(built.get(n) == s for n, s in avail.items())
 
 
 def download(year):
     files = listing().get(year, {})
     if not files:
-        log(f'  (sin ficheros para {year} en el dataset; se omite)')
+        log(f'  (no files for {year} in the dataset; skipped)')
     if not _online:
         return
-    # descarga reanudable byte a byte y con comprobación de SHA-256 (download_hn.py)
+    # byte-level resumable download with SHA-256 check (download_hn.py)
     import download_hn
     if download_hn.run({year})['fallo']:
-        raise SystemExit(f'no se pudieron bajar todos los meses de {year}: vuelva a ejecutar para reanudar')
+        raise SystemExit(f'could not download all months of {year}: run again to resume')
 
 
 def months(year):
@@ -125,13 +125,13 @@ def emb_paths(m):
 
 
 def emb_fresh(p):
-    """¿Hay embeddings calculados a partir de ESTE Parquet? (registro con su tamaño)"""
+    """Are there embeddings computed from THIS Parquet? (a record with its size)"""
     e, i, side = emb_paths(os.path.basename(p).replace('.parquet', ''))
     if not (os.path.exists(e) and os.path.exists(i)):
         return False
     if not os.path.exists(side):
-        # embeddings sin registro (embed_month.py a mano o pipeline anterior): se adoptan solo si
-        # son posteriores al Parquet; uno recién rebajado es más nuevo que ellos -> se recalculan
+        # embeddings without a record (embed_month.py by hand, or an older pipeline): adopt them only
+        # if they are newer than the Parquet; a freshly re-downloaded one is newer -> recompute
         if os.path.getmtime(i) < os.path.getmtime(p):
             return False
         json.dump({'parquet_size': os.path.getsize(p)}, open(side, 'w', encoding='utf-8'))
@@ -145,7 +145,7 @@ def embed(year, device):
             continue
         m = os.path.basename(p).replace('.parquet', '')
         log(f'  embeddings {m} ({device})')
-        # primero se borra lo anterior: si se interrumpe, no quedan ficheros de dos versiones
+        # delete the old files first: if interrupted, no files from two versions are left
         for f in emb_paths(m):
             if os.path.exists(f):
                 os.remove(f)
@@ -156,8 +156,8 @@ def embed(year, device):
 def check_no_monthly_overlap(year):
     mon = [d for d in glob.glob(os.path.join(ROOT, 'out', f'seg-{year}-[0-9][0-9]')) if os.path.exists(os.path.join(d, 'manifest.json'))]
     if mon:
-        raise SystemExit(f'out/ contiene segmentos mensuales de {year} ({", ".join(os.path.basename(x) for x in mon)}) que '
-                         f'se solaparían con out/seg-{year}: muévalos a otra carpeta antes de seguir.')
+        raise SystemExit(f'out/ holds monthly segments of {year} ({", ".join(os.path.basename(x) for x in mon)}) that '
+                         f'would overlap with out/seg-{year}: move them to another folder before going on.')
 
 
 def seg_tier(seg):
@@ -169,16 +169,16 @@ def build(year, tier, a):
     man = os.path.join(seg, 'manifest.json')
     exists = os.path.exists(man)
     side = os.path.join(seg, 'sources.json')
-    # registro provisional, escrito ANTES de `hnz build` (que sustituye la carpeta entera)
+    # provisional record, written BEFORE `hnz build` (which replaces the whole folder)
     pending = seg + '.sources.json'
     if exists and not os.path.exists(side) and os.path.exists(pending) and os.path.getmtime(man) >= os.path.getmtime(pending):
-        # el build terminó pero el proceso murió antes de mover el registro: se adopta
+        # the build finished but the process died before moving the record: adopt it
         os.replace(pending, side)
     prev = json.load(open(side, encoding='utf-8')) if exists and os.path.exists(side) else None
     if exists and prev is None:
-        # construido fuera del pipeline (hnz build a mano): no se sabe qué meses contiene y
-        # reconstruirlo con los Parquet locales podría perder datos
-        log(f'  {os.path.basename(seg)} no tiene sources.json (no lo construyó pipeline.py): no se toca')
+        # built outside the pipeline (hnz build by hand): we do not know which months it holds, and
+        # rebuilding it from the local Parquet files could lose data
+        log(f'  {os.path.basename(seg)} has no sources.json (not built by pipeline.py): left alone')
         return None
     ps = months(year)
     src = [os.path.basename(p) for p in ps]
@@ -186,17 +186,17 @@ def build(year, tier, a):
     if prev is not None:
         missing = sorted(set(prev.get('months', [])) - set(src))
         if missing:
-            # p.ej. se borraron Parquet ya archivados para ahorrar espacio: reconstruir perdería datos
-            log(f'  faltan Parquet locales que seg-{year} ya contiene ({", ".join(missing)}): no se reconstruye')
+            # e.g. already archived Parquet files were deleted to save space: rebuilding would lose data
+            log(f'  local Parquet files that seg-{year} already holds are missing ({", ".join(missing)}): not rebuilt')
             return retier(seg, tier, a)
         if prev.get('months') == src and prev.get('sizes') == sizes:
             return retier(seg, tier, a)
-        log(f'  los meses de {year} o su contenido han cambiado: se reconstruye')
+        log(f'  the months of {year} or their content changed: rebuilding')
     if not ps:
-        log(f'  (sin Parquet para {year}; no se construye)')
+        log(f'  (no Parquet files for {year}; not built)')
         return None
     check_no_monthly_overlap(year)
-    log(f'  segmento {year} nivel {tier} ({len(ps)} meses)')
+    log(f'  segment {year} tier {tier} ({len(ps)} months)')
     json.dump({'months': src, 'sizes': sizes, 'tier': tier}, open(pending, 'w', encoding='utf-8'))
     cmd = [HNZ, 'build', '--out', seg, '--tier', tier] + (['--lm', a.lm] if tier == 'lm' else []) + ps
     subprocess.run(cmd, check=True, cwd=ROOT)
@@ -205,13 +205,13 @@ def build(year, tier, a):
 
 
 def retier(seg, tier, a):
-    """Un segmento ya construido no se reconstruye por cambiar de nivel: se enfría con retier."""
+    """A segment that is already built is not rebuilt because its tier changes: it is cooled with retier."""
     cur = seg_tier(seg)
     if cur == 'zstd' and tier == 'lm':
         if not a.retier:
-            log(f'  {os.path.basename(seg)} está en zstd y le corresponde lm: use --retier (o hnz retier --tier lm)')
+            log(f'  {os.path.basename(seg)} is in zstd but should be lm: use --retier (or hnz retier --tier lm)')
             return seg
-        log(f'  enfriando {os.path.basename(seg)} a nivel lm')
+        log(f'  cooling {os.path.basename(seg)} to the lm tier')
         cmd = [HNZ, 'retier', '--seg', seg, '--tier', 'lm', '--lm', a.lm] + (['--verify-all', '--delete-old'] if a.delete_old else [])
         subprocess.run(cmd, check=True, cwd=ROOT)
     return seg
@@ -219,26 +219,26 @@ def retier(seg, tier, a):
 
 def index(seg, a):
     man = json.load(open(os.path.join(seg, 'manifest.json'), encoding='utf-8'))
-    # bits según el nivel REAL del segmento (un año frío aún sin enfriar sigue con 768)
+    # bits follow the segment's REAL tier (a cold year not cooled yet keeps 768)
     bits = 768 if man.get('text_tier') == 'zstd' else 512
     if man.get('vec_bits', 0) == bits or (man.get('vec_bits', 0) > 0 and not a.reindex):
         return
     side = os.path.join(seg, 'sources.json')
     if not os.path.exists(side):
-        log(f'  ({os.path.basename(seg)} sin sources.json: no se sabe qué embeddings le corresponden; no se indexa)')
+        log(f'  ({os.path.basename(seg)} has no sources.json: unknown which embeddings belong to it; not indexed)')
         return
     names = [x.replace('.parquet', '') for x in json.load(open(side, encoding='utf-8'))['months']]
     if not names:
-        log(f'  (sin meses conocidos para {os.path.basename(seg)}: no se indexa)')
+        log(f'  (no known months for {os.path.basename(seg)}: not indexed)')
         return
     parts = []
     for m in names:
         e, i, _ = emb_paths(m)
         if not (os.path.exists(e) and os.path.exists(i)):
-            log(f'  (sin embeddings para {m}: el segmento queda sin vectores)')
+            log(f'  (no embeddings for {m}: the segment stays without vectors)')
             return
         parts.append((e, i))
-    # unir los meses en streaming (memmap): un año reciente ocupa ~7 GB en float16
+    # join the months by streaming (memmap): a recent year takes ~7 GB in float16
     shapes = [np.load(e, mmap_mode='r').shape for e, _ in parts]
     total, dim = sum(s[0] for s in shapes), shapes[0][1]
     name = os.path.basename(seg)
@@ -250,14 +250,14 @@ def index(seg, a):
     for (e, i), s in zip(parts, shapes):
         ids = np.load(i)
         if len(ids) and (ids[0] <= prev or np.any(np.diff(ids.astype(np.int64)) <= 0)):
-            raise SystemExit(f'ids no crecientes en {i}: no se puede unir en streaming')
+            raise SystemExit(f'ids not increasing in {i}: cannot join by streaming')
         E[o:o + s[0]] = np.load(e, mmap_mode='r')
         I[o:o + s[0]] = ids
         prev = int(ids[-1]) if len(ids) else prev
         o += s[0]
     E.flush(); I.flush()
     del E, I
-    log(f'  vectores {name}: {total:,} ({bits} bits)')
+    log(f'  vectors {name}: {total:,} ({bits} bits)')
     try:
         subprocess.run([HNZ, 'index', '--seg', seg, '--emb', ye, '--ids', yi, '--bits', str(bits)], check=True, cwd=ROOT)
     finally:
@@ -267,14 +267,14 @@ def index(seg, a):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--years', type=years_arg, required=True)
-    ap.add_argument('--hot-years', type=int, default=2, help='nº de años más recientes del DATASET en nivel zstd')
-    ap.add_argument('--hot-from', type=int, default=None, help='año a partir del cual el nivel es zstd (anula --hot-years)')
+    ap.add_argument('--hot-years', type=int, default=2, help='number of most recent DATASET years in the zstd tier')
+    ap.add_argument('--hot-from', type=int, default=None, help='year from which the tier is zstd (overrides --hot-years)')
     ap.add_argument('--all-zstd', action='store_true')
-    ap.add_argument('--retier', action='store_true', help='enfriar a lm los segmentos zstd de años fríos (hnz retier)')
-    ap.add_argument('--delete-old', action='store_true', help='con --retier: verificar todo y borrar el original')
-    ap.add_argument('--reindex', action='store_true', help='rehacer los vectores si tienen otros bits que los del nivel')
+    ap.add_argument('--retier', action='store_true', help='cool the zstd segments of cold years to lm (hnz retier)')
+    ap.add_argument('--delete-old', action='store_true', help='with --retier: verify everything and delete the original')
+    ap.add_argument('--reindex', action='store_true', help='redo the vectors if their bits differ from the tier\'s')
     ap.add_argument('--steps', default='download,embed,build,index')
-    ap.add_argument('--offline', action='store_true', help='sin conexión: solo los Parquet locales (también con HF_HUB_OFFLINE=1)')
+    ap.add_argument('--offline', action='store_true', help='offline: local Parquet files only (also with HF_HUB_OFFLINE=1)')
     ap.add_argument('--device', default='GPU')
     ap.add_argument('--lm', default=os.path.join('models', 'lm-pythia-70m.hnzlm'))
     a = ap.parse_args()
@@ -282,12 +282,12 @@ def main():
     global _online
     _online = not (a.offline or os.environ.get('HF_HUB_OFFLINE', '').lower() in ('1', 'true', 'yes', 'on'))
     if not _online:
-        log('sin conexión: solo se usan los Parquet locales')
-    # el límite caliente/frío se fija respecto al año más reciente del DATASET (no del tramo pedido),
-    # para que ejecutar por tramos dé el mismo resultado; sin conexión, el último año visto en línea
+        log('offline: only the local Parquet files are used')
+    # the hot/cold boundary is set from the most recent year of the DATASET (not of the requested range),
+    # so that running range by range gives the same result; offline, the last year seen online
     if a.all_zstd:
         hot_from = min(a.years)
-        log('todo en nivel zstd')
+        log('everything in the zstd tier')
     else:
         if a.hot_from is not None:
             hot_from = a.hot_from
@@ -296,15 +296,15 @@ def main():
         elif not _online and os.path.exists(STATE):
             hot_from = json.load(open(STATE, encoding='utf-8'))['dataset_max_year'] - a.hot_years + 1
         else:
-            raise SystemExit('no se sabe cuál es el año más reciente del dataset: indique --hot-from')
-        log(f'nivel zstd para años >= {hot_from}; nivel LM para el resto')
+            raise SystemExit('the most recent year of the dataset is unknown: pass --hot-from')
+        log(f'zstd tier for years >= {hot_from}; LM tier for the rest')
     for y in a.years:
         tier = 'zstd' if y >= hot_from else 'lm'
-        log(f'== {y} (nivel {tier})')
+        log(f'== {y} (tier {tier})')
         if ('download' in steps or 'embed' in steps) and year_done(y):
-            # ya construido e indexado y al día: no rebajar Parquet ni recalcular embeddings
-            # que se hayan borrado para ahorrar espacio
-            log(f'  seg-{y} completo y al día con el dataset: no se baja ni se embebe nada')
+            # already built, indexed and up to date: do not re-download Parquet files or recompute
+            # embeddings that were deleted to save space
+            log(f'  seg-{y} complete and up to date with the dataset: nothing to download or embed')
             steps_y = steps - {'download', 'embed'}
         else:
             steps_y = steps
@@ -318,7 +318,7 @@ def main():
         if seg and 'index' in steps_y and os.path.exists(os.path.join(seg, 'manifest.json')) \
                 and os.path.exists(os.path.join(seg, 'sources.json')):
             index(seg, a)
-    log('listo')
+    log('done')
 
 
 if __name__ == '__main__':

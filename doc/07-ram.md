@@ -1,7 +1,7 @@
 # RAM governance (P2): `hnz.open(path, ram="2GB")`
 
-**Status:** implemented and measured on 2026-10-14 (log entry E31 in [BITACORA.md](BITACORA.md)).
-Design context: [06-libreria.md](06-libreria.md).
+**Status:** implemented and measured on 2026-10-14 (log entry E31 in [EXPERIMENT-LOG.md](EXPERIMENT-LOG.md)).
+Design context: [06-library.md](06-library.md).
 
 ## What the budget covers
 

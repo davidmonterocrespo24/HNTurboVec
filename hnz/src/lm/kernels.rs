@@ -1,14 +1,14 @@
-//! Matmul int8 x int8 -> i32 EXACTA (la suma de enteros no depende del orden), así que cualquier
-//! implementación (escalar, AVX2, AVX-VNNI, varios hilos) da exactamente el mismo resultado.
-//! - AVX-VNNI: `vpdpbusd` (u8 x i8, 32 MACs/instrucción). Las activaciones se desplazan +128
-//!   (u8) y se corrige restando 128·Σw de la fila (exacto).
-//! - AVX2: extensión a i16 + `vpmaddwd`.
-//! - escalar: referencia.
+//! EXACT int8 x int8 -> i32 matmul (an integer sum does not depend on the order), so every
+//! implementation (scalar, AVX2, AVX-VNNI, several threads) gives exactly the same result.
+//! - AVX-VNNI: `vpdpbusd` (u8 x i8, 32 MACs per instruction). Activations are shifted by +128
+//!   (u8) and corrected by subtracting 128·Σw of the row (exact).
+//! - AVX2: widening to i16 + `vpmaddwd`.
+//! - scalar: reference.
 
 use super::math::round_even;
 use std::sync::OnceLock;
 
-/// Cuantiza una fila de activaciones a int8 por token. Devuelve la escala (x ≈ q * escala).
+/// Quantizes a row of activations to int8, per token. Returns the scale (x ≈ q * scale).
 #[inline]
 pub fn quant_row(x: &[f32], q: &mut [i8]) -> f32 {
     let mut amax = 0f32;
@@ -30,7 +30,7 @@ pub fn quant_row(x: &[f32], q: &mut [i8]) -> f32 {
     amax / 127.0
 }
 
-/// Matriz int8 por filas con escala por fila y suma de cada fila (para la corrección VNNI).
+/// Row-major int8 matrix with a scale per row and the sum of each row (for the VNNI correction).
 pub struct Q8<'a> {
     pub rows: usize,
     pub cols: usize,
@@ -89,7 +89,7 @@ mod x86 {
         _mm_cvtsi128_si32(s)
     }
 
-    /// 4 productos escalares a la vez: w · x[0..4] (u8 desplazadas). `k` múltiplo de 32.
+    /// 4 dot products at once: w · x[0..4] (shifted u8). `k` is a multiple of 32.
     #[target_feature(enable = "avx2,avxvnni")]
     pub unsafe fn dot4_vnni(w: &[i8], x: [&[u8]; 4], out: &mut [i32; 4]) {
         let k = w.len();
@@ -122,7 +122,7 @@ mod x86 {
         hsum(a)
     }
 
-    /// AVX2: w · x (ambos i8). `k` múltiplo de 32.
+    /// AVX2: w · x (both i8). `k` is a multiple of 32.
     #[target_feature(enable = "avx2")]
     pub unsafe fn dot1_avx2(w: &[i8], x: &[i8]) -> i32 {
         let k = w.len();
@@ -142,7 +142,7 @@ mod x86 {
         hsum(acc)
     }
 
-    /// Suma horizontal de 8 vectores a la vez -> [Σa0, …, Σa7].
+    /// Horizontal sum of 8 vectors at once -> [Σa0, …, Σa7].
     #[inline(always)]
     unsafe fn hsum8(a: &[__m256i; 8]) -> [i32; 8] {
         let t0 = _mm256_hadd_epi32(a[0], a[1]);
@@ -157,7 +157,7 @@ mod x86 {
         o
     }
 
-    /// 2 filas x 4 tokens (8 acumuladores): out[0..4] = w0·x[0..4], out[4..8] = w1·x[0..4].
+    /// 2 rows x 4 tokens (8 accumulators): out[0..4] = w0·x[0..4], out[4..8] = w1·x[0..4].
     #[target_feature(enable = "avx2,avxvnni")]
     pub unsafe fn dot2x4_vnni(w0: &[i8], w1: &[i8], x: [&[u8]; 4], out: &mut [i32; 8]) {
         let k = w0.len();
@@ -184,12 +184,12 @@ mod x86 {
     }
 }
 
-/// Calcula los acumuladores enteros de las filas n0..n1 de W contra los t tokens.
+/// Computes the integer accumulators of rows n0..n1 of W against the t tokens.
 /// dst[(r - n0) * t + ti] = Σ_k w[r][k] · xq[ti][k]
 fn rows_acc(w: &Q8, xq: &[i8], xu: &[u8], t: usize, n0: usize, n1: usize, dst: &mut [i32]) {
     let k = w.cols;
     let kern = if k % 32 == 0 { kernel() } else { Kernel::Scalar };
-    // AVX-VNNI con bloques de 2 filas x 4 tokens
+    // AVX-VNNI with blocks of 2 rows x 4 tokens
     #[cfg(target_arch = "x86_64")]
     if kern == Kernel::Vnni && std::env::var_os("HNZ_KERNEL_1ROW").is_none() {
         let xs = |ti: usize| &xu[ti * k..(ti + 1) * k];
@@ -223,7 +223,7 @@ fn rows_acc(w: &Q8, xq: &[i8], xu: &[u8], t: usize, n0: usize, n1: usize, dst: &
     rows_acc_1(w, xq, xu, t, n0, n1, n0, kern, dst);
 }
 
-/// Versión fila a fila (escalar, AVX2, o VNNI 1x4). `base` = primera fila de `dst`.
+/// Row by row version (scalar, AVX2 or VNNI 1x4). `base` = first row of `dst`.
 #[allow(clippy::too_many_arguments)]
 fn rows_acc_1(w: &Q8, xq: &[i8], xu: &[u8], t: usize, n0: usize, n1: usize, base: usize, kern: Kernel, dst: &mut [i32]) {
     let k = w.cols;
@@ -286,7 +286,7 @@ impl<T> SendPtr<T> {
 }
 
 /// y[t][n] = (Σ_k xq[t][k]·w[n][k]) · sx[t] · sw[n] + bias[n]
-/// `xq`: T filas de `cols` int8; `out`: T x rows. `parallel` reparte filas de W entre hilos.
+/// `xq`: T rows of `cols` int8; `out`: T x rows. `parallel` splits the rows of W across threads.
 pub fn matmul(w: &Q8, xq: &[i8], sx: &[f32], bias: Option<&[f32]>, out: &mut [f32], parallel: bool) {
     let t = sx.len();
     let n = w.rows;
@@ -302,7 +302,7 @@ pub fn matmul(w: &Q8, xq: &[i8], sx: &[f32], bias: Option<&[f32]>, out: &mut [f3
         p.run(nchunks, &|ci| {
             let n0 = ci * chunk;
             let n1 = (n0 + chunk).min(n);
-            // SAFETY: cada tarea escribe un trozo disjunto [n0*t, n1*t) de `acc`
+            // SAFETY: each task writes a disjoint chunk [n0*t, n1*t) of `acc`
             let d = unsafe { std::slice::from_raw_parts_mut(base.get().add(n0 * t), (n1 - n0) * t) };
             rows_acc(w, xq, &xu, t, n0, n1, d);
         });

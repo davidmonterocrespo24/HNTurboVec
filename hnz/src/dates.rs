@@ -1,4 +1,4 @@
-//! Fechas sin dependencias: civil <-> días desde epoch (algoritmo de H. Hinnant).
+//! Dates without dependencies: civil <-> days since epoch (H. Hinnant's algorithm).
 
 pub fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
@@ -23,8 +23,8 @@ pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// "2015", "2015-06", "2015-06-01" -> epoch (inicio del periodo). `end=true` -> inicio del
-/// periodo SIGUIENTE (para rangos inclusivos: --to 2015 incluye todo 2015).
+/// "2015", "2015-06", "2015-06-01" -> epoch (start of the period). `end=true` -> start of the
+/// NEXT period (for inclusive ranges: --to 2015 includes all of 2015).
 pub fn parse(s: &str, end: bool) -> Option<i64> {
     let p: Vec<&str> = s.trim().split('-').collect();
     if p.len() > 3 {
@@ -36,7 +36,7 @@ pub fn parse(s: &str, end: bool) -> Option<i64> {
     }
     let m: u32 = p.get(1).map_or(Some(1), |x| x.parse().ok())?;
     let d: u32 = p.get(2).map_or(Some(1), |x| x.parse().ok())?;
-    // fechas imposibles (2015-13, 2015-00, 2015-02-30) son un error, no se desbordan
+    // impossible dates (2015-13, 2015-00, 2015-02-30) are an error, they do not overflow
     if !(1..=12).contains(&m) || d < 1 || d > days_in_month(y, m) {
         return None;
     }
@@ -83,7 +83,7 @@ mod tests {
         assert_eq!(parse("2023", true), Some(1704067200));
         assert_eq!(parse("2023-12", true), Some(1704067200));
         assert_eq!(parse("2023-12-31", true), Some(1704067200));
-        // fechas imposibles: error en vez de desbordarse
+        // impossible dates: an error instead of overflowing
         assert_eq!(parse("2015-13", true), None);
         assert_eq!(parse("2015-00", false), None);
         assert_eq!(parse("2015-02-30", true), None);

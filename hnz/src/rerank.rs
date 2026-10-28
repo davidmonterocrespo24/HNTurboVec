@@ -297,9 +297,9 @@ pub fn search(
     let cands = eng.candidates(q, Some(qvec), &rare, cfg.kv, kb, grow)?;
     let n = cands.len();
     let mut report = Report { candidates: n, ms_stage1: ms(t0), ..Default::default() };
-    let sg = eng.segs.first().context("el reordenado necesita un bloque compacto")?;
-    let TextSource::Lm(lm) = &sg.s.text else { bail!("el reordenado necesita un bloque compacto") };
-    let bm = sg.bm25.as_ref().context("el bloque no tiene índice de palabras")?;
+    let sg = eng.segs.first().context("reranking needs a compact block")?;
+    let TextSource::Lm(lm) = &sg.s.text else { bail!("reranking needs a compact block") };
+    let bm = sg.bm25.as_ref().context("the block has no word index")?;
 
     // keyword mode: a rare word counts once in a document of its postings, even past the prefix
     let in_rare: Vec<Vec<bool>> = if q.mode == Mode::Keyword {
@@ -430,7 +430,7 @@ pub fn search(
                             return Ok(None);
                         }
                     },
-                    None => ticket.recv().context("el decodificador LM se detuvo")?,
+                    None => ticket.recv().context("the LM decoder stopped")?,
                 };
                 let ci = job_ci[j];
                 let d = cands[ci].doc;
@@ -511,7 +511,7 @@ pub fn search(
         }
         queue.1.notify_all();
         if let Some(w) = worker {
-            w.join().map_err(|_| anyhow::anyhow!("fallo interno al embeber documentos"))??;
+            w.join().map_err(|_| anyhow::anyhow!("internal error while embedding documents"))??;
         }
         report.ms_embed = ms(t_tail);
         let got = std::mem::take(&mut lock_queue(&queue).got);
@@ -523,7 +523,7 @@ pub fn search(
         report.degraded = Some("decode");
         let mut hits = eng.search_with(q, if q.mode == Mode::Keyword { None } else { Some(qvec) }, grow)?;
         hits.truncate(k);
-        let warning = Some("se agotó el plazo durante la decodificación: resultados de la etapa 1, sin reordenar".to_string());
+        let warning = Some("the deadline passed during decoding: stage 1 results, not reranked".to_string());
         return Ok(Outcome { hits, prefixes, report, warning });
     };
     if late {
@@ -541,7 +541,7 @@ pub fn search(
             let mut f: Vec<&Feat> = feats.iter().filter(|f| f.b > 0.0).collect();
             f.sort_by(|a, b| b.b.total_cmp(&a.b).then(b.s1.total_cmp(&a.s1)).then(b.doc.cmp(&a.doc)));
             scored = f.iter().map(|f| (f.doc, f.b, f.s1, f.b)).collect();
-            warning = Some("las palabras frecuentes solo se buscan entre los documentos más cercanos a la consulta, en su comienzo".to_string());
+            warning = Some("common words are only searched in the documents closest to the query, and only in their opening text".to_string());
         }
         Mode::Vector | Mode::Hybrid => {
             let mut order: Vec<usize> = (0..n).collect();
@@ -561,7 +561,7 @@ pub fn search(
             scored.extend(head);
             scored.extend(rest.iter().map(|&i| (feats[i].doc, feats[i].r0, feats[i].s1, feats[i].b)));
             if late {
-                warning = Some("se agotó el plazo durante el re-embebido: resultados en el orden de la puntuación barata".to_string());
+                warning = Some("the deadline passed during re-embedding: results in cheap-score order".to_string());
             }
         }
     }

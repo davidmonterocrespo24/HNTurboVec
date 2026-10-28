@@ -1,0 +1,6 @@
+2024-01: 364,891 items with content; mean tokens 78, >256: 3.8%
+  bucket  32: 110,360 docs    565.4 docs/s
+  bucket  64: 105,631 docs    356.6 docs/s
+  bucket 128:  91,087 docs    163.1 docs/s
+  bucket 256:  57,813 docs     80.8 docs/s
+TOTAL 204.2 docs/s (29.8 min) -> 49,3M in 2.8 days

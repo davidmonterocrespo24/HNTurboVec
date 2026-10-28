@@ -41,7 +41,7 @@ pub const FILE_NAME: &str = "hn.hnzb";
 pub struct CorruptBlockError(pub String);
 impl std::fmt::Display for CorruptBlockError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "bloque dañado: {}", self.0)
+        write!(f, "corrupt block: {}", self.0)
     }
 }
 impl std::error::Error for CorruptBlockError {}
@@ -51,7 +51,7 @@ impl std::error::Error for CorruptBlockError {}
 pub struct IncompatibleBlockError(pub String);
 impl std::fmt::Display for IncompatibleBlockError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "bloque incompatible: {}", self.0)
+        write!(f, "incompatible block: {}", self.0)
     }
 }
 impl std::error::Error for IncompatibleBlockError {}
@@ -229,7 +229,7 @@ impl BlockWriter {
         let stored: Cow<[u8]> = match spec.codec {
             Codec::Raw => Cow::Borrowed(raw),
             Codec::Zstd => Cow::Owned(zstd::bulk::compress(raw, 19)?),
-            Codec::Unknown => bail!("parte {}: no se puede escribir con un códec desconocido", spec.name),
+            Codec::Unknown => bail!("part {}: cannot write with an unknown codec", spec.name),
         };
         let raw_len = raw.len() as u64;
         self.add_stream(spec, Some(raw_len), |s| Ok(s.write_all(&stored)?))
@@ -239,7 +239,7 @@ impl BlockWriter {
     /// a zstd part (None = the stored size).
     pub fn add_stream(&mut self, spec: PartSpec, raw_len: Option<u64>, f: impl FnOnce(&mut PartSink) -> Result<()>) -> Result<&PartEntry> {
         if self.parts.iter().any(|p| p.name == spec.name) {
-            bail!("parte repetida: {}", spec.name);
+            bail!("duplicate part: {}", spec.name);
         }
         self.pad()?;
         let off = self.pos;
@@ -266,7 +266,7 @@ impl BlockWriter {
     /// them in memory): the same part as `add` of those bytes.
     pub fn add_file(&mut self, spec: PartSpec, path: &Path) -> Result<&PartEntry> {
         if spec.codec != Codec::Raw {
-            bail!("parte {}: solo una parte sin comprimir se copia de un fichero", spec.name);
+            bail!("part {}: only an uncompressed part can be copied from a file", spec.name);
         }
         let want = std::fs::metadata(path).with_context(|| format!("{}", path.display()))?.len();
         let e = self.add_stream(spec, None, |s| {
@@ -275,7 +275,7 @@ impl BlockWriter {
             Ok(())
         })?;
         if e.len != want {
-            bail!("parte {}: {} bytes copiados de {} ({} bytes)", e.name, e.len, path.display(), want);
+            bail!("part {}: {} bytes copied from {} ({} bytes)", e.name, e.len, path.display(), want);
         }
         Ok(e)
     }
@@ -393,7 +393,7 @@ impl Block {
     /// (`read_part`, resident `blob`) or by `verify_full`.
     pub fn open(path: &Path) -> Result<Arc<Self>> {
         if path.is_dir() && Self::locate(path).is_none() {
-            return Err(incompatible(format!("{} no es un bloque hnz (falta {FILE_NAME})", path.display())));
+            return Err(incompatible(format!("{} is not an hnz block ({FILE_NAME} is missing)", path.display())));
         }
         let file = Self::locate(path).unwrap_or_else(|| path.to_path_buf());
         let pool = FilePool::open(&file, FilePool::default_handles(), true)?;
@@ -408,61 +408,61 @@ impl Block {
             if flen >= TRAILER_LEN as u64 {
                 pool.read_at(&mut t, flen - TRAILER_LEN as u64)?;
                 if t[0..8] == TRAILER_MAGIC && XxHash3_64::oneshot(&t[..56]) == le_u64(&t, 56) {
-                    return Err(corrupt("superbloque (magic)"));
+                    return Err(corrupt("superblock (magic)"));
                 }
             }
-            return Err(incompatible(format!("{} no es un bloque hnz", file.display())));
+            return Err(incompatible(format!("{} is not an hnz block", file.display())));
         }
         if flen < (SB_LEN + TRAILER_LEN) as u64 {
-            return Err(corrupt(format!("{} está truncado ({flen} bytes)", file.display())));
+            return Err(corrupt(format!("{} is truncated ({flen} bytes)", file.display())));
         }
         let mut sb = vec![0u8; SB_LEN];
         pool.read_at(&mut sb, 0)?;
         if XxHash3_64::oneshot(&sb[..SB_LEN - 8]) != le_u64(&sb, SB_LEN - 8) {
-            return Err(corrupt("superbloque (hash)"));
+            return Err(corrupt("superblock (hash)"));
         }
         let major = le_u16(&sb, 8);
         if major != FORMAT_MAJOR {
-            return Err(incompatible(format!("versión de formato {major} (este binario lee la {FORMAT_MAJOR})")));
+            return Err(incompatible(format!("format version {major} (this binary reads {FORMAT_MAJOR})")));
         }
         let incompat = le_u64(&sb, 16);
         if incompat & !INCOMPAT_KNOWN != 0 {
-            return Err(incompatible(format!("funciones incompatibles desconocidas {incompat:#x}")));
+            return Err(incompatible(format!("unknown incompatible features {incompat:#x}")));
         }
         let file_len = le_u64(&sb, 32);
         if file_len != flen {
-            return Err(corrupt(format!("tamaño {flen} bytes, el superbloque dice {file_len} (fichero truncado o ampliado)")));
+            return Err(corrupt(format!("size {flen} bytes, the superblock says {file_len} (file truncated or extended)")));
         }
         let (toc_off, toc_len, toc_raw_len, toc_codec) = (le_u64(&sb, 40), le_u64(&sb, 48), le_u64(&sb, 56), le_u32(&sb, 64));
         let toc_hash = le_u128(&sb, 72);
         let mut t = [0u8; TRAILER_LEN];
         pool.read_at(&mut t, flen - TRAILER_LEN as u64)?;
         if t[0..8] != TRAILER_MAGIC || XxHash3_64::oneshot(&t[..56]) != le_u64(&t, 56) {
-            return Err(corrupt("cola del fichero (trailer)"));
+            return Err(corrupt("file trailer"));
         }
         if le_u64(&t, 8) != toc_off || le_u64(&t, 16) != toc_len || le_u128(&t, 24) != toc_hash || le_u64(&t, 40) != file_len {
-            return Err(corrupt("la cola no coincide con el superbloque"));
+            return Err(corrupt("the trailer does not match the superblock"));
         }
         if toc_off % ALIGN != 0 || toc_off < SB_LEN as u64 || toc_off.checked_add(toc_len).map(|e| e + TRAILER_LEN as u64) != Some(flen) {
-            return Err(corrupt("posición del índice (TOC) fuera de rango"));
+            return Err(corrupt("index (TOC) position out of range"));
         }
         let mut stored = vec![0u8; toc_len as usize];
         pool.read_at(&mut stored, toc_off)?;
         if XxHash3_128::oneshot(&stored) != toc_hash {
-            return Err(corrupt("índice (TOC): hash"));
+            return Err(corrupt("index (TOC): hash"));
         }
         let json = match toc_codec {
             0 => stored,
-            1 => zstd::bulk::decompress(&stored, toc_raw_len as usize).map_err(|e| corrupt(format!("índice (TOC): {e}")))?,
-            c => return Err(incompatible(format!("códec del índice desconocido {c}"))),
+            1 => zstd::bulk::decompress(&stored, toc_raw_len as usize).map_err(|e| corrupt(format!("index (TOC): {e}")))?,
+            c => return Err(incompatible(format!("unknown index codec {c}"))),
         };
         // the TOC's hash matched: bytes this binary cannot parse come from another writer
-        let toc: Toc = serde_json::from_slice(&json).map_err(|e| incompatible(format!("índice (TOC) ilegible para este binario: {e}")))?;
+        let toc: Toc = serde_json::from_slice(&json).map_err(|e| incompatible(format!("index (TOC) unreadable by this binary: {e}")))?;
         if toc.format.major != FORMAT_MAJOR {
-            return Err(incompatible(format!("versión de formato {} en el índice", toc.format.major)));
+            return Err(incompatible(format!("format version {} in the index", toc.format.major)));
         }
         if !toc.format.incompat.is_empty() {
-            return Err(incompatible(format!("funciones incompatibles: {:?}", toc.format.incompat)));
+            return Err(incompatible(format!("incompatible features: {:?}", toc.format.incompat)));
         }
         // parts: aligned, inside [4096, toc_off), not overlapping, unique names, well-formed hashes
         let mut by_name = BTreeMap::new();
@@ -470,31 +470,31 @@ impl Block {
         let mut names = std::collections::HashSet::new();
         for (i, p) in toc.parts.iter().enumerate() {
             if !names.insert(p.name.as_str()) {
-                return Err(corrupt(format!("parte repetida en el índice: {}", p.name)));
+                return Err(corrupt(format!("duplicate part in the index: {}", p.name)));
             }
             // a codec or access class from a newer writer: such a required part cannot be read; an
             // optional one is never read (but still hashed by `full`)
             if p.codec == Codec::Unknown || p.access == Access::Unknown {
                 if p.required {
-                    return Err(incompatible(format!("parte {}: códec o tipo de acceso desconocido", p.name)));
+                    return Err(incompatible(format!("part {}: unknown codec or access type", p.name)));
                 }
             } else {
                 by_name.insert(p.name.clone(), i);
             }
             if p.off % ALIGN != 0 || p.off < SB_LEN as u64 || p.off.checked_add(p.len).is_none_or(|e| e > toc_off) {
-                return Err(corrupt(format!("parte {} fuera de rango", p.name)));
+                return Err(corrupt(format!("part {} out of range", p.name)));
             }
             if parse_hash(&p.hash).is_none() {
-                return Err(corrupt(format!("parte {}: hash mal formado", p.name)));
+                return Err(corrupt(format!("part {}: malformed hash", p.name)));
             }
             if p.codec == Codec::Raw && p.raw_len != p.len {
-                return Err(corrupt(format!("parte {}: tamaños incoherentes", p.name)));
+                return Err(corrupt(format!("part {}: inconsistent sizes", p.name)));
             }
             spans.push((p.off, p.off + p.len, &p.name));
         }
         spans.sort_unstable();
         if let Some(w) = spans.windows(2).find(|w| w[1].0 < w[0].1) {
-            return Err(corrupt(format!("las partes {} y {} se solapan", w[0].2, w[1].2)));
+            return Err(corrupt(format!("parts {} and {} overlap", w[0].2, w[1].2)));
         }
         // external files: plain names next to the container (never a path elsewhere), one per role
         let mut roles = std::collections::HashSet::new();
@@ -503,7 +503,7 @@ impl Block {
             let plain = matches!((c.next(), c.next()), (Some(std::path::Component::Normal(n)), None) if n.to_str() == Some(e.name.as_str()))
                 && !e.name.contains([':', '/', '\\']);
             if !plain || !roles.insert(e.role.as_str()) || parse_hash(&e.hash).is_none() {
-                return Err(incompatible(format!("fichero externo no válido en el índice: {:?} ({})", e.name, e.role)));
+                return Err(incompatible(format!("invalid external file in the index: {:?} ({})", e.name, e.role)));
             }
         }
         let writer = String::from_utf8_lossy(&sb[104..168]).trim_end_matches('\0').to_string();
@@ -542,7 +542,7 @@ impl Block {
 
     /// A part this binary needs: missing -> `IncompatibleBlockError`.
     pub fn require(&self, name: &str) -> Result<&PartEntry> {
-        self.part(name).ok_or_else(|| incompatible(format!("falta la parte {name}")))
+        self.part(name).ok_or_else(|| incompatible(format!("missing part {name}")))
     }
 
     /// The stored bytes of a part, read whole and checked against its hash.
@@ -550,7 +550,7 @@ impl Block {
         let mut buf = vec![0u8; p.len as usize];
         self.pool.read_at(&mut buf, p.off)?;
         if Some(XxHash3_128::oneshot(&buf)) != parse_hash(&p.hash) {
-            return Err(corrupt(format!("parte {}: hash", p.name)));
+            return Err(corrupt(format!("part {}: hash", p.name)));
         }
         Ok(buf)
     }
@@ -561,11 +561,11 @@ impl Block {
         let stored = self.read_stored(p)?;
         match p.codec {
             Codec::Raw => Ok(stored),
-            Codec::Unknown => Err(incompatible(format!("parte {}: códec desconocido", p.name))),
+            Codec::Unknown => Err(incompatible(format!("part {}: unknown codec", p.name))),
             Codec::Zstd => {
-                let raw = zstd::bulk::decompress(&stored, p.raw_len as usize).map_err(|e| corrupt(format!("parte {}: {e}", p.name)))?;
+                let raw = zstd::bulk::decompress(&stored, p.raw_len as usize).map_err(|e| corrupt(format!("part {}: {e}", p.name)))?;
                 if raw.len() as u64 != p.raw_len {
-                    return Err(corrupt(format!("parte {}: tamaño descomprimido", p.name)));
+                    return Err(corrupt(format!("part {}: decompressed size", p.name)));
                 }
                 Ok(raw)
             }
@@ -594,7 +594,7 @@ impl Block {
             off += n as u64;
         }
         if Some(h.finish_128()) != parse_hash(&p.hash) {
-            return Err(corrupt(format!("parte {}: hash", p.name)));
+            return Err(corrupt(format!("part {}: hash", p.name)));
         }
         Ok(())
     }
@@ -619,7 +619,7 @@ impl Block {
                 let mut buf = vec![0u8; (e - s) as usize];
                 self.pool.read_at(&mut buf, s)?;
                 if buf.iter().any(|&b| b != 0) {
-                    return Err(corrupt(format!("relleno no nulo en {s}..{e}")));
+                    return Err(corrupt(format!("nonzero padding at {s}..{e}")));
                 }
             }
         }
@@ -630,9 +630,9 @@ impl Block {
     pub fn check_externals(&self) -> Result<()> {
         for e in &self.toc.external {
             let path = self.dir().join(&e.name);
-            let (len, hash) = hash_file(&path).map_err(|_| corrupt(format!("falta el fichero externo {}", e.name)))?;
+            let (len, hash) = hash_file(&path).map_err(|_| corrupt(format!("missing external file {}", e.name)))?;
             if len != e.len || Some(hash) != parse_hash(&e.hash) {
-                return Err(corrupt(format!("fichero externo {}: tamaño o hash", e.name)));
+                return Err(corrupt(format!("external file {}: size or hash", e.name)));
             }
         }
         Ok(())
@@ -643,7 +643,7 @@ impl Block {
     pub fn embedder_files(&self) -> Result<(PathBuf, PathBuf, Vec<u8>)> {
         self.check_externals()?;
         let by_role = |r: &str| {
-            self.toc.external.iter().find(|e| e.role == r).map(|e| self.dir().join(&e.name)).ok_or_else(|| incompatible(format!("falta el fichero externo de tipo {r}")))
+            self.toc.external.iter().find(|e| e.role == r).map(|e| self.dir().join(&e.name)).ok_or_else(|| incompatible(format!("missing external file of role {r}")))
         };
         Ok((by_role("query_ir")?, by_role("query_ir_weights")?, self.read_part("model/embed.tok")?))
     }
@@ -655,8 +655,8 @@ impl Block {
         for p in &self.toc.parts {
             match known.iter().find(|k| k.0 == p.name) {
                 Some((_, vers)) if vers.contains(&p.ver) => {}
-                Some((_, vers)) => return Err(incompatible(format!("parte {} en la versión {} (este binario lee {vers:?})", p.name, p.ver))),
-                None if p.required => return Err(incompatible(format!("parte obligatoria desconocida {}", p.name))),
+                Some((_, vers)) => return Err(incompatible(format!("part {} is at version {} (this binary reads {vers:?})", p.name, p.ver))),
+                None if p.required => return Err(incompatible(format!("unknown required part {}", p.name))),
                 None => {}
             }
         }
@@ -693,13 +693,13 @@ impl Block {
             let v = m.get(d.section).and_then(|s| s.get(d.key)).and_then(|v| v.as_u64());
             match v {
                 Some(v) if d.supported.contains(&v) => {}
-                Some(v) => return Err(incompatible(format!("{}.{} = {v} (este binario lee {:?})", d.section, d.key, d.supported))),
-                None => return Err(incompatible(format!("el manifiesto no indica {}.{}", d.section, d.key))),
+                Some(v) => return Err(incompatible(format!("{}.{} = {v} (this binary reads {:?})", d.section, d.key, d.supported))),
+                None => return Err(incompatible(format!("the manifest does not give {}.{}", d.section, d.key))),
             }
         }
         if let Some(v) = m.get("text").and_then(|s| s.get("math_version")).and_then(|v| v.as_u64()) {
             if v != self.math_version as u64 {
-                return Err(corrupt(format!("versión numérica del LM: superbloque {}, manifiesto {v}", self.math_version)));
+                return Err(corrupt(format!("LM math version: superblock {}, manifest {v}", self.math_version)));
             }
         }
         Ok(())

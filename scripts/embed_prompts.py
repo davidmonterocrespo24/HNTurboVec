@@ -1,5 +1,5 @@
 """Embeds the document prompts written by `hnz prompts` (prompt version 2, defined in hnz/src/prompt.rs)
-with EmbeddingGemma 2 on OpenVINO, with the length buckets and IRs of E30a (experimentos/embed_prefix.py):
+with EmbeddingGemma 2 on OpenVINO, with the length buckets and IRs of E30a (experiments/embed_prefix.py):
     <prompts>/<month>.ids.npy, .len.npy, .tok.npy  ->  <out>.f16.npy (N x 768, L2-normalized) + <out>.ids.npy
 The token ids come from Rust, so the vectors match the prompts the engine rebuilds at query time.
 

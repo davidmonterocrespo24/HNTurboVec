@@ -1,0 +1,11 @@
+49689588 documents, 256-bit codes (1.59 GB)
+  query 0,   2000 candidates: identical; heaps  186.5 ms, histogram   36.5 ms
+  query 0,  20000 candidates: identical; heaps  544.2 ms, histogram   36.6 ms
+  query 1,   2000 candidates: identical; heaps   82.4 ms, histogram   36.2 ms
+  query 1,  20000 candidates: identical; heaps  540.9 ms, histogram   36.9 ms
+  query 2,   2000 candidates: identical; heaps   83.5 ms, histogram   37.3 ms
+  query 2,  20000 candidates: identical; heaps  546.0 ms, histogram   37.7 ms
+   8 threads, stage 1 =  20000 candidates → top-100: 1st query    55.0 ms, median    52.9 ms (8.5 ns/doc/thread)
+   8 threads, stage 1 =   2000 candidates → top-100: 1st query    52.9 ms, median    51.9 ms (8.4 ns/doc/thread)
+  16 threads, stage 1 =  20000 candidates → top-100: 1st query    38.2 ms, median    40.2 ms (13.0 ns/doc/thread)
+  16 threads, stage 1 =   2000 candidates → top-100: 1st query    36.2 ms, median    46.6 ms (15.0 ns/doc/thread)

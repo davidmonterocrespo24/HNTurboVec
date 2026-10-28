@@ -1,6 +1,6 @@
 """Builds the figures of the README and the write-up (SVG, a light and a dark version of each chart).
 
-Standard library only. The numbers are the measured ones of doc/BITACORA.md (E00, E01, E34, E36);
+Standard library only. The numbers are the measured ones of doc/EXPERIMENT-LOG.md (E00, E01, E34, E36);
 the terminal captures are rendered from the real outputs (logs/p6/*.log, accept_full.txt).
 
     python doc/img/make_figures.py

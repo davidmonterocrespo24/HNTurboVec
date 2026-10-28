@@ -52,7 +52,7 @@ struct Archive {
 impl Archive {
     /// Search: `request` is the JSON of `hnz::api::SearchRequest`; returns that of `SearchResponse`.
     fn search_json(&self, py: Python<'_>, request: &str) -> PyResult<String> {
-        let req: hnz::api::SearchRequest = serde_json::from_str(request).map_err(|e| PyValueError::new_err(format!("consulta inválida: {e}")))?;
+        let req: hnz::api::SearchRequest = serde_json::from_str(request).map_err(|e| PyValueError::new_err(format!("invalid query: {e}")))?;
         let inner = self.inner.clone();
         py.detach(move || inner.search(&req).and_then(|r| Ok(serde_json::to_string(&r)?))).map_err(to_py)
     }
@@ -111,7 +111,7 @@ impl Archive {
 /// Opens an hnz archive. `options` is the JSON of `hnz::api::OpenOptions`.
 #[pyfunction]
 fn open(py: Python<'_>, path: String, options: &str) -> PyResult<Archive> {
-    let opts: hnz::api::OpenOptions = serde_json::from_str(options).map_err(|e| PyValueError::new_err(format!("opciones inválidas: {e}")))?;
+    let opts: hnz::api::OpenOptions = serde_json::from_str(options).map_err(|e| PyValueError::new_err(format!("invalid options: {e}")))?;
     let a = py.detach(move || hnz::api::Archive::open(Path::new(&path), opts)).map_err(to_py)?;
     Ok(Archive { inner: Arc::new(a) })
 }
@@ -120,7 +120,7 @@ fn open(py: Python<'_>, path: String, options: &str) -> PyResult<Archive> {
 #[pyfunction]
 fn verify_block(py: Python<'_>, path: String, level: String) -> PyResult<String> {
     if !["header", "quick", "full"].contains(&level.as_str()) {
-        return Err(PyValueError::new_err(format!("level debe ser header, quick o full (es {level:?})")));
+        return Err(PyValueError::new_err(format!("level must be header, quick or full (got {level:?})")));
     }
     py.detach(move || hnz::verify::verify(Path::new(&path), &level, None, "none").map(|r| r.to_string())).map_err(to_py)
 }

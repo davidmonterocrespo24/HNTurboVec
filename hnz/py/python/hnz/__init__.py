@@ -132,11 +132,11 @@ def _size(ram: Union[int, str, None]) -> Optional[int]:
     """'2GB' -> 2e9, '2GiB' -> 2**31, '512MB', or a number of bytes."""
     if ram is None or (isinstance(ram, int) and not isinstance(ram, bool)):
         if isinstance(ram, int) and ram < 0:
-            raise ValueError(f'tamaño inválido: {ram!r}')
+            raise ValueError(f'invalid size: {ram!r} (it must be >= 0)')
         return ram
     m = re.fullmatch(r'\s*([\d.]+)\s*([KMGT]?)(i?)B?\s*', str(ram), re.I)
     if not m:
-        raise ValueError(f'tamaño inválido: {ram!r} (p.ej. "2GB", "512MB")')
+        raise ValueError(f'invalid size: {ram!r} (e.g. "2GB", "512MB")')
     exp = 'KMGT'.find(m.group(2).upper()) + 1 if m.group(2) else 0
     return int(float(m.group(1)) * (1024 if m.group(3) else 1000) ** exp)
 
@@ -157,14 +157,14 @@ def _bound(d: Optional[DateLike], name: str) -> tuple[Optional[str], Optional[in
     if isinstance(d, _dt.date):
         return d.strftime('%Y-%m-%d'), None
     if isinstance(d, bool):
-        raise ValueError(f'{name} inválido: {d!r}')
+        raise ValueError(f'invalid {name}: {d!r}')
     if isinstance(d, int):
         if not 1970 <= d <= 2100:
-            raise ValueError(f'{name}={d}: un entero se interpreta como año (1970-2100); para un instante use datetime')
+            raise ValueError(f'{name}={d}: an int is read as a year (1970-2100); for an exact instant use datetime')
         return str(d), None
     if isinstance(d, str):
         return d, None
-    raise ValueError(f'{name} inválido: {d!r} (str "2015-06", int año, date o datetime)')
+    raise ValueError(f'invalid {name}: {d!r} (use a str "2015-06", an int year, a date or a datetime)')
 
 
 def _ov_libs() -> Optional[str]:
@@ -216,7 +216,7 @@ class Archive:
         if isinstance(types, str):
             types = [types]
         if text not in ('snippet', 'full'):
-            raise ValueError('text debe ser "snippet" o "full"')
+            raise ValueError('text must be "snippet" or "full"')
         since_s, since_ts = _bound(since, 'since')
         until_s, until_ts = _bound(until, 'until')
         req = {'query': query or '', 'k': int(k), 'since': since_s, 'until': until_s,
@@ -283,12 +283,12 @@ class Archive:
         listens on every interface); on the internet, put it behind a reverse proxy. When it returns
         the port is free. The `hnz serve` command (installed with hnz) runs this."""
         if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
-            raise ValueError(f'port inválido: {port!r} (1-65535)')
+            raise ValueError(f'invalid port: {port!r} (1-65535)')
         if isinstance(threads, bool) or not isinstance(threads, int) or not 1 <= threads <= 256:
-            raise ValueError(f'threads inválido: {threads!r} (entero de 1 a 256)')
+            raise ValueError(f'invalid threads: {threads!r} (an int from 1 to 256)')
         if stop is None and threading.current_thread() is not threading.main_thread():
             # Ctrl+C only reaches the main thread: elsewhere nothing could stop it
-            raise ValueError('fuera del hilo principal, serve necesita stop (un threading.Event)')
+            raise ValueError('outside the main thread, serve needs stop (a threading.Event)')
         self._live().serve(str(host), port, threads, None if stop is None else stop.is_set)
 
     def close(self) -> None:
@@ -300,7 +300,7 @@ class Archive:
 
     def _live(self):
         if self._a is None:
-            raise RuntimeError('el archivo está cerrado')
+            raise RuntimeError('the archive is closed')
         return self._a
 
     def __enter__(self) -> 'Archive':
@@ -310,7 +310,7 @@ class Archive:
         self.close()
 
     def __repr__(self) -> str:
-        return f'<hnz.Archive {self.path!r}{" (cerrado)" if self.closed else ""}>'
+        return f'<hnz.Archive {self.path!r}{" (closed)" if self.closed else ""}>'
 
 
 def open(path: Union[str, os.PathLike], *, ram: Union[int, str, None] = '2GB',
@@ -339,9 +339,9 @@ def open(path: Union[str, os.PathLike], *, ram: Union[int, str, None] = '2GB',
     """
     path = os.fspath(path)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0 <= timeout < 1e9:
-        raise ValueError(f'timeout inválido: {timeout!r} (segundos, >= 0)')
+        raise ValueError(f'invalid timeout: {timeout!r} (seconds, >= 0)')
     if isinstance(max_concurrent, bool) or not isinstance(max_concurrent, int) or max_concurrent < 1:
-        raise ValueError(f'max_concurrent inválido: {max_concurrent!r} (entero >= 1)')
+        raise ValueError(f'invalid max_concurrent: {max_concurrent!r} (an int >= 1)')
     opts = {'models': os.fspath(models) if models else None,
             'ov_libs': os.fspath(ov_libs) if ov_libs else _ov_libs(),
             'preload': bool(preload), 'ram': _size(ram), 'max_concurrent': int(max_concurrent),

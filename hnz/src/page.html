@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="es">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>hnz · buscar en Hacker News</title>
+<title>hnz · search Hacker News</title>
 <style>
   :root { --bg:#f6f6ef; --fg:#222; --mut:#666; --acc:#ff6600; --card:#fff; --line:#e3e3dc; }
   @media (prefers-color-scheme: dark) { :root { --bg:#16161a; --fg:#e8e8e8; --mut:#9a9a9a; --acc:#ff8a3d; --card:#202024; --line:#333; } }
@@ -26,16 +26,16 @@
 </style>
 </head>
 <body>
-<header>hnz — Hacker News comprimido</header>
+<header>hnz · Hacker News, compressed</header>
 <main>
 <form id="f">
-  <input name="q" placeholder="¿Qué buscas? (p.ej. rust async runtime)" autofocus>
-  <input name="k" class="small" type="number" value="10" min="1" max="100" title="resultados">
-  <input name="from" class="small" placeholder="desde (2015)">
-  <input name="to" class="small" placeholder="hasta (2018-12)">
-  <select name="type"><option value="">todo</option><option value="story">stories</option><option value="comment">comentarios</option><option value="job">jobs</option></select>
-  <select name="mode"><option value="hybrid">híbrida</option><option value="vector">semántica</option><option value="keyword">palabras</option></select>
-  <button>Buscar</button>
+  <input name="q" placeholder="What are you looking for? (e.g. rust async runtime)" autofocus>
+  <input name="k" class="small" type="number" value="10" min="1" max="100" title="results">
+  <input name="from" class="small" placeholder="from (2015)">
+  <input name="to" class="small" placeholder="to (2018-12)">
+  <select name="type"><option value="">all</option><option value="story">stories</option><option value="comment">comments</option><option value="job">jobs</option></select>
+  <select name="mode"><option value="hybrid">hybrid</option><option value="vector">semantic</option><option value="keyword">keyword</option></select>
+  <button>Search</button>
 </form>
 <div id="stats"></div>
 <div id="res"></div>
@@ -47,24 +47,24 @@ f.onsubmit = async e => {
   e.preventDefault();
   const p = new URLSearchParams(new FormData(f));
   history.replaceState(null, '', '?' + p);   // the address of this search, to share or reload
-  st.textContent = 'buscando…';
+  st.textContent = 'searching…';
   const t0 = performance.now();
   const r = await fetch('/search?' + p).then(x => x.json());
   if (r.error) { st.textContent = 'error: ' + r.error; res.innerHTML = ''; return; }
-  st.textContent = `${r.results.length} resultados · servidor ${r.ms.total.toFixed(1)} ms (embedding ${r.ms.embedding.toFixed(1)}, búsqueda ${r.ms.search.toFixed(1)}, descompresión ${r.ms.fetch.toFixed(1)}) · navegador ${(performance.now()-t0).toFixed(0)} ms`;
+  st.textContent = `${r.results.length} results · server ${r.ms.total.toFixed(1)} ms (embedding ${r.ms.embedding.toFixed(1)}, search ${r.ms.search.toFixed(1)}, decompression ${r.ms.fetch.toFixed(1)}) · browser ${(performance.now()-t0).toFixed(0)} ms`;
   res.innerHTML = r.results.map(x => `
     <div class="r">
-      <h3>${x.title ? `<a href="${esc(x.url || x.link)}" target="_blank">${esc(x.title)}</a>` : 're: ' + esc(x.story_title || '(hilo)')}</h3>
-      <div class="meta">${x.kind} · ${esc(x.by)} · ${x.date} · ${x.points} pts · <a href="${x.link}" target="_blank">HN #${x.id}</a> · score ${x.score.toFixed(3)} · <span title="nivel de almacenamiento">${x.tier === 'lm' ? '❄ frío (LM)' : '🔥 zstd'}</span></div>
+      <h3>${x.title ? `<a href="${esc(x.url || x.link)}" target="_blank">${esc(x.title)}</a>` : 're: ' + esc(x.story_title || '(thread)')}</h3>
+      <div class="meta">${x.kind} · ${esc(x.by)} · ${x.date} · ${x.points} pts · <a href="${x.link}" target="_blank">HN #${x.id}</a> · score ${x.score.toFixed(3)} · <span title="storage tier">${x.tier === 'lm' ? '❄ cold (LM)' : '🔥 zstd'}</span></div>
       ${x.text ? `<div class="txt" id="t${x.id}">${esc(x.text.length > 700 ? x.text.slice(0, 700) + '…' : x.text)}${x.partial ? '…' : ''}</div>` : ''}
-      ${x.partial ? `<button class="more" onclick="full(${x.id}, this)">ver completo</button>` : ''}
+      ${x.partial ? `<button class="more" onclick="full(${x.id}, this)">show full text</button>` : ''}
     </div>`).join('');
 };
 async function full(id, btn) {
-  btn.disabled = true; btn.textContent = 'descomprimiendo…';
+  btn.disabled = true; btn.textContent = 'decompressing…';
   const r = await fetch('/item/' + id).then(x => x.json());
   document.getElementById('t' + id).textContent = r.text_plain;
-  btn.textContent = `descomprimido en ${r.ms.toFixed(0)} ms`;
+  btn.textContent = `decompressed in ${r.ms.toFixed(0)} ms`;
 }
 // a search in the address (/?q=rust&from=2015) fills the form and runs
 const init = new URLSearchParams(location.search);

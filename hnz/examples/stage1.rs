@@ -1,9 +1,9 @@
-//! E30d: tiempo de la 1ª etapa de vectores (Hamming 256 → tabla asimétrica) a la escala de todo HN.
+//! E30d: time of the first vector stage (Hamming 256 → asymmetric table) at the scale of all of HN.
 //!
-//! Replica los códigos reales de 256 bits (prefijo MRL) de los 3 segmentos de muestra hasta ~49,3 M
-//! documentos (cada copia con 8 bits cambiados al azar, para no tener duplicados exactos), los escribe
-//! en `<dir>/vec.bin` y mide `VecIndex::search` sobre TODO el rango con 8 y 16 hilos.
-//! Uso (desde la raíz del proyecto): cargo run --release --manifest-path hnz/Cargo.toml --example stage1 -- [docs] [dir]
+//! Replicates the real 256-bit codes (MRL prefix) of the 3 sample segments up to ~49.3 M
+//! documents (each copy with 8 bits flipped at random, so there are no exact duplicates), writes them
+//! to `<dir>/vec.bin` and measures `VecIndex::search` over the WHOLE range with 8 and 16 threads.
+//! Usage (from the project root): cargo run --release --manifest-path hnz/Cargo.toml --example stage1 -- [docs] [dir]
 use hnz::vecs::{QueryLut, VecIndex};
 use std::io::Write;
 use std::time::Instant;
@@ -48,10 +48,10 @@ fn main() -> anyhow::Result<()> {
         }
         w.flush()?;
         std::fs::write(dir.join("vec.has"), vec![0xFFu8; n.div_ceil(64) * 8])?;
-        eprintln!("{n} códigos ({:.2} GB) escritos en {:.0} s", (n * nb) as f64 / 1e9, t0.elapsed().as_secs_f64());
+        eprintln!("{n} codes ({:.2} GB) written in {:.0} s", (n * nb) as f64 / 1e9, t0.elapsed().as_secs_f64());
     }
     let vi = VecIndex::open(&dir, bits, n)?;
-    // consultas: vectores aleatorios normalizados (el tiempo no depende de su contenido)
+    // queries: random normalized vectors (the time does not depend on their content)
     let mut x: u64 = 12345;
     let mut rnd = || {
         x ^= x << 13;
@@ -60,8 +60,8 @@ fn main() -> anyhow::Result<()> {
         (x >> 11) as f32 / (1u64 << 53) as f32 - 0.5
     };
     let queries: Vec<Vec<f32>> = (0..8).map(|_| (0..768).map(|_| rnd()).collect()).collect();
-    println!("{n} documentos, códigos de {bits} bits ({:.2} GB)", (n * nb) as f64 / 1e9);
-    // la selección nueva (histograma) debe dar exactamente lo mismo que la de montículos
+    println!("{n} documents, {bits}-bit codes ({:.2} GB)", (n * nb) as f64 / 1e9);
+    // the new selection (histogram) must give exactly the same result as the heap one
     for (i, q) in queries.iter().take(3).enumerate() {
         let lut = QueryLut::new(q, nb);
         for cand in [2_000usize, 20_000] {
@@ -69,8 +69,8 @@ fn main() -> anyhow::Result<()> {
             let ta = t0.elapsed().as_secs_f64() * 1e3;
             let (t1, b) = (Instant::now(), vi.hamming_select_pub(&lut, 0, n, cand));
             let tb = t1.elapsed().as_secs_f64() * 1e3;
-            assert_eq!(a, b, "consulta {i}, cand {cand}: la selección por histograma difiere");
-            println!("  consulta {i}, {cand:>6} candidatos: idénticos; montículos {ta:6.1} ms, histograma {tb:6.1} ms");
+            assert_eq!(a, b, "query {i}, cand {cand}: the histogram selection differs");
+            println!("  query {i}, {cand:>6} candidates: identical; heap {ta:6.1} ms, histogram {tb:6.1} ms");
         }
     }
     for threads in [8usize, 16] {
@@ -93,7 +93,7 @@ fn main() -> anyhow::Result<()> {
             ms.sort_by(f64::total_cmp);
             let med = ms[ms.len() / 2];
             println!(
-                "  {threads:>2} hilos, etapa 1 = {cand:>6} candidatos → top-{k}: 1ª consulta {first:7.1} ms, mediana {med:7.1} ms ({:.1} ns/doc/hilo)",
+                "  {threads:>2} threads, stage 1 = {cand:>6} candidates → top-{k}: 1st query {first:7.1} ms, median {med:7.1} ms ({:.1} ns/doc/thread)",
                 med * 1e6 / n as f64 * threads as f64
             );
         }

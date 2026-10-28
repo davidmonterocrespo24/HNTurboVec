@@ -3,10 +3,10 @@ name = "hnz"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Hacker News comprimido al máximo con búsqueda híbrida (vectores binarios + BM25) y recuperación literal"
+description = "Hacker News compressed to the limit, with hybrid search (binary vectors + BM25) and verbatim retrieval"
 
 [workspace]
-# py/: el paquete de Python (PyO3); `cargo build` en esta carpeta sigue compilando solo hnz
+# py/: the Python package (PyO3); `cargo build` in this folder still builds only hnz
 members = ["py"]
 
 [dependencies]
@@ -23,7 +23,7 @@ serde_json = "1"
 clap = { version = "4", features = ["derive", "env"] }
 half = "2"
 openvino = { version = "0.11", features = ["runtime-linking"] }
-# carga explícita de openvino_c.dll desde ov_libs (embed.rs)
+# explicit loading of openvino_c.dll from ov_libs (embed.rs)
 openvino-sys = { version = "0.11", features = ["runtime-linking"] }
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 # XXH3 hashes of the block container (block.rs); already in the tree via parquet
@@ -39,5 +39,5 @@ debug = false
 opt-level = 1
 
 [target.'cfg(windows)'.dependencies]
-# memoria del proceso (presupuesto de RAM, mem.rs)
+# process memory (RAM budget, mem.rs)
 windows-sys = { version = "0.61", features = ["Win32_System_ProcessStatus", "Win32_System_Threading"] }

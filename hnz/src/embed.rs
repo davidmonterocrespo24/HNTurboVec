@@ -1,6 +1,6 @@
-//! Embedding de consultas con EmbeddingGemma 2 (IR de OpenVINO, CPU) desde Rust.
-//! Las librerías de OpenVINO se cargan en tiempo de ejecución (openvino_c.dll del wheel de Python
-//! o de una instalación de OpenVINO): se añade su carpeta al PATH antes de crear el Core.
+//! Query embedding with EmbeddingGemma 2 (OpenVINO IR, CPU) from Rust.
+//! The OpenVINO libraries are loaded at run time (openvino_c.dll from the Python wheel or from an
+//! OpenVINO install): their folder is added to PATH before the Core is created.
 
 use anyhow::{anyhow, bail, Context, Result};
 use openvino::{CompiledModel, Core, DeviceType, ElementType, InferRequest, RwPropertyKey, Shape, Tensor};
@@ -44,7 +44,7 @@ pub fn check_chain(e: &mut Embedder, checks: &[(String, Vec<u8>)]) -> Result<Opt
     let rate = flips.iter().sum::<u32>() as f64 / signs;
     if rate > MAX_FLIP_RATE {
         return Err(crate::block::incompatible(format!(
-            "el embedder no reproduce los vectores del bloque: {:.0} % de los signos distintos en {} canarios ({flips:?})",
+            "the embedder does not reproduce the block's vectors: {:.0} % of signs differ across {} canaries ({flips:?})",
             rate * 100.0,
             flips.len()
         )));
@@ -53,7 +53,7 @@ pub fn check_chain(e: &mut Embedder, checks: &[(String, Vec<u8>)]) -> Result<Opt
 }
 
 pub struct Embedder {
-    // orden de campos = orden de destrucción (request antes que el modelo y el core)
+    // field order = drop order (the request before the model and the core)
     req: InferRequest,
     /// more requests for documents, run at the same time (one per CPU stream)
     doc_reqs: Vec<InferRequest>,
@@ -69,26 +69,26 @@ fn ov<E: std::fmt::Debug>(e: E) -> anyhow::Error {
     anyhow!("OpenVINO: {e:?}")
 }
 
-/// Carpeta desde la que se cargó OpenVINO en este proceso (solo se puede cargar una vez).
+/// Folder OpenVINO was loaded from in this process (it can only be loaded once).
 static OV_DIR: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
 
-/// Carga `openvino_c.dll` de `ov_libs` por su ruta completa, una vez por proceso. Así manda
-/// `ov_libs` (el buscador de openvino-rs miraría antes OPENVINO_*/INTEL_OPENVINO_DIR) y sus
-/// dependencias (openvino.dll, tbb, plugins) se resuelven en la misma carpeta, que se pone la
-/// primera del PATH una sola vez.
+/// Loads `openvino_c.dll` from `ov_libs` by its full path, once per process. This way `ov_libs`
+/// wins (the openvino-rs finder would look at OPENVINO_*/INTEL_OPENVINO_DIR first) and its
+/// dependencies (openvino.dll, tbb, plugins) resolve in the same folder, which is put first on
+/// PATH, only once.
 fn load_openvino(ov_libs: &Path) -> Result<()> {
     let mut g = OV_DIR.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::path::absolute(ov_libs).with_context(|| format!("carpeta de OpenVINO {}", ov_libs.display()))?;
+    let dir = std::path::absolute(ov_libs).with_context(|| format!("OpenVINO folder {}", ov_libs.display()))?;
     let same = |a: &Path, b: &Path| std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok();
     if let Some(d) = g.as_ref() {
         if !same(d, &dir) {
-            bail!("OpenVINO ya está cargado desde {} en este proceso; no se puede usar también {}", d.display(), dir.display());
+            bail!("OpenVINO is already loaded from {} in this process; cannot also use {}", d.display(), dir.display());
         }
         return Ok(());
     }
     let dll = dir.join("openvino_c.dll");
     if !dll.exists() {
-        bail!("no está {} (ov_libs debe ser la carpeta libs del paquete openvino)", dll.display());
+        bail!("{} not found (ov_libs must be the libs folder of the openvino package)", dll.display());
     }
     let path = std::env::var_os("PATH").unwrap_or_default();
     if !std::env::split_paths(&path).any(|p| same(&p, &dir)) {
@@ -165,7 +165,7 @@ impl Embedder {
     /// per CPU stream at the same time.
     pub fn embed_docs(&mut self, prompts: &[String]) -> Result<Vec<Vec<f32>>> {
         if !self.dynamic {
-            bail!("el embedder de este bloque tiene formas fijas: no puede embeber documentos");
+            bail!("this block's embedder has fixed shapes: it cannot embed documents");
         }
         let mut ids: Vec<Vec<u32>> = Vec::with_capacity(prompts.len());
         for p in prompts {
@@ -197,7 +197,7 @@ impl Embedder {
         Ok(out)
     }
 
-    /// Vector normalizado (768d) de la consulta.
+    /// Normalized vector (768d) of the query.
     pub fn embed_query(&mut self, q: &str) -> Result<Vec<f32>> {
         let enc = self.tok.encode(format!("{QUERY_PROMPT}{q}"), true).map_err(|e| anyhow!("tokenizer: {e}"))?;
         let ids = enc.get_ids().to_vec();

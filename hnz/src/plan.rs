@@ -88,7 +88,7 @@ pub fn plan(inp: &Input) -> Result<Plan, BudgetError> {
     let lim = inp.limit.unwrap_or(u64::MAX);
     if floor > lim {
         return Err(BudgetError(format!(
-            "ram={} no alcanza: hacen falta al menos {} (modelos {}, índices fijos {}, lote del LM {}, consultas {}, caché {})",
+            "ram={} is not enough: at least {} is needed (models {}, fixed indexes {}, LM batch {}, queries {}, cache {})",
             human(lim),
             human(floor),
             human(inp.models),

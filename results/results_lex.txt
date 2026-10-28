@@ -1,0 +1,12 @@
+382,681 docs, 20.1M tokens, 184,433 terms, 14.91M postings (39/doc)  [13s]
+top-200 terms (stopwords) = 47% of the postings
+variant                                          B/doc     49.3M
+all terms +tf varint+zstd                         51.9    2.56GB
+all terms +tf elias-fano                          53.6    2.64GB
+all terms boolean varint+zstd                     41.5    2.04GB
+all terms boolean elias-fano                      46.5    2.29GB
+without 200 stopwords +tf varint+zstd             37.0    1.82GB
+without 200 stopwords +tf elias-fano              37.2    1.84GB
+without 200 stopwords boolean varint+zstd         31.1    1.53GB
+without 200 stopwords boolean elias-fano          34.1    1.68GB
+tantivy (real BM25, freq, no positions)           83.3    4.11GB

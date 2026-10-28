@@ -1,7 +1,7 @@
 //! Bytes of an archive file, or of one part of a block file: resident in RAM (private copy,
 //! charged to the budget) or on disk (positional reads on demand, which go through the OS file
 //! cache and not through the process's memory). Replaces mmap: touched mapped pages enter the
-//! process working set with nobody controlling them (P2, doc/06-libreria.md).
+//! process working set with nobody controlling them (P2, doc/06-library.md).
 use anyhow::{Context, Result};
 use std::borrow::Cow;
 use std::fs::File;
@@ -175,7 +175,7 @@ impl Blob {
         let v = self.all()?.into_owned();
         if let Some(h) = expected {
             if twox_hash::XxHash3_128::oneshot(&v) != h {
-                return Err(crate::block::corrupt("una parte del bloque no coincide con su hash al cargarla"));
+                return Err(crate::block::corrupt("a block part does not match its hash when loaded"));
             }
         }
         let n = v.len();
@@ -192,7 +192,7 @@ pub fn read_at(file: &File, mut buf: &mut [u8], mut off: u64) -> Result<()> {
         #[cfg(unix)]
         let n = std::os::unix::fs::FileExt::read_at(file, buf, off)?;
         if n == 0 {
-            anyhow::bail!("fin de fichero inesperado al leer {} bytes en {off}", buf.len());
+            anyhow::bail!("unexpected end of file reading {} bytes at {off}", buf.len());
         }
         buf = &mut buf[n..];
         off += n as u64;

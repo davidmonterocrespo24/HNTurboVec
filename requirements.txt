@@ -1,6 +1,6 @@
-# Entorno Python de los experimentos y de la preparación de modelos (uv venv .venv --python 3.12).
-# Instalar ANTES requirements-torch.txt (torch CPU, desde el índice de PyTorch) y luego este
-# fichero desde PyPI: así no se mezclan índices (uv solo mira el primero que tenga cada paquete).
+# Python environment for the experiments and for model preparation (uv venv .venv --python 3.12).
+# Install requirements-torch.txt FIRST (CPU torch, from the PyTorch index) and then this
+# file from PyPI. That way the indexes are not mixed (uv only looks at the first one that has each package).
 brotli==1.2.1
 duckdb==1.5.6
 faiss-cpu==1.15.1

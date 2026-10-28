@@ -1,4 +1,4 @@
-# torch/torchvision CPU (sin CUDA). Instalar antes que requirements.txt:
+# torch/torchvision for CPU (no CUDA). Install before requirements.txt:
 #   uv pip install --python .venv -r requirements-torch.txt --index-url https://download.pytorch.org/whl/cpu
 torch==2.14.1+cpu
 torchvision==0.29.1+cpu

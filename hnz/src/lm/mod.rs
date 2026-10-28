@@ -1,4 +1,4 @@
-//! Nivel frío: LM (Pythia/GPT-NeoX, int8 W8A8 determinista) + codificación aritmética.
+//! Cold tier: LM (Pythia/GPT-NeoX, deterministic int8 W8A8) + arithmetic coding.
 pub mod coder;
 pub mod fpenv;
 pub mod jobs;

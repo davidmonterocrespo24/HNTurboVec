@@ -1,6 +1,6 @@
-//! Índice vectorial binario: 1 bit por dimensión (signo) de EmbeddingGemma 2 (MRL: los primeros
-//! `bits` dims). Búsqueda en 2 etapas: Hamming sobre los primeros 256 bits (popcount) -> top-C ->
-//! puntuación ASIMÉTRICA (consulta en float, documento en ±1) con tabla de consulta por byte.
+//! Binary vector index: 1 bit per dimension (the sign) of EmbeddingGemma 2 (MRL: the first
+//! `bits` dims). Two-stage search: Hamming over the first 256 bits (popcount) -> top-C ->
+//! ASYMMETRIC scoring (query in float, document in ±1) with a per-byte lookup table.
 
 use anyhow::{bail, Context, Result};
 use half::f16;
@@ -12,13 +12,13 @@ use std::collections::BinaryHeap;
 use std::fs::File;
 use std::path::Path;
 
-/// Abre un .npy (v1/v2) por mmap (los de un año entero ocupan GB). Devuelve
-/// (shape, descr, mmap, inicio de los datos).
+/// Opens a .npy (v1/v2) with mmap (a whole year takes GB). Returns
+/// (shape, descr, mmap, start of the data).
 pub fn read_npy(path: &Path) -> Result<(Vec<usize>, String, Mmap, usize)> {
     let f = File::open(path).with_context(|| format!("{}", path.display()))?;
     let b = unsafe { Mmap::map(&f)? };
     if &b[..6] != b"\x93NUMPY" {
-        bail!("no es .npy: {}", path.display());
+        bail!("not a .npy file: {}", path.display());
     }
     let (hlen, hstart) = if b[6] == 1 {
         (u16::from_le_bytes([b[8], b[9]]) as usize, 10)
@@ -34,17 +34,17 @@ pub fn read_npy(path: &Path) -> Result<(Vec<usize>, String, Mmap, usize)> {
     Ok((shape, descr, b, start))
 }
 
-/// Construye vec.bin (n_docs x bits/8) y vec.has (bitmap) alineando por id de HN.
+/// Builds vec.bin (n_docs x bits/8) and vec.has (bitmap), aligned by HN id.
 pub fn build(dir: &Path, doc_ids: &[u32], emb_npy: &Path, ids_npy: &Path, bits: usize) -> Result<usize> {
     let (shape, descr, emap, eoff) = read_npy(emb_npy)?;
     let data = &emap[eoff..];
     if descr != "<f2" || shape.len() != 2 || shape[1] < bits {
-        bail!("embeddings deben ser float16 Nx>={bits} (es {descr} {shape:?})");
+        bail!("embeddings must be float16 Nx>={bits} (got {descr} {shape:?})");
     }
     let (ishape, idescr, imap, ioff) = read_npy(ids_npy)?;
     let idata = &imap[ioff..];
     if idescr != "<u4" || ishape[0] != shape[0] {
-        bail!("ids deben ser uint32 de longitud {}", shape[0]);
+        bail!("ids must be uint32 of length {}", shape[0]);
     }
     let dim = shape[1];
     let ids: Vec<u32> = idata.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
@@ -106,7 +106,7 @@ fn mix32(x: u32) -> u32 {
     z ^ (z >> 16)
 }
 
-/// Tabla de consulta: para cada byte del código, suma de q[d] de los bits a 1.
+/// Lookup table: for each code byte, the sum of q[d] over the bits set to 1.
 pub struct QueryLut {
     lut: Vec<[f32; 256]>,
     sum_q: f32,
@@ -131,7 +131,7 @@ impl QueryLut {
                 *v = s;
             }
         }
-        // signo de los primeros 256 bits (etapa 1)
+        // sign of the first 256 bits (stage 1)
         let s1 = nbytes.min(32);
         let mut bytes = vec![0u8; 32];
         for d in 0..s1 * 8 {
@@ -143,7 +143,7 @@ impl QueryLut {
         Self { lut, sum_q: qn.iter().sum(), dims, sign1 }
     }
 
-    /// Coseno estimado entre la consulta (float) y el documento (±1).
+    /// Estimated cosine between the query (float) and the document (±1).
     #[inline]
     pub fn score(&self, code: &[u8]) -> f32 {
         let mut s = 0.0f32;
@@ -166,11 +166,11 @@ impl VecIndex {
         let hb = std::fs::read(dir.join("vec.has"))?;
         let has: Vec<u64> = hb.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
         let nbytes = bits / 8;
-        // un vec.bin de otro ancho (p.ej. un `index` interrumpido antes de escribir el manifiesto)
-        // puede ser múltiplo del tamaño del código por casualidad: se exige el tamaño exacto
+        // a vec.bin of another width (e.g. an `index` interrupted before writing the manifest)
+        // may be a multiple of the code size by chance: the exact size is required
         if bits == 0 || bits % 64 != 0 || codes.len() != n_docs * nbytes || hb.len() % 8 != 0 || has.len() * 64 < n_docs {
             bail!(
-                "vec.bin ({} B) / vec.has ({} B) no cuadran con {n_docs} docs de {bits} bits del manifiesto: rehaga `hnz index`",
+                "vec.bin ({} B) / vec.has ({} B) do not match the manifest's {n_docs} docs of {bits} bits: run `hnz index` again",
                 codes.len(),
                 hb.len()
             );
@@ -183,7 +183,7 @@ impl VecIndex {
     pub fn from_parts(has_bytes: &[u8], codes: Blob, bits: usize, n_docs: usize) -> Result<Self> {
         let nbytes = bits / 8;
         if bits == 0 || bits % 64 != 0 || has_bytes.len() % 8 != 0 || has_bytes.len() / 8 < n_docs.div_ceil(64) {
-            return Err(crate::block::corrupt("vec/has: tamaño"));
+            return Err(crate::block::corrupt("vec/has: size"));
         }
         let has: Vec<u64> = has_bytes.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
         let mut rank = Vec::with_capacity(has.len());
@@ -193,7 +193,7 @@ impl VecIndex {
             acc += w.count_ones();
         }
         if codes.len() != acc as usize * nbytes {
-            return Err(crate::block::corrupt(format!("vec/codes: {} bytes para {acc} vectores de {nbytes} B", codes.len())));
+            return Err(crate::block::corrupt(format!("vec/codes: {} bytes for {acc} vectors of {nbytes} B", codes.len())));
         }
         Ok(Self { n: n_docs, codes, has, nbytes, rank: Some(rank), tie_seeded: true, read_errors: Default::default(), last_error: Default::default() })
     }
@@ -299,7 +299,7 @@ impl VecIndex {
         let before = self.read_errors.load(std::sync::atomic::Ordering::SeqCst);
         let r = f();
         if self.read_errors.load(std::sync::atomic::Ordering::SeqCst) != before {
-            bail!("no se pudieron leer los códigos de los vectores: {}", self.last_error.lock().unwrap_or_else(|p| p.into_inner()));
+            bail!("could not read the vector codes: {}", self.last_error.lock().unwrap_or_else(|p| p.into_inner()));
         }
         Ok(r)
     }
@@ -317,7 +317,7 @@ impl VecIndex {
         })
     }
 
-    /// Distancia de Hamming de la etapa 1 (los primeros `s1` × 64 bits) entre un documento y la consulta.
+    /// Stage 1 Hamming distance (the first `s1` × 64 bits) between a document and the query.
     #[inline]
     fn ham(q: &QueryLut, c: &[u8], s1: usize) -> u32 {
         let mut h = 0u32;
@@ -328,11 +328,11 @@ impl VecIndex {
         h
     }
 
-    /// Los `cand` documentos con menor (Hamming, doc) de [lo, hi), en ese orden. Sin montículos (E30d:
-    /// con 49 M documentos y 20.000 candidatos, ordenar lo que guardaban los montículos de cada trozo
-    /// costaba ~0,6 s): una muestra estima la distancia de corte; una sola pasada recoge lo que queda
-    /// por debajo y cuenta el histograma exacto; si la estimación se quedó corta, una 2ª pasada con el
-    /// corte exacto. Mismo conjunto y orden que la versión con montículos (`hamming_select_heap`).
+    /// The `cand` documents with the lowest (Hamming, doc) in [lo, hi), in that order. No heaps (E30d:
+    /// with 49 M documents and 20,000 candidates, sorting what the per-chunk heaps held took
+    /// ~0.6 s): a sample estimates the cut distance; a single pass collects what falls below it
+    /// and counts the exact histogram; if the estimate was too low, a 2nd pass with the exact
+    /// cut. Same set and order as the heap version (`hamming_select_heap`).
     fn hamming_select(&self, q: &QueryLut, lo: usize, hi: usize, cand: usize) -> Vec<u32> {
         const CH: usize = 1 << 16;
         let s1 = self.nbytes.min(32) / 8;
@@ -369,7 +369,7 @@ impl VecIndex {
         // ties at the cut: by doc number (segments) or by a hash of (doc, query) (blocks)
         let seed = q.sign1.iter().fold(0x2545_F491u32, |a, &w| mix32(a ^ w as u32 ^ (w >> 32) as u32));
         let tie = |d: usize| if self.tie_seeded { mix32(d as u32 ^ seed) } else { d as u32 };
-        // 2) una pasada: candidatos con Hamming <= t e histograma exacto de todo el rango
+        // 2) one pass: candidates with Hamming <= t and the exact histogram of the whole range
         let pass = |t: u32| -> (Vec<(u32, u32, u32)>, Vec<u64>) {
             let starts: Vec<usize> = (lo..hi).step_by(CH).collect();
             let parts: Vec<(Vec<(u32, u32, u32)>, Vec<u64>)> = starts
@@ -401,7 +401,7 @@ impl VecIndex {
         let (mut all, hist) = pass(t_est);
         let t_exact = cut(&hist, cand as u64);
         if t_exact > t_est {
-            all = pass(t_exact).0; // la muestra subestimó el corte (raro)
+            all = pass(t_exact).0; // the sample underestimated the cut (rare)
         }
         if all.len() > cand {
             all.select_nth_unstable(cand - 1);
@@ -411,8 +411,8 @@ impl VecIndex {
         all.into_iter().map(|x| x.2).collect()
     }
 
-    /// Versión anterior de la etapa 1 (montículos por trozo), solo para comparar en pruebas y en el
-    /// banco de pruebas `examples/stage1.rs`.
+    /// Previous version of stage 1 (heaps per chunk), only to compare against in tests and in the
+    /// `examples/stage1.rs` benchmark.
     #[doc(hidden)]
     pub fn hamming_select_heap(&self, q: &QueryLut, lo: usize, hi: usize, cand: usize) -> Vec<u32> {
         const CH: usize = 1 << 16;
@@ -441,13 +441,13 @@ impl VecIndex {
         all.into_iter().map(|x| x.1).collect()
     }
 
-    /// Para el banco de pruebas: la selección nueva, expuesta.
+    /// For the benchmark: the new selection, exposed.
     #[doc(hidden)]
     pub fn hamming_select_pub(&self, q: &QueryLut, lo: usize, hi: usize, cand: usize) -> Vec<u32> {
         self.hamming_select(q, lo, hi, cand)
     }
 
-    /// Top-k en [lo, hi): Hamming (256 bits) -> `cand` candidatos -> asimétrico. A failed read of
+    /// Top-k in [lo, hi): Hamming (256 bits) -> `cand` candidates -> asymmetric. A failed read of
     /// codes is an error.
     pub fn search(&self, q: &QueryLut, lo: usize, hi: usize, cand: usize, k: usize) -> Result<Vec<(u32, f32)>> {
         self.checked(|| self.search_unchecked(q, lo, hi, cand, k))

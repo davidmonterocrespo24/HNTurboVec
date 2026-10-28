@@ -241,13 +241,13 @@ impl Admission {
                     g.queue.retain(|&x| x != me);
                     self.rejected.fetch_add(1, Ordering::Relaxed);
                     let msg = format!(
-                        "hnz ocupado: {} operaciones en curso (máximo {}) y {} de {} de memoria de trabajo en uso; se esperó {:.1} s{}",
+                        "hnz is busy: {} operations running (max {}) and {} of {} working memory in use; waited {:.1} s{}",
                         g.running,
                         self.max,
                         human(g.in_use),
                         human(self.pool),
                         start.elapsed().as_secs_f64(),
-                        if until.is_some_and(|u| u < start + self.timeout) { " (el plazo de la búsqueda)" } else { "" }
+                        if until.is_some_and(|u| u < start + self.timeout) { " (the search deadline)" } else { "" }
                     );
                     drop(g);
                     self.cv.notify_all(); // the next in line may go now

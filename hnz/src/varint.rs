@@ -1,4 +1,4 @@
-//! Enteros de longitud variable (LEB128) y zigzag para deltas con signo.
+//! Variable-length integers (LEB128) and zigzag for signed deltas.
 
 #[inline]
 pub fn put(out: &mut Vec<u8>, mut v: u64) {

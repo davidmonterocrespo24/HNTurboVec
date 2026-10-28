@@ -1,0 +1,6 @@
+EleutherAI/pythia-70m    fp32    57.21 B/rec
+EleutherAI/pythia-70m    W8A32   57.42 B/rec
+EleutherAI/pythia-70m    W8A8    57.94 B/rec
+EleutherAI/pythia-160m   fp32    52.64 B/rec
+EleutherAI/pythia-160m   W8A32   52.77 B/rec
+EleutherAI/pythia-160m   W8A8    53.21 B/rec

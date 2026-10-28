@@ -1,11 +1,11 @@
-//! Transformación REVERSIBLE del HTML de HN a texto casi plano.
+//! REVERSIBLE transform of HN's HTML into almost plain text.
 //!
-//! HN escapa algunos caracteres y usa pocas etiquetas (`<p>`, `<i>`, `<pre><code>`, enlaces
-//! `<a href=".." rel="nofollow">`). Convertirlas a caracteres de control y des-escapar entidades
-//! acorta el texto y lo hace más predecible (mejor para zstd y, sobre todo, para el LM).
-//! Hay dos "dialectos" de escapado según la época, y los enlaces largos se muestran truncados
-//! con "..." (30-40 % de los enlaces), lo que se guarda como (url, longitud).
-//! Cada registro se verifica: si `decode(encode(x)) != x` se guarda el original tal cual.
+//! HN escapes a few characters and uses few tags (`<p>`, `<i>`, `<pre><code>`, links
+//! `<a href=".." rel="nofollow">`). Turning them into control characters and unescaping entities
+//! makes the text shorter and more predictable (better for zstd and, above all, for the LM).
+//! There are two escaping "dialects" depending on the era, and long links are shown truncated
+//! with "..." (30-40 % of links), which is stored as (url, length).
+//! Every record is checked: if `decode(encode(x)) != x` the original is stored as is.
 
 const ANCHOR_SAME: char = '\u{01}'; // <a href=U rel=nofollow>U</a>          ->  \x01 U \x02
 const SEP: char = '\u{02}';
@@ -20,12 +20,12 @@ const TAGS: [(&str, char); 5] = [
     ("</code></pre>", '\u{0f}'),
 ];
 
-/// Dialecto de escapado de HN.
+/// HN's escaping dialect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dialect {
-    /// HN actual: `&amp; &lt; &gt; &quot; &#x27; &#x2F;`
+    /// Current HN: `&amp; &lt; &gt; &quot; &#x27; &#x2F;`
     Modern = 0,
-    /// HN antiguo (~2007-2012): `&#38; &#60; &#62;`; comillas, apóstrofos y barras sin escapar
+    /// Old HN (~2007-2012): `&#38; &#60; &#62;`; quotes, apostrophes and slashes not escaped
     Legacy = 1,
 }
 
@@ -50,14 +50,14 @@ fn escape_char(c: char, out: &mut String, d: Dialect) {
     }
 }
 
-/// Escapa como lo hace HN.
+/// Escapes the way HN does.
 pub fn escape(s: &str, out: &mut String, d: Dialect) {
     for c in s.chars() {
         escape_char(c, out, d);
     }
 }
 
-/// Des-escapa las entidades que produce HN (`&amp; &lt; &gt; &quot; &apos; &#xHH; &#DD;`).
+/// Unescapes the entities HN produces (`&amp; &lt; &gt; &quot; &apos; &#xHH; &#DD;`).
 pub fn unescape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
@@ -107,7 +107,7 @@ fn push_text(seg: &str, out: &mut String) -> Option<()> {
     Some(())
 }
 
-/// HTML de HN -> forma compacta (independiente del dialecto). `None` si no es representable.
+/// HN HTML -> compact form (independent of the dialect). `None` if it cannot be represented.
 pub fn encode(s: &str) -> Option<String> {
     if s.chars().any(is_marker) {
         return None;
@@ -170,7 +170,7 @@ fn find_from(s: &str, from: usize, c: char) -> usize {
     s[from..].find(c).map(|p| from + p).unwrap_or(s.len())
 }
 
-/// Forma compacta -> HTML original de HN.
+/// Compact form -> original HN HTML.
 pub fn decode(s: &str, d: Dialect) -> String {
     let mut out = String::with_capacity(s.len() + s.len() / 6 + 16);
     let mut i = 0;
@@ -212,7 +212,7 @@ pub fn decode(s: &str, d: Dialect) -> String {
     out
 }
 
-/// Modo de almacenamiento de un registro de texto.
+/// Storage mode of a text record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Modern = 0,
@@ -230,7 +230,7 @@ impl Mode {
     }
 }
 
-/// Devuelve (modo, cadena a guardar). Verifica el round-trip en el dialecto elegido.
+/// Returns (mode, string to store). Checks the round trip in the chosen dialect.
 pub fn transform(s: &str) -> (Mode, String) {
     if s.is_empty() {
         return (Mode::Modern, String::new());
@@ -246,7 +246,7 @@ pub fn transform(s: &str) -> (Mode, String) {
     (Mode::Raw, s.to_string())
 }
 
-/// Inverso de `transform`.
+/// Inverse of `transform`.
 pub fn restore(mode: Mode, s: &str) -> String {
     match mode {
         Mode::Modern => decode(s, Dialect::Modern),
@@ -255,7 +255,7 @@ pub fn restore(mode: Mode, s: &str) -> String {
     }
 }
 
-/// Texto plano legible (para indexar y para fragmentos): sin etiquetas y sin entidades.
+/// Readable plain text (for indexing and snippets): no tags and no entities.
 pub fn to_plain(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
     let mut in_tag = false;
@@ -296,7 +296,7 @@ mod tests {
         ];
         for (c, want) in cases {
             let (m, e) = transform(c);
-            assert_eq!(m, want, "modo inesperado para {c}");
+            assert_eq!(m, want, "unexpected mode for {c}");
             assert_eq!(restore(m, &e), c);
             assert!(e.len() <= c.len());
         }
