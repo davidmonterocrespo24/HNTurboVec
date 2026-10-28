@@ -20,6 +20,7 @@ matters is daily use: **fast, accurate and compact**. Implementation in **Rust**
 | [08-block.md](08-block.md) | (English) The compact block (P3): byte layout of `hn.hnzb`, parts, manifest, integrity levels, tools (`pack`, `verify-block`, `inspect`), sample measurements. |
 | [09-rerank.md](09-rerank.md) | (English) Reranking (P4): candidates, prefixes decoded by the shared LM service, BM25 over the prefix, cascade re-embedding, keyword mode with frequent words, determinism, quality. |
 | [10-tests.md](10-tests.md) | (English) How to test and approve the Python library: the acceptance script on the full block, the pytest suite file by file, the block and quality checks. |
+| [POST.md](POST.md) | (English) The write-up for showing the project: how all of HN got to 5.3 GB, results, what did not work, a Show HN text. |
 
 ## Repository structure
 
@@ -64,7 +65,13 @@ matters is daily use: **fast, accurate and compact**. Implementation in **Rust**
       query word over it, the top 50 of a cheap score re-embedded on the CPU; frequent words found
       among the semantic candidates; opt-in deadline; P@10 0.238 (P3 block: 0.211); cold search
       ~2.8 s in the library on a 16-thread laptop ([09-rerank.md](09-rerank.md)).
-- [ ] Full build of the 239 months (P5; days of CPU/iGPU).
+- [x] **The block of all of HN** (P5, E34): 49,324,111 items in **5.34 GB** (`hn.hnzb` 5.07 GB +
+      the query embedder), built in ~1 week on the laptop; deep verification against every
+      Parquet source: 0 differences.
+- [x] **Packaging** (P6, E35-E36): abi3 wheel, own HTTP server and the `hnz` command, tests
+      ([10-tests.md](10-tests.md)); on the full block P@10 0.32 within the query's month, cold
+      reranked search ~2.3 s, `ram="2GB"` holds.
+- [ ] P7: the prefix cache's share of the RAM plan, an eval for the full archive, distribution.
 
 ## Result with the 3-month sample (637,046 items, E26)
 

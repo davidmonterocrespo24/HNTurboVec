@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="400" viewBox="0 0 860 400" role="img" aria-label="What is inside the 5.34 GB">
+<title>What is inside the 5.34 GB</title>
+<rect x="0.5" y="0.5" width="859" height="399" rx="10" fill="#1a1a19" stroke="rgba(255,255,255,0.10)"/>
+<text x="24.0" y="34.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="17" font-weight="600" text-anchor="start">What is inside the 5.34 GB</text>
+<text x="24.0" y="56.0" fill="#c3c2b7" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" text-anchor="start">hn.hnzb (5.07 GB) + the embedder files (0.28 GB) · GB</text>
+<line x1="330.0" y1="78" x2="330.0" y2="360" stroke="#2c2c2a" stroke-width="1"/>
+<text x="330.0" y="378.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">0</text>
+<line x1="467.5" y1="78" x2="467.5" y2="360" stroke="#2c2c2a" stroke-width="1"/>
+<text x="467.5" y="378.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">1</text>
+<line x1="605.0" y1="78" x2="605.0" y2="360" stroke="#2c2c2a" stroke-width="1"/>
+<text x="605.0" y="378.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">2</text>
+<line x1="742.5" y1="78" x2="742.5" y2="360" stroke="#2c2c2a" stroke-width="1"/>
+<text x="742.5" y="378.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">3</text>
+<line x1="330" y1="78" x2="330" y2="360" stroke="#383835" stroke-width="1"/>
+<text x="316.0" y="99.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" text-anchor="end">Text</text>
+<text x="316.0" y="116.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">arithmetic-coded with an LM trained on HN</text>
+<path d="M330.0,88.0 H712.8 Q716.8,88.0 716.8,92.0 V106.0 Q716.8,110.0 712.8,110.0 H330.0 Z" fill="#3987e5"/>
+<text x="724.8" y="104.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" text-anchor="start">2.81 GB · 53 %</text>
+<text x="316.0" y="145.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" text-anchor="end">Semantic vectors</text>
+<text x="316.0" y="162.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">256-bit codes, 47.4 M items</text>
+<path d="M330.0,134.0 H534.5 Q538.5,134.0 538.5,138.0 V152.0 Q538.5,156.0 534.5,156.0 H330.0 Z" fill="#3987e5"/>
+<text x="546.5" y="150.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" text-anchor="start">1.52 GB · 28 %</text>
+<text x="316.0" y="191.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" text-anchor="end">Word index</text>
+<text x="316.0" y="208.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">BM25 postings of 4.2 M rare terms</text>
+<path d="M330.0,180.0 H376.2 Q380.2,180.0 380.2,184.0 V198.0 Q380.2,202.0 376.2,202.0 H330.0 Z" fill="#3987e5"/>
+<text x="388.2" y="196.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" text-anchor="start">0.36 GB · 7 %</text>
+<text x="316.0" y="237.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" text-anchor="end">Models</text>
+<text x="316.0" y="254.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">query embedder 0.28 + LM 0.08</text>
+<path d="M330.0,226.0 H374.4 Q378.4,226.0 378.4,230.0 V244.0 Q378.4,248.0 374.4,248.0 H330.0 Z" fill="#3987e5"/>
+<text x="386.4" y="242.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" text-anchor="start">0.35 GB · 7 %</text>
+<text x="316.0" y="283.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" text-anchor="end">Metadata</text>
+<text x="316.0" y="300.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">times, authors, scores, threads</text>
+<path d="M330.0,272.0 H365.2 Q369.2,272.0 369.2,276.0 V290.0 Q369.2,294.0 365.2,294.0 H330.0 Z" fill="#3987e5"/>
+<text x="377.2" y="288.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" text-anchor="start">0.28 GB · 5 %</text>
+<text x="316.0" y="329.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" text-anchor="end">Other</text>
+<text x="316.0" y="346.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">directories, fallbacks, padding</text>
+<path d="M330.0,318.0 H330.0 Q331.6,318.0 331.6,319.6 V338.4 Q331.6,340.0 330.0,340.0 H330.0 Z" fill="#3987e5"/>
+<text x="339.6" y="334.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" text-anchor="start">12 MB</text>
+</svg>

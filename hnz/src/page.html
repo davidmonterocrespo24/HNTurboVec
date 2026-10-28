@@ -46,6 +46,7 @@ const esc = s => (s || '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':
 f.onsubmit = async e => {
   e.preventDefault();
   const p = new URLSearchParams(new FormData(f));
+  history.replaceState(null, '', '?' + p);   // the address of this search, to share or reload
   st.textContent = 'buscando…';
   const t0 = performance.now();
   const r = await fetch('/search?' + p).then(x => x.json());
@@ -64,6 +65,12 @@ async function full(id, btn) {
   const r = await fetch('/item/' + id).then(x => x.json());
   document.getElementById('t' + id).textContent = r.text_plain;
   btn.textContent = `descomprimido en ${r.ms.toFixed(0)} ms`;
+}
+// a search in the address (/?q=rust&from=2015) fills the form and runs
+const init = new URLSearchParams(location.search);
+if (init.get('q')) {
+  for (const [k, v] of init) if (f.elements[k]) f.elements[k].value = v;
+  f.requestSubmit();
 }
 </script>
 </body>

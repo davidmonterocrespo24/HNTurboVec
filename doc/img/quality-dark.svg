@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="420" viewBox="0 0 860 420" role="img" aria-label="Search quality on the full block">
+<title>Search quality on the full block</title>
+<rect x="0.5" y="0.5" width="859" height="419" rx="10" fill="#1a1a19" stroke="rgba(255,255,255,0.10)"/>
+<text x="24.0" y="34.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="17" font-weight="600" text-anchor="start">Search quality on the full block</text>
+<text x="24.0" y="56.0" fill="#c3c2b7" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" text-anchor="start">P@10 · 300 queries per set, each searched within its month among 49.3 M items</text>
+<rect x="24" y="74" width="12" height="12" rx="3" fill="#3987e5"/>
+<text x="42.0" y="85.0" fill="#c3c2b7" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" text-anchor="start">Hybrid, reranked (default)</text>
+<rect x="255.20000000000002" y="74" width="12" height="12" rx="3" fill="#d95926"/>
+<text x="273.2" y="85.0" fill="#c3c2b7" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" text-anchor="start">Keyword only</text>
+<line x1="60" y1="350.0" x2="836" y2="350.0" stroke="#383835" stroke-width="1"/>
+<text x="52.0" y="354.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">0.0</text>
+<line x1="60" y1="290.0" x2="836" y2="290.0" stroke="#2c2c2a" stroke-width="1"/>
+<text x="52.0" y="294.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">0.1</text>
+<line x1="60" y1="230.0" x2="836" y2="230.0" stroke="#2c2c2a" stroke-width="1"/>
+<text x="52.0" y="234.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">0.2</text>
+<line x1="60" y1="170.0" x2="836" y2="170.0" stroke="#2c2c2a" stroke-width="1"/>
+<text x="52.0" y="174.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">0.3</text>
+<line x1="60" y1="110.0" x2="836" y2="110.0" stroke="#2c2c2a" stroke-width="1"/>
+<text x="52.0" y="114.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">0.4</text>
+<path d="M99.7,350.0 V166.8 Q99.7,162.8 103.7,162.8 H119.7 Q123.7,162.8 123.7,166.8 V350.0 Z" fill="#3987e5"/>
+<path d="M125.7,350.0 V203.4 Q125.7,199.4 129.7,199.4 H145.7 Q149.7,199.4 149.7,203.4 V350.0 Z" fill="#d95926"/>
+<text x="111.7" y="156.8" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600" text-anchor="middle">0.31</text>
+<text x="124.7" y="370.0" fill="#c3c2b7" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">2010-06</text>
+<path d="M229.0,350.0 V149.4 Q229.0,145.4 233.0,145.4 H249.0 Q253.0,145.4 253.0,149.4 V350.0 Z" fill="#3987e5"/>
+<path d="M255.0,350.0 V194.4 Q255.0,190.4 259.0,190.4 H275.0 Q279.0,190.4 279.0,194.4 V350.0 Z" fill="#d95926"/>
+<text x="241.0" y="139.4" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600" text-anchor="middle">0.34</text>
+<text x="254.0" y="370.0" fill="#c3c2b7" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">2015-06</text>
+<path d="M358.3,350.0 V168.6 Q358.3,164.6 362.3,164.6 H378.3 Q382.3,164.6 382.3,168.6 V350.0 Z" fill="#3987e5"/>
+<path d="M384.3,350.0 V198.0 Q384.3,194.0 388.3,194.0 H404.3 Q408.3,194.0 408.3,198.0 V350.0 Z" fill="#d95926"/>
+<text x="370.3" y="158.6" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600" text-anchor="middle">0.31</text>
+<text x="383.3" y="370.0" fill="#c3c2b7" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">2024-01</text>
+<path d="M487.7,350.0 V140.4 Q487.7,136.4 491.7,136.4 H507.7 Q511.7,136.4 511.7,140.4 V350.0 Z" fill="#3987e5"/>
+<path d="M513.7,350.0 V181.8 Q513.7,177.8 517.7,177.8 H533.7 Q537.7,177.8 537.7,181.8 V350.0 Z" fill="#d95926"/>
+<text x="499.7" y="130.4" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600" text-anchor="middle">0.36</text>
+<text x="512.7" y="370.0" fill="#c3c2b7" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">dev 2010-06</text>
+<path d="M617.0,350.0 V152.4 Q617.0,148.4 621.0,148.4 H637.0 Q641.0,148.4 641.0,152.4 V350.0 Z" fill="#3987e5"/>
+<path d="M643.0,350.0 V196.2 Q643.0,192.2 647.0,192.2 H663.0 Q667.0,192.2 667.0,196.2 V350.0 Z" fill="#d95926"/>
+<text x="629.0" y="142.4" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600" text-anchor="middle">0.34</text>
+<text x="642.0" y="370.0" fill="#c3c2b7" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">dev 2015-06</text>
+<path d="M746.3,350.0 V187.8 Q746.3,183.8 750.3,183.8 H766.3 Q770.3,183.8 770.3,187.8 V350.0 Z" fill="#3987e5"/>
+<path d="M772.3,350.0 V222.0 Q772.3,218.0 776.3,218.0 H792.3 Q796.3,218.0 796.3,222.0 V350.0 Z" fill="#d95926"/>
+<text x="758.3" y="177.8" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="600" text-anchor="middle">0.28</text>
+<text x="771.3" y="370.0" fill="#c3c2b7" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" text-anchor="middle">dev 2024-01</text>
+<text x="24.0" y="404.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" text-anchor="start">Relevant = the comments of the query’s own thread. Without the month filter, threads on the same subject from other years count as misses (P@10 ≈ 0.05).</text>
+</svg>

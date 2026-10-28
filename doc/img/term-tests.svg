@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="490" viewBox="0 0 920 490" role="img" aria-label="tests and the deep verification (condensed from logs/p6/*.log)">
+<title>tests and the deep verification (condensed from logs/p6/*.log)</title>
+<rect width="920" height="490" rx="10" fill="#14161a"/>
+<path d="M0,10 Q0,0 10,0 H910 Q920,0 920,10 V30 H0 Z" fill="#22252b"/>
+<circle cx="18" cy="15" r="5.5" fill="#ff5f57"/>
+<circle cx="36" cy="15" r="5.5" fill="#febc2e"/>
+<circle cx="54" cy="15" r="5.5" fill="#28c840"/>
+<text x="460.0" y="20.0" fill="#7d828c" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">tests and the deep verification (condensed from logs/p6/*.log)</text>
+<text x="18" y="52" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve"><tspan fill="#6cb6ff">$ </tspan><tspan fill="#d6d8dc">cargo test --release --lib</tspan></text>
+<text x="18" y="71" fill="#7d828c" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">test lm::kernels::tests::kernels_agree_exactly ... ok</text>
+<text x="18" y="90" fill="#7d828c" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">test serve::tests::request_heads ... ok</text>
+<text x="18" y="109" fill="#7d828c" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">test block::tests::roundtrip_and_reproducible ... ok</text>
+<text x="18" y="128" fill="#7d828c" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">test lm::coder::tests::roundtrip_random_distributions ... ok</text>
+<text x="18" y="147" fill="#7d828c" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">test mem::tests::admission_is_fifo ... ok</text>
+<text x="18" y="166" fill="#7d828c" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">test block::tests::corruption_matrix ... ok</text>
+<text x="18" y="185" fill="#7d828c" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">…</text>
+<text x="18" y="204" fill="#4cc38a" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s</text>
+<text x="18" y="242" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve"><tspan fill="#6cb6ff">$ </tspan><tspan fill="#d6d8dc">python -m pytest hnz/py/tests -q</tspan></text>
+<text x="18" y="261" fill="#7d828c" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">........................................................................ [ 98%]</text>
+<text x="18" y="280" fill="#7d828c" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">.                                                                        [100%]</text>
+<text x="18" y="299" fill="#4cc38a" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">73 passed in 1130.23s (0:18:50)</text>
+<text x="18" y="337" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve"><tspan fill="#6cb6ff">$ </tspan><tspan fill="#d6d8dc">hnz verify-block hn-2026-08.hnz --level deep --decode 0.005</tspan></text>
+<text x="18" y="356" fill="#7d828c" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">  &quot;deep: metadata&quot;      rows 49,324,111   late 309,761</text>
+<text x="18" y="375" fill="#7d828c" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">  &quot;deep: 2006-10&quot; … &quot;deep: 2026-08&quot;   237 months against their Parquet sources</text>
+<text x="18" y="394" fill="#7d828c" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">  &quot;deep: items&quot;         246,546 records decoded with the LM, 15,748,814 kids lists</text>
+<text x="18" y="413" fill="#7d828c" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">  &quot;deep: word index&quot;    4,223,195 terms</text>
+<text x="18" y="432" fill="#4cc38a" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">  &quot;differences&quot;: 0,  &quot;ok&quot;: true,  &quot;seconds&quot;: 34871.89</text>
+<text x="18" y="451" fill="#7d828c" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">  &quot;snapshot&quot;: &quot;ef11713b247a66bde569c8a6d7a727ee&quot;</text>
+</svg>

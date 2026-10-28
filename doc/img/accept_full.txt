@@ -1,0 +1,27 @@
+hnz 0.1.0 from C:\Desarrollo\Odoo\AI\HNTurboVec\hnz\py\python\hnz
+PASS  verify_block('quick')  (401 ms)
+PASS  open with the embedder loaded  (49,324,111 docs, 3.8 s)
+PASS  hybrid reranked search: 10 results  (4029 ms cold)
+PASS  the same search again: same results  (1893 ms)
+PASS  first stage only (rerank=False)  (477 ms)
+PASS  keyword + since + types filters hold  (1653 ms)
+PASS  a one-month window holds
+PASS  author filter, no query
+PASS  no query: the most recent jobs
+PASS  deadline_ms=1 still answers (degraded)  (605 ms)
+PASS  get(1): the first HN item  ('Y Combinator', 20 ms)
+PASS  get() of a search result
+PASS  get() of an id that does not exist
+PASS  get_many()
+PASS  embed(): a 768-dim vector
+PASS  asyncio: asearch / aget
+PASS  a bad query raises ValueError
+PASS  the RAM ledger stays within the budget  (used 1.54 GB, peak 1.61 GB, limit 2.00 GB, process private 1.46 GB)
+PASS  Archive.serve(): /stats
+PASS  Archive.serve(): /search equals search()
+PASS  Archive.serve(): /item/1
+PASS  Archive.serve() stops on the Event
+PASS  `hnz --version`  (C:\Desarrollo\Odoo\AI\HNTurboVec\.venv\Scripts\python.exe -m hnz)
+PASS  `hnz serve`: answers a search  (hnz: 49324111 docs - http://127.0.0.1:51794/ (Ctrl+C to stop))
+
+ALL PASSED

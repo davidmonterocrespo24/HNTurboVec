@@ -11,7 +11,6 @@ import argparse
 import asyncio
 import json
 import os
-import shutil
 import socket
 import subprocess
 import sys
@@ -138,11 +137,13 @@ def main():
         check('Archive.serve() stops on the Event', not th.is_alive())
 
     # the `hnz` console script installed with the wheel
-    exe = shutil.which('hnz') or os.path.join(os.path.dirname(sys.executable), 'hnz.exe')
-    out = subprocess.run([exe, '--version'], capture_output=True, text=True)
-    check('`hnz --version`', out.stdout.strip() == f'hnz {hnz.__version__}', exe)
+    # (a development install has no hnz.exe: `python -m hnz` is the same command)
+    exe = os.path.join(os.path.dirname(sys.executable), 'hnz.exe')
+    cmd = [exe] if os.path.exists(exe) else [sys.executable, '-m', 'hnz']
+    out = subprocess.run(cmd + ['--version'], capture_output=True, text=True)
+    check('`hnz --version`', out.stdout.strip() == f'hnz {hnz.__version__}', ' '.join(cmd))
     port = free_port()
-    p = subprocess.Popen([exe, 'serve', '--root', a.root, '--ram', a.ram, '--port', str(port), '--threads', '2'],
+    p = subprocess.Popen(cmd + ['serve', '--root', a.root, '--ram', a.ram, '--port', str(port), '--threads', '2'],
                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     try:
         banner = p.stderr.readline().strip()
