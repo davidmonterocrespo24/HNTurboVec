@@ -91,12 +91,7 @@
   <li>Search from Python, as in the example below.</li>
   <li>Or start the web page with <code>hnz serve --root D:\hn\hn-2026-08.hnz --ram 2GB</code> and open <code>http://127.0.0.1:8088/?q=sqlite+in+production</code>.</li>
 </ol>
-<pre>import hnz
-
-with hnz.open(r"D:\hn\hn-2026-08.hnz", ram="2GB") as hn:
-    for h in hn.search("how do I deal with burnout as a software engineer", k=5,
-                       since="2015", until="2018", types="comment"):
-        print(h.date, h.by, h.text[:120])</pre>
+<pre>import&nbsp;hnz<br>with&nbsp;hnz.open(r"D:\hn\hn-2026-08.hnz",&nbsp;ram="2GB")&nbsp;as&nbsp;hn:<br>&nbsp;&nbsp;&nbsp;&nbsp;for&nbsp;h&nbsp;in&nbsp;hn.search("how&nbsp;do&nbsp;I&nbsp;deal&nbsp;with&nbsp;burnout&nbsp;as&nbsp;a&nbsp;software&nbsp;engineer",&nbsp;k=5,<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;since="2015",&nbsp;until="2018",&nbsp;types="comment"):<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;print(h.date,&nbsp;h.by,&nbsp;h.text[:120])</pre>
 <p>The code, the design notes and the full experiment log, including the experiments that failed, are in the repository: <a href="https://github.com/davidmonterocrespo24/HNTurboVec">github.com/davidmonterocrespo24/HNTurboVec</a> (MIT license).</p>
 
 <footer>Code: <a href="https://github.com/davidmonterocrespo24/HNTurboVec">github.com/davidmonterocrespo24/HNTurboVec</a>. Data: open-index/hacker-news on Hugging Face. Models: EmbeddingGemma 2 (Google) and pythia-70m (EleutherAI). Measured on an Intel Core Ultra 7 265H laptop, October 2026.</footer>
