@@ -14,7 +14,7 @@
 <h2>Why I built it</h2>
 <p>I wanted all of Hacker News on my laptop, searchable the way a search engine is: a question in plain words, a few keywords, a date range, the top results with their full text. No server, no GPU card. The public Parquet dump of HN is 12.4 GB and has no search at all, so I set myself a target of 4 to 5 GB for everything. In exchange I was willing to wait up to 10 seconds for an answer, and to let the archive take days to build.</p>
 <p>The machine is a laptop with an Intel Core Ultra 7 265H, 31 GB of RAM and an integrated GPU. Everything in this article was built and measured on it, in October 2026.</p>
-<p><em>What you need to use it today: hnz runs on Windows on x86-64 with AVX2, and the archive (I call it the block) is not published for download yet. You rebuild it from the public dataset with the scripts in the repository, which takes about a week on a laptop like mine.</em></p>
+<p><em>What you need to use it today: hnz runs on Windows on <code>x86-64</code> with AVX2, and the archive (I call it the block) is not published for download yet. You rebuild it from the public dataset with the scripts in the repository, which takes about a week on a laptop like mine.</em></p>
 
 <h2>Where the numbers start</h2>
 <figure><img src="https://davidmonterocrespo24.github.io/HNTurboVec/img/size.png" alt="All of Hacker News on disk, in GB."><figcaption>All of Hacker News on disk, in GB.</figcaption></figure>
@@ -23,7 +23,7 @@
 
 <h2>Compressing the text with a language model</h2>
 <p>My first experiments used ordinary compressors. Grouping items into small blocks before zstd took text and metadata from 181 to 124 bytes per item. After that, stronger compressors stopped helping. zstd at level 22, brotli and xz all landed between 106 and 114 bytes, and even xz over a whole month in one stream, with no random access at all, only reached 91.</p>
-<p>The paper <a href="https://arxiv.org/abs/2309.10668">Language Modeling Is Compression</a> (DeepMind, 2023) shows that a model that predicts the next token well, driving an arithmetic coder, is a very good compressor. A quick test with SmolLM2-135M suggested about 50 bytes per record, so I tried it for real. Three problems came up.</p>
+<p>The paper <a href="https://arxiv.org/abs/2309.10668">Language Modeling Is Compression</a> (DeepMind, 2023) shows that a model that predicts the next token well, driving an arithmetic coder, is a very good compressor. A quick test with <code>SmolLM2-135M</code> suggested about 50 bytes per record, so I tried it for real. Three problems came up.</p>
 <ol>
   <li><strong>The decoder has to compute exactly the same probabilities as the encoder.</strong> One different bit and the rest of the record decodes as garbage. Floating-point inference libraries do not promise this across machines or batch sizes, so I wrote a small inference engine in Rust for Pythia models: int8 weights and activations, exact integer matrix products, and LayerNorm, softmax and GELU with my own exp and erf, summed in a fixed order. The AVX-VNNI kernels produce the same bytes as the plain scalar code, and the block records which version of the arithmetic it was made with, so a mismatched reader refuses it.</li>
   <li><strong>Speed.</strong> Compression runs one record per thread and reaches 122 records per second on 16 threads. Decompression decodes many records in lock-step, with a KV cache.</li>
@@ -47,7 +47,7 @@
 <ul>
   <li>Items are stored in order of time and id, so a date filter is a contiguous range, found exactly from the metadata index. About 310,000 HN ids (0.63%) have a timestamp later than a higher id, and those are listed separately.</li>
   <li>Metadata lives in delta-coded columns, about 6 bytes per item for the time, author, score, parent and children. Deleted items stay as metadata, so threads never break.</li>
-  <li>Every part has a hash (XXH3-128), and a few known records are decoded when the block opens. The deepest check, <code>verify-block --level deep</code>, compares every record with its Parquet source. On the final block it found 0 differences in 49.3 million items, after 9.7 hours.</li>
+  <li>Every part has a hash (<code>XXH3-128</code>), and a few known records are decoded when the block opens. The deepest check, <code>verify-block --level deep</code>, compares every record with its Parquet source. On the final block it found 0 differences in 49.3 million items, after 9.7 hours.</li>
 </ul>
 
 <h2>Memory</h2>
@@ -73,7 +73,12 @@
 <figure><img src="https://davidmonterocrespo24.github.io/HNTurboVec/img/web-burnout.png" alt="The hnz web page showing four comments about burnout from 2015 to 2018" width="1100" height="910"><figcaption>The search page served by <code>hnz serve</code>, with a hybrid search limited to comments from 2015 to 2018.</figcaption></figure>
 
 <h2>Ideas I tried and dropped</h2>
-<ul><li><strong>A cross-encoder reranker</strong>: +6 to 10% P@10. Dropped because it needs the full text of every candidate: 5 to 7 times slower.</li><li><strong>A bigger LM (pythia-160m)</strong>: 8.8% less text. Dropped because decompression 2.3 times slower.</li><li><strong>TurboQuant-style vectors</strong>: within the noise at the same size. Dropped because needs training, no clear gain.</li><li><strong>Stronger general compressors</strong>: 106 to 114 bytes per item. Dropped because far from what the LM reaches.</li></ul>
+<ul>
+<li><strong>A cross-encoder reranker</strong> gave +6 to 10% P@10, but it needs the full text of every candidate, so it was 5 to 7 times slower.</li>
+<li><strong>A bigger LM</strong> (pythia-160m) saved 8.8% more text, but decompressed 2.3 times slower.</li>
+<li><strong>TurboQuant-style vectors</strong> were within the noise of the binary codes at the same size, and they need training.</li>
+<li><strong>Stronger general-purpose compressors</strong> stopped at 106 to 114 bytes per item, far from what the LM reaches.</li>
+</ul>
 
 <h2>Testing</h2>
 <figure><img src="https://davidmonterocrespo24.github.io/HNTurboVec/img/term-accept.png" alt="24 acceptance checks, all passed"><figcaption>24 acceptance checks of the installed package on the full block.</figcaption></figure>
@@ -83,15 +88,15 @@
 <ol>
   <li>Build the block with the steps in the <a href="https://github.com/davidmonterocrespo24/HNTurboVec#build-the-block-yourself">repository's README</a> (about a week), or copy one you already have.</li>
   <li>Install the package: <code>pip install hnz-0.1.0-cp310-abi3-win_amd64.whl</code>.</li>
-  <li>Search from Python:
-<pre class="code"><code>import hnz
+  <li>Search from Python, as in the example below.</li>
+  <li>Or start the web page with <code>hnz serve --root D:\hn\hn-2026-08.hnz --ram 2GB</code> and open <code>http://127.0.0.1:8088/?q=sqlite+in+production</code>.</li>
+</ol>
+<pre>import hnz
 
 with hnz.open(r"D:\hn\hn-2026-08.hnz", ram="2GB") as hn:
     for h in hn.search("how do I deal with burnout as a software engineer", k=5,
                        since="2015", until="2018", types="comment"):
-        print(h.date, h.by, h.text[:120])</code></pre></li>
-  <li>Or start the web page with <code>hnz serve --root D:\hn\hn-2026-08.hnz --ram 2GB</code> and open <code>http://127.0.0.1:8088/?q=sqlite+in+production</code>.</li>
-</ol>
+        print(h.date, h.by, h.text[:120])</pre>
 <p>The code, the design notes and the full experiment log, including the experiments that failed, are in the repository: <a href="https://github.com/davidmonterocrespo24/HNTurboVec">github.com/davidmonterocrespo24/HNTurboVec</a> (MIT license).</p>
 
 <footer>Code: <a href="https://github.com/davidmonterocrespo24/HNTurboVec">github.com/davidmonterocrespo24/HNTurboVec</a>. Data: open-index/hacker-news on Hugging Face. Models: EmbeddingGemma 2 (Google) and pythia-70m (EleutherAI). Measured on an Intel Core Ultra 7 265H laptop, October 2026.</footer>
