@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>All of Hacker News in 5.3 GB, searchable on a laptop</title>
+<meta name="description" content="How every Hacker News item fits losslessly in 5.34 GB with hybrid search on a laptop CPU.">
+<meta name="author" content="David Montero Crespo">
+<link rel="canonical" href="https://davidmonterocrespo24.github.io/HNTurboVec/">
+<meta name="robots" content="noindex">
+</head><body><article>
+<header class="hero">
+  
+  <h1>All of Hacker News in <span class="gb">5.3&nbsp;GB</span>, searchable on a laptop</h1>
+  <p class="lede">This article describes hnz, a Rust library with a Python API that stores every Hacker News item in a single 5.34 GB file and searches it with hybrid semantic and keyword search on a laptop CPU. It explains how a small language model compresses the text, why the search indexes can stay small, and what the results look like.</p>
+  <ul><li><strong>49.3 M</strong> items, from Oct 2006 to Aug 2026</li><li><strong>5.34 GB</strong> text, metadata, both indexes and both models</li><li><strong>0</strong> differences against the source, item by item</li><li><strong>~2.3 s</strong> for a cold reranked search on a 16-thread laptop CPU</li></ul>
+</header>
+
+<h2>Why I built it</h2>
+<p>I wanted all of Hacker News on my laptop, searchable the way a search engine is: a question in plain words, a few keywords, a date range, the top results with their full text. No server, no GPU card. The public Parquet dump of HN is 12.4 GB and has no search at all, so I set myself a target of 4 to 5 GB for everything. In exchange I was willing to wait up to 10 seconds for an answer, and to let the archive take days to build.</p>
+<p>The machine is a laptop with an Intel Core Ultra 7 265H, 31 GB of RAM and an integrated GPU. Everything in this article was built and measured on it, in October 2026.</p>
+<p><em>What you need to use it today: hnz runs on Windows on x86-64 with AVX2, and the archive (I call it the block) is not published for download yet. You rebuild it from the public dataset with the scripts in the repository, which takes about a week on a laptop like mine.</em></p>
+
+<h2>Where the numbers start</h2>
+<figure><img src="https://davidmonterocrespo24.github.io/HNTurboVec/img/size.png" alt="All of Hacker News on disk, in GB."><figcaption>All of Hacker News on disk, in GB.</figcaption></figure>
+<ul><li>Raw JSON from the HN API: ~24 GB, search: none</li><li>Parquet dump (<a href="https://huggingface.co/datasets/open-index/hacker-news">open-index/hacker-news</a>): 12.4 GB, search: none</li><li>zstd-19 with a trained dictionary, item by item: 9.1 GB, search: none</li><li>hnz block: <strong>5.34 GB</strong>, search: hybrid, with filters</li></ul>
+<p>The 5.34 GB include the text, the metadata, a semantic index, a word index and the two models that hnz needs to read them.</p>
+
+<h2>Compressing the text with a language model</h2>
+<p>My first experiments used ordinary compressors. Grouping items into small blocks before zstd took text and metadata from 181 to 124 bytes per item. After that, stronger compressors stopped helping. zstd at level 22, brotli and xz all landed between 106 and 114 bytes, and even xz over a whole month in one stream, with no random access at all, only reached 91.</p>
+<p>The paper <a href="https://arxiv.org/abs/2309.10668">Language Modeling Is Compression</a> (DeepMind, 2023) shows that a model that predicts the next token well, driving an arithmetic coder, is a very good compressor. A quick test with SmolLM2-135M suggested about 50 bytes per record, so I tried it for real. Three problems came up.</p>
+<ol>
+  <li><strong>The decoder has to compute exactly the same probabilities as the encoder.</strong> One different bit and the rest of the record decodes as garbage. Floating-point inference libraries do not promise this across machines or batch sizes, so I wrote a small inference engine in Rust for Pythia models: int8 weights and activations, exact integer matrix products, and LayerNorm, softmax and GELU with my own exp and erf, summed in a fixed order. The AVX-VNNI kernels produce the same bytes as the plain scalar code, and the block records which version of the arithmetic it was made with, so a mismatched reader refuses it.</li>
+  <li><strong>Speed.</strong> Compression runs one record per thread and reaches 122 records per second on 16 threads. Decompression decodes many records in lock-step, with a KV cache.</li>
+  <li><strong>A model that knows HN.</strong> I trained pythia-70m for another 93 minutes on 1% of HN, on the laptop's integrated GPU. It now compresses HN text 7 to 11% better (1.33 bits per byte instead of 1.49 on comments from 2024), at the same cost per token. One surprise along the way: bf16 broke Pythia completely (loss 5.71, against 4.00 in fp32), while fp16 with loss scaling matched fp32.</li>
+</ol>
+<p>The text now takes 59 bytes per item. The same text with zstd-19 and a trained dictionary takes 137. The model itself is 72 MB and travels inside the block, the same way a compression dictionary would.</p>
+
+<h2>Small indexes, with the text as a second index</h2>
+<p>Decoding the first tokens of a record takes milliseconds. That changes the usual trade of a search engine, which keeps rich indexes so it never has to touch the documents. Here the indexes can be small, and the search pays a little at query time instead:</p>
+<ul>
+  <li>The <strong>semantic index</strong> keeps 256 bits per item. Every item was embedded with EmbeddingGemma 2 on the integrated GPU (about 200 documents per second) and reduced to a binary code. 256 bits on their own lose quality, so they are only used to find candidates.</li>
+  <li>The <strong>word index</strong> only covers rare terms, the ones in at most 0.02% of the documents: names, identifiers, products, error messages. In my tests it was 73% smaller than a full index, with the same hybrid quality. Frequent words get scored later, on the decoded text.</li>
+  <li>For each query, the 80 best vector candidates and the 20 best keyword candidates get their <strong>first 128 tokens decoded</strong> by a language model service shared by all running queries. Every word of the query is scored with BM25 over that prefix, and the best 50 candidates are embedded again on the CPU and reordered.</li>
+</ul>
+<figure><img src="https://davidmonterocrespo24.github.io/HNTurboVec/img/diagram-query.png" alt="How a query runs."><figcaption>How a query runs.</figcaption></figure>
+<p>On a three-month sample, this reranking raised P@10 from 0.211 to 0.238, and with it 384 bits did as well as 768 bits without it. Results are also deterministic: each prompt is embedded alone, at a fixed shape, so the answer does not depend on timing or on how many queries run at once.</p>
+
+<h2>Inside the block</h2>
+<figure><img src="https://davidmonterocrespo24.github.io/HNTurboVec/img/diagram-block.png" alt="Inside the 5.34 GB block (area is bytes)."><figcaption>Inside the 5.34 GB block (area is bytes).</figcaption></figure>
+<p>The block is one read-only file, <code>hn.hnzb</code>, next to the two files of the query embedder.</p>
+<ul>
+  <li>Items are stored in order of time and id, so a date filter is a contiguous range, found exactly from the metadata index. About 310,000 HN ids (0.63%) have a timestamp later than a higher id, and those are listed separately.</li>
+  <li>Metadata lives in delta-coded columns, about 6 bytes per item for the time, author, score, parent and children. Deleted items stay as metadata, so threads never break.</li>
+  <li>Every part has a hash (XXH3-128), and a few known records are decoded when the block opens. The deepest check, <code>verify-block --level deep</code>, compares every record with its Parquet source. On the final block it found 0 differences in 49.3 million items, after 9.7 hours.</li>
+</ul>
+
+<h2>Memory</h2>
+<p><code>hnz.open(path, ram="2GB")</code> decides what to keep in memory (the models, the most used parts of the indexes, caches) and reads the rest from disk, with the same results either way. The working memory of each query is charged to the same budget, so when it runs out, new queries wait or get a <code>BusyError</code> instead of pushing the process over the limit. With <code>ram="2GB"</code> the process used about 1.45 GB.</p>
+
+<h2>Building it</h2>
+<figure><img src="https://davidmonterocrespo24.github.io/HNTurboVec/img/diagram-build.png" alt="How the block is built."><figcaption>How the block is built.</figcaption></figure>
+<p>Two workers ran side by side for about a week. One compressed the text with the language model on the CPU (about 7 days), the other computed the embeddings on the integrated GPU (about 4.5 days). Both could resume after a reboot, which turned out to matter. Packing the final block took about an hour.</p>
+<p>Windows gave me most of the trouble:</p>
+<ul>
+  <li>Its power throttling treats a process without a window as background work and moves it to the efficient cores. Compression dropped from 129 to 79 records per second. Opting out with <code>SetProcessInformation(ProcessPowerThrottling)</code> brought it back to 119.</li>
+  <li>At below-normal priority, the process feeding the GPU starved: 12 documents per second instead of about 200. It needs little CPU, but it needs it promptly, so it now runs above normal.</li>
+  <li>Once, right after I unplugged and plugged back the charger, the GPU run hung for 3 hours. A watchdog now kills and retries any month that takes three times longer than usual.</li>
+  <li>On battery with the lid closed, the laptop goes into Modern Standby and everything freezes. One packing run paused for 3.9 hours and continued on its own when the laptop woke up.</li>
+</ul>
+
+<h2>Results</h2>
+<figure><img src="https://davidmonterocrespo24.github.io/HNTurboVec/img/quality.png" alt="Search quality on the full block (P@10, each query within its month)."><figcaption>Search quality on the full block (P@10, each query within its month).</figcaption></figure>
+<p>To measure quality I used 300 queries per month for three months, in a test set and a dev set. Each query is a story's title, and the relevant results are the comments in that story's own thread. Searching within the query's month, among all 49.3 million items, the default hybrid search puts on average 3.2 relevant comments in the top 10. Keyword search alone puts 2.6.</p>
+<p>Without the month filter the score drops to about 0.05, and that number needs some context. This eval only counts the query's own thread as relevant, so similar threads from other years count as misses even when they answer the question. The same queries on a three-month block scored 0.24, so the search itself did not get worse with 16 times more data. A better eval for the whole archive is on my list.</p>
+<figure><img src="https://davidmonterocrespo24.github.io/HNTurboVec/img/latency.png" alt="Latency on the full block, on a 16-thread laptop CPU."><figcaption>Latency on the full block, on a 16-thread laptop CPU.</figcaption></figure>
+<p>A cold reranked search takes about 2.3 seconds, and most of that is decoding the candidates' prefixes. A keyword search takes about 0.2 seconds, and fetching an item about 80 ms. That is well inside the 10 seconds I was ready to accept.</p>
+<figure><img src="https://davidmonterocrespo24.github.io/HNTurboVec/img/web-burnout.png" alt="The hnz web page showing four comments about burnout from 2015 to 2018" width="1100" height="910"><figcaption>The search page served by <code>hnz serve</code>, with a hybrid search limited to comments from 2015 to 2018.</figcaption></figure>
+
+<h2>Ideas I tried and dropped</h2>
+<ul><li><strong>A cross-encoder reranker</strong>: +6 to 10% P@10. Dropped because it needs the full text of every candidate: 5 to 7 times slower.</li><li><strong>A bigger LM (pythia-160m)</strong>: 8.8% less text. Dropped because decompression 2.3 times slower.</li><li><strong>TurboQuant-style vectors</strong>: within the noise at the same size. Dropped because needs training, no clear gain.</li><li><strong>Stronger general compressors</strong>: 106 to 114 bytes per item. Dropped because far from what the LM reaches.</li></ul>
+
+<h2>Testing</h2>
+<figure><img src="https://davidmonterocrespo24.github.io/HNTurboVec/img/term-accept.png" alt="24 acceptance checks, all passed"><figcaption>24 acceptance checks of the installed package on the full block.</figcaption></figure>
+<p>The Python suite has 73 tests. They check that every item comes back byte for byte against the Parquet files, that results are the same from disk and from RAM, concurrency, that a changed byte anywhere in the block is detected without crashing, the memory limits and the HTTP server. The Rust core has 35 more, including bit-exact kernels and a corruption matrix. A separate script runs 24 checks of the installed package against the full block in about 30 seconds.</p>
+
+<h2>Trying it</h2>
+<ol>
+  <li>Build the block with the steps in the <a href="https://github.com/davidmonterocrespo24/HNTurboVec#build-the-block-yourself">repository's README</a> (about a week), or copy one you already have.</li>
+  <li>Install the package: <code>pip install hnz-0.1.0-cp310-abi3-win_amd64.whl</code>.</li>
+  <li>Search from Python:
+<pre class="code"><code>import hnz
+
+with hnz.open(r"D:\hn\hn-2026-08.hnz", ram="2GB") as hn:
+    for h in hn.search("how do I deal with burnout as a software engineer", k=5,
+                       since="2015", until="2018", types="comment"):
+        print(h.date, h.by, h.text[:120])</code></pre></li>
+  <li>Or start the web page with <code>hnz serve --root D:\hn\hn-2026-08.hnz --ram 2GB</code> and open <code>http://127.0.0.1:8088/?q=sqlite+in+production</code>.</li>
+</ol>
+<p>The code, the design notes and the full experiment log, including the experiments that failed, are in the repository: <a href="https://github.com/davidmonterocrespo24/HNTurboVec">github.com/davidmonterocrespo24/HNTurboVec</a> (MIT license).</p>
+
+<footer>Code: <a href="https://github.com/davidmonterocrespo24/HNTurboVec">github.com/davidmonterocrespo24/HNTurboVec</a>. Data: open-index/hacker-news on Hugging Face. Models: EmbeddingGemma 2 (Google) and pythia-70m (EleutherAI). Measured on an Intel Core Ultra 7 265H laptop, October 2026.</footer>
+</article></body></html>
