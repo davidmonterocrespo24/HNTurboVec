@@ -1,40 +1,40 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="860" height="376" viewBox="0 0 860 376" role="img" aria-label="All of Hacker News on disk">
 <title>All of Hacker News on disk</title>
-<rect x="0.5" y="0.5" width="859" height="375" rx="10" fill="#1a1a19" stroke="rgba(255,255,255,0.10)"/>
-<text x="24.0" y="34.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="17" font-weight="600" text-anchor="start">All of Hacker News on disk</text>
-<text x="24.0" y="56.0" fill="#c3c2b7" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" text-anchor="start">49.3 M items, 2006-10 to 2026-08 · GB (10⁹ bytes)</text>
-<line x1="300.0" y1="78" x2="300.0" y2="314" stroke="#2c2c2a" stroke-width="1"/>
-<text x="300.0" y="332.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">0</text>
-<line x1="390.4" y1="78" x2="390.4" y2="314" stroke="#2c2c2a" stroke-width="1"/>
-<text x="390.4" y="332.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">5</text>
-<line x1="480.8" y1="78" x2="480.8" y2="314" stroke="#2c2c2a" stroke-width="1"/>
-<text x="480.8" y="332.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">10</text>
-<line x1="571.2" y1="78" x2="571.2" y2="314" stroke="#2c2c2a" stroke-width="1"/>
-<text x="571.2" y="332.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">15</text>
-<line x1="661.5" y1="78" x2="661.5" y2="314" stroke="#2c2c2a" stroke-width="1"/>
-<text x="661.5" y="332.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">20</text>
-<line x1="751.9" y1="78" x2="751.9" y2="314" stroke="#2c2c2a" stroke-width="1"/>
-<text x="751.9" y="332.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">25</text>
-<line x1="300" y1="78" x2="300" y2="314" stroke="#383835" stroke-width="1"/>
-<text x="286.0" y="99.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="end">Raw JSON (HN API)</text>
-<text x="286.0" y="116.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">text and metadata, no search</text>
-<path d="M300.0,88.0 H729.8 Q733.8,88.0 733.8,92.0 V106.0 Q733.8,110.0 729.8,110.0 H300.0 Z" fill="#5a5955"/>
-<text x="741.8" y="104.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="start">24.0 GB</text>
-<text x="286.0" y="145.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="end">Parquet dump</text>
-<text x="286.0" y="162.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">open-index/hacker-news, no search</text>
-<path d="M300.0,134.0 H520.5 Q524.5,134.0 524.5,138.0 V152.0 Q524.5,156.0 520.5,156.0 H300.0 Z" fill="#5a5955"/>
-<text x="532.5" y="150.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="start">12.4 GB</text>
-<text x="286.0" y="191.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="end">zstd-19 + dictionary, per item</text>
-<text x="286.0" y="208.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">random access, no search</text>
-<path d="M300.0,180.0 H460.5 Q464.5,180.0 464.5,184.0 V198.0 Q464.5,202.0 460.5,202.0 H300.0 Z" fill="#5a5955"/>
-<text x="472.5" y="196.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="start">9.1 GB</text>
-<text x="286.0" y="237.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="end">hnz v1 segments</text>
-<text x="286.0" y="254.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">zstd + LM tiers, hybrid search</text>
-<path d="M300.0,226.0 H484.0 Q488.0,226.0 488.0,230.0 V244.0 Q488.0,248.0 484.0,248.0 H300.0 Z" fill="#5a5955"/>
-<text x="496.0" y="242.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="start">10.4 GB</text>
-<text x="286.0" y="283.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" text-anchor="end">hnz block</text>
-<text x="286.0" y="300.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">LM-compressed, hybrid search, lossless</text>
-<path d="M300.0,272.0 H392.5 Q396.5,272.0 396.5,276.0 V290.0 Q396.5,294.0 392.5,294.0 H300.0 Z" fill="#3987e5"/>
-<text x="404.5" y="288.0" fill="#f0efec" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" text-anchor="start">5.34 GB</text>
-<text x="24.0" y="360.0" fill="#898781" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="start">The hnz block also holds the semantic index, the word index, the LM and the query embedder.</text>
+<rect x="0.5" y="0.5" width="859" height="375" rx="10" fill="#1c1c1a" stroke="rgba(246,246,239,0.10)"/>
+<text x="24.0" y="34.0" fill="#f6f6ef" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="17" font-weight="600" text-anchor="start">All of Hacker News on disk</text>
+<text x="24.0" y="56.0" fill="#c9c7bc" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" text-anchor="start">49.3 M items, 2006-10 to 2026-08 · GB (10⁹ bytes)</text>
+<line x1="300.0" y1="78" x2="300.0" y2="314" stroke="#2e2e2b" stroke-width="1"/>
+<text x="300.0" y="332.0" fill="#a8a69c" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">0</text>
+<line x1="390.4" y1="78" x2="390.4" y2="314" stroke="#2e2e2b" stroke-width="1"/>
+<text x="390.4" y="332.0" fill="#a8a69c" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">5</text>
+<line x1="480.8" y1="78" x2="480.8" y2="314" stroke="#2e2e2b" stroke-width="1"/>
+<text x="480.8" y="332.0" fill="#a8a69c" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">10</text>
+<line x1="571.2" y1="78" x2="571.2" y2="314" stroke="#2e2e2b" stroke-width="1"/>
+<text x="571.2" y="332.0" fill="#a8a69c" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">15</text>
+<line x1="661.5" y1="78" x2="661.5" y2="314" stroke="#2e2e2b" stroke-width="1"/>
+<text x="661.5" y="332.0" fill="#a8a69c" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">20</text>
+<line x1="751.9" y1="78" x2="751.9" y2="314" stroke="#2e2e2b" stroke-width="1"/>
+<text x="751.9" y="332.0" fill="#a8a69c" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">25</text>
+<line x1="300" y1="78" x2="300" y2="314" stroke="#45443f" stroke-width="1"/>
+<text x="286.0" y="99.0" fill="#f6f6ef" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="end">Raw JSON (HN API)</text>
+<text x="286.0" y="116.0" fill="#a8a69c" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">text and metadata, no search</text>
+<path d="M300.0,88.0 H729.8 Q733.8,88.0 733.8,92.0 V106.0 Q733.8,110.0 729.8,110.0 H300.0 Z" fill="#4a4943"/>
+<text x="741.8" y="104.0" fill="#f6f6ef" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="start">24.0 GB</text>
+<text x="286.0" y="145.0" fill="#f6f6ef" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="end">Parquet dump</text>
+<text x="286.0" y="162.0" fill="#a8a69c" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">open-index/hacker-news, no search</text>
+<path d="M300.0,134.0 H520.5 Q524.5,134.0 524.5,138.0 V152.0 Q524.5,156.0 520.5,156.0 H300.0 Z" fill="#4a4943"/>
+<text x="532.5" y="150.0" fill="#f6f6ef" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="start">12.4 GB</text>
+<text x="286.0" y="191.0" fill="#f6f6ef" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="end">zstd-19 + dictionary, per item</text>
+<text x="286.0" y="208.0" fill="#a8a69c" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">random access, no search</text>
+<path d="M300.0,180.0 H460.5 Q464.5,180.0 464.5,184.0 V198.0 Q464.5,202.0 460.5,202.0 H300.0 Z" fill="#4a4943"/>
+<text x="472.5" y="196.0" fill="#f6f6ef" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="start">9.1 GB</text>
+<text x="286.0" y="237.0" fill="#f6f6ef" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="end">hnz v1 segments</text>
+<text x="286.0" y="254.0" fill="#a8a69c" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">zstd + LM tiers, hybrid search</text>
+<path d="M300.0,226.0 H484.0 Q488.0,226.0 488.0,230.0 V244.0 Q488.0,248.0 484.0,248.0 H300.0 Z" fill="#4a4943"/>
+<text x="496.0" y="242.0" fill="#f6f6ef" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="start">10.4 GB</text>
+<text x="286.0" y="283.0" fill="#f6f6ef" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" text-anchor="end">hnz block</text>
+<text x="286.0" y="300.0" fill="#a8a69c" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">LM-compressed, hybrid search, lossless</text>
+<path d="M300.0,272.0 H392.5 Q396.5,272.0 396.5,276.0 V290.0 Q396.5,294.0 392.5,294.0 H300.0 Z" fill="#ff6600"/>
+<text x="404.5" y="288.0" fill="#f6f6ef" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="600" text-anchor="start">5.34 GB</text>
+<text x="24.0" y="360.0" fill="#a8a69c" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="start">The hnz block also holds the semantic index, the word index, the LM and the query embedder.</text>
 </svg>

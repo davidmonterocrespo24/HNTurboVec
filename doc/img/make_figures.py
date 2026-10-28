@@ -14,13 +14,12 @@ ROOT = os.path.dirname(os.path.dirname(HERE))
 SANS = "system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
 MONO = "ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace"
 
-THEMES = {
-    'light': dict(surface='#fcfcfb', ink='#0b0b0b', ink2='#52514e', muted='#898781', grid='#e1e0d9',
-                  axis='#c3c2b7', s1='#2a78d6', s2='#eb6834', neutral='#c3c2b7', border='rgba(11,11,11,0.10)'),
-    'dark': dict(surface='#1a1a19', ink='#f0efec', ink2='#c3c2b7', muted='#898781', grid='#2c2c2a',
-                 axis='#383835', s1='#3987e5', s2='#d95926', neutral='#5a5955', border='rgba(255,255,255,0.10)'),
+THEMES = {  # Hacker News: its beige page, its orange header, its grey subtext
+    'light': dict(surface='#f6f6ef', ink='#222220', ink2='#5a5a55', muted='#6b6b66', grid='#e3e2d6',
+                  axis='#c9c7bc', s1='#ff6600', s2='#828282', neutral='#d3d1c4', border='rgba(34,34,32,0.10)'),
+    'dark': dict(surface='#1c1c1a', ink='#f6f6ef', ink2='#c9c7bc', muted='#a8a69c', grid='#2e2e2b',
+                 axis='#45443f', s1='#ff6600', s2='#8a8880', neutral='#4a4943', border='rgba(246,246,239,0.10)'),
 }
-
 
 def esc(s):
     return html.escape(str(s), quote=True)
@@ -125,7 +124,7 @@ def quality_chart(t, w=860):
     b = header(t, title, 'P@10 · 300 queries per set, each searched within its month among 49.3 M items', w)
     # legend (two series): swatch + text-token label
     lx = 24
-    for name, col in (('Hybrid, reranked (default)', t['s1']), ('Keyword only', t['s2'])):
+    for name, col in (('Hybrid search, reranked (the default)', t['s1']), ('Keyword search only', t['s2'])):
         b += f'<rect x="{lx}" y="74" width="12" height="12" rx="3" fill="{col}"/>\n' + text(lx + 18, 85, name, t['ink2'], 13)
         lx += 18 + len(name) * 7.2 + 26
     ymax, base = 0.4, top + plot_h
@@ -142,6 +141,7 @@ def quality_chart(t, w=860):
         h1, h2 = plot_h * hyb[i] / ymax, plot_h * kw[i] / ymax
         b += vbar(x1, base, bw, h1, t['s1']) + vbar(x2, base, bw, h2, t['s2'])
         b += text(x1 + bw / 2, base - h1 - 6, f'{hyb[i]:.2f}', t['ink'], 11.5, 600, 'middle')
+        b += text(x2 + bw / 2, base - h2 - 6, f'{kw[i]:.2f}', t['ink2'], 11.5, 400, 'middle')
         b += text(cx, base + 20, s, t['ink2'], 12.5, anchor='middle')
     b += text(24, h - 16, 'Relevant = the comments of the query’s own thread. Without the month filter, threads on the same subject '
               'from other years count as misses (P@10 ≈ 0.05).', t['muted'], 11.5)
@@ -163,7 +163,7 @@ def latency_chart(t):
 
 
 # --- terminal captures -------------------------------------------------------------------------------
-TERM = dict(bg='#14161a', bar='#22252b', fg='#d6d8dc', dim='#7d828c', ok='#4cc38a', prompt='#6cb6ff', warn='#f0b84d')
+TERM = dict(bg='#14161a', bar='#22252b', fg='#d6d8dc', dim='#7d828c', ok='#4cc38a', prompt='#ff6600', warn='#f0b84d')
 
 
 def terminal(title, lines, w=920):
@@ -235,7 +235,7 @@ def tests_capture():
 
 
 def main():
-    charts = {'size': size_chart, 'block': block_chart, 'quality': quality_chart, 'latency': latency_chart}
+    charts = {'size': size_chart, 'quality': quality_chart, 'latency': latency_chart}
     for name, fn in charts.items():
         for mode, t in THEMES.items():
             p = os.path.join(HERE, f'{name}{"-dark" if mode == "dark" else ""}.svg')

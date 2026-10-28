@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>How a query runs</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --color-paper: #1c1c1a; --color-ink: #f6f6ef; --color-muted: #c9c7bc; --color-accent: #ff7a1f;
+            --font-sans: 'Geist', system-ui, sans-serif; --font-serif: 'Instrument Serif', 'Noto Serif', serif; --font-mono: 'Geist Mono', ui-monospace, monospace; }
+    body { font-family: var(--font-sans); background: var(--color-paper); color: var(--color-ink); min-height: 100vh;
+           display: flex; align-items: center; justify-content: center; padding: 3rem 2rem; }
+    .frame { max-width: 1200px; width: 100%; min-width: 0; }
+    .diagram-container { width: 100%; overflow-x: auto; }
+    .eyebrow { font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500; letter-spacing: 0.18em;
+               text-transform: uppercase; color: var(--color-muted); margin-bottom: 0.5rem; }
+    h1 { font-family: var(--font-serif); font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem); font-weight: 400;
+         letter-spacing: -0.02em; line-height: 1.15; color: var(--color-ink); margin-bottom: 1.5rem; }
+    svg { width: 100%; min-width: 960px; display: block; }
+    @media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Architecture · hnz</p>
+    <h1>How a query runs</h1>
+    <div class="diagram-container">
+      <svg viewBox="0 0 960 416" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="query-dark-title query-dark-desc">
+        <title id="query-dark-title">How a query runs</title>
+        <desc id="query-dark-desc">A hybrid search embeds the query, takes 100 candidates from the 256-bit vectors and the rare-term index, decodes the first 128 tokens of each with the language model, reranks them and returns k items.</desc>
+        <defs><marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#c9c7bc"/></marker><marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#ff7a1f"/></marker><marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#739fdf"/></marker></defs>
+        <rect width="100%" height="100%" fill="#1c1c1a"/>
+        <line x1="144" y1="88" x2="176" y2="88" stroke="#c9c7bc" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="304" y1="88" x2="336" y2="88" stroke="#c9c7bc" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="464" y1="88" x2="496" y2="88" stroke="#c9c7bc" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="624" y1="88" x2="656" y2="88" stroke="#c9c7bc" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="784" y1="88" x2="816" y2="88" stroke="#c9c7bc" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="400" y1="248" x2="400" y2="136" stroke="#c9c7bc" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <rect x="408" y="186" width="80" height="12" rx="2" fill="#1c1c1a"/>
+        <text x="448.0" y="195" fill="#a8a69c" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">VECTORS, WORDS</text>
+        <line x1="560" y1="248" x2="560" y2="136" stroke="#c9c7bc" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <rect x="568" y="186" width="72" height="12" rx="2" fill="#1c1c1a"/>
+        <text x="604.0" y="195" fill="#a8a69c" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">LM-CODED TEXT</text>
+        <line x1="880" y1="248" x2="880" y2="136" stroke="#c9c7bc" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <rect x="888" y="186" width="48" height="12" rx="2" fill="#1c1c1a"/>
+        <text x="912.0" y="195" fill="#a8a69c" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">METADATA</text>
+        <rect x="16" y="40" width="128" height="96" rx="6" fill="#1c1c1a"/>
+        <rect x="16" y="40" width="128" height="96" rx="6" fill="rgba(246,246,239,0.03)" stroke="rgba(246,246,239,0.3)" stroke-width="1"/>
+        <rect x="24" y="48" width="20" height="12" rx="2" fill="none" stroke="#a8a69c" stroke-opacity="0.6" stroke-width="0.8"/>
+        <text x="34.0" y="57" fill="#a8a69c" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">IN</text>
+        <text x="80.0" y="84.0" fill="#f6f6ef" font-size="12" font-family="'Geist', system-ui, sans-serif" font-weight="600" text-anchor="middle">Query</text>
+        <text x="80.0" y="101.0" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">text and filters</text>
+        <text x="80.0" y="114.0" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">dates · type · by</text>
+        <rect x="176" y="40" width="128" height="96" rx="6" fill="#1c1c1a"/>
+        <rect x="176" y="40" width="128" height="96" rx="6" fill="#262624" stroke="#f6f6ef" stroke-width="1"/>
+        <rect x="184" y="48" width="24" height="12" rx="2" fill="none" stroke="#a8a69c" stroke-opacity="0.6" stroke-width="0.8"/>
+        <text x="196.0" y="57" fill="#a8a69c" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">CPU</text>
+        <text x="240.0" y="84.0" fill="#f6f6ef" font-size="12" font-family="'Geist', system-ui, sans-serif" font-weight="600" text-anchor="middle">Embed query</text>
+        <text x="240.0" y="101.0" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">EmbeddingGemma 2</text>
+        <text x="240.0" y="114.0" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">int8 · 768 dims</text>
+        <rect x="336" y="40" width="128" height="96" rx="6" fill="#1c1c1a"/>
+        <rect x="336" y="40" width="128" height="96" rx="6" fill="#262624" stroke="#f6f6ef" stroke-width="1"/>
+        <rect x="344" y="48" width="24" height="12" rx="2" fill="none" stroke="#a8a69c" stroke-opacity="0.6" stroke-width="0.8"/>
+        <text x="356.0" y="57" fill="#a8a69c" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">CPU</text>
+        <text x="400.0" y="84.0" fill="#f6f6ef" font-size="12" font-family="'Geist', system-ui, sans-serif" font-weight="600" text-anchor="middle">Stage 1</text>
+        <text x="400.0" y="101.0" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">top 80 by vector</text>
+        <text x="400.0" y="114.0" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">top 20 by BM25</text>
+        <rect x="496" y="40" width="128" height="96" rx="6" fill="#1c1c1a"/>
+        <rect x="496" y="40" width="128" height="96" rx="6" fill="rgba(255,102,0,0.14)" stroke="#ff7a1f" stroke-width="1.2"/>
+        <rect x="504" y="48" width="20" height="12" rx="2" fill="none" stroke="#ff7a1f" stroke-opacity="0.6" stroke-width="0.8"/>
+        <text x="514.0" y="57" fill="#ff7a1f" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">LM</text>
+        <text x="560.0" y="84.0" fill="#f6f6ef" font-size="12" font-family="'Geist', system-ui, sans-serif" font-weight="600" text-anchor="middle">Decode prefixes</text>
+        <text x="560.0" y="101.0" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">first 128 tokens</text>
+        <text x="560.0" y="114.0" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">batched, shared</text>
+        <rect x="656" y="40" width="128" height="96" rx="6" fill="#1c1c1a"/>
+        <rect x="656" y="40" width="128" height="96" rx="6" fill="#262624" stroke="#f6f6ef" stroke-width="1"/>
+        <rect x="664" y="48" width="24" height="12" rx="2" fill="none" stroke="#a8a69c" stroke-opacity="0.6" stroke-width="0.8"/>
+        <text x="676.0" y="57" fill="#a8a69c" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">CPU</text>
+        <text x="720.0" y="84.0" fill="#f6f6ef" font-size="12" font-family="'Geist', system-ui, sans-serif" font-weight="600" text-anchor="middle">Rerank</text>
+        <text x="720.0" y="101.0" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">BM25 of every word</text>
+        <text x="720.0" y="114.0" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">re-embed top 50</text>
+        <rect x="816" y="40" width="128" height="96" rx="6" fill="#1c1c1a"/>
+        <rect x="816" y="40" width="128" height="96" rx="6" fill="#262624" stroke="#f6f6ef" stroke-width="1"/>
+        <rect x="824" y="48" width="24" height="12" rx="2" fill="none" stroke="#a8a69c" stroke-opacity="0.6" stroke-width="0.8"/>
+        <text x="836.0" y="57" fill="#a8a69c" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">OUT</text>
+        <text x="880.0" y="84.0" fill="#f6f6ef" font-size="12" font-family="'Geist', system-ui, sans-serif" font-weight="600" text-anchor="middle">Results</text>
+        <text x="880.0" y="101.0" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">k items, verbatim</text>
+        <text x="880.0" y="114.0" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">~2.3 s cold</text>
+        <rect x="336" y="248" width="608" height="80" rx="6" fill="#1c1c1a"/>
+        <rect x="336" y="248" width="608" height="80" rx="6" fill="rgba(246,246,239,0.05)" stroke="#c9c7bc" stroke-width="1"/>
+        <rect x="344" y="256" width="28" height="12" rx="2" fill="none" stroke="#a8a69c" stroke-opacity="0.6" stroke-width="0.8"/>
+        <text x="358.0" y="265" fill="#a8a69c" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">FILE</text>
+        <text x="640.0" y="290.0" fill="#f6f6ef" font-size="12" font-family="'Geist', system-ui, sans-serif" font-weight="600" text-anchor="middle">The block · hn.hnzb</text>
+        <text x="640.0" y="307.0" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">5.07 GB, read-only · every part hashed (XXH3-128)</text>
+        <line x1="16" y1="364" x2="944" y2="364" stroke="rgba(246,246,239,0.1)" stroke-width="0.8"/>
+        <text x="16" y="380" fill="#c9c7bc" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.18em">LEGEND</text>
+        <rect x="16" y="390" width="14" height="10" rx="2" fill="rgba(255,102,0,0.14)" stroke="#ff7a1f" stroke-width="1"/>
+        <text x="36" y="398" fill="#c9c7bc" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Most of the time goes here</text>
+        <rect x="190" y="390" width="14" height="10" rx="2" fill="#262624" stroke="#f6f6ef" stroke-width="1"/>
+        <text x="210" y="398" fill="#c9c7bc" font-size="8.5" font-family="'Geist', system-ui, sans-serif">A step on the CPU</text>
+        <rect x="321" y="390" width="14" height="10" rx="2" fill="rgba(246,246,239,0.05)" stroke="#c9c7bc" stroke-width="1"/>
+        <text x="341" y="398" fill="#c9c7bc" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Read from the block</text>
+        <rect x="462" y="390" width="14" height="10" rx="2" fill="rgba(246,246,239,0.03)" stroke="rgba(246,246,239,0.3)" stroke-width="1"/>
+        <text x="482" y="398" fill="#c9c7bc" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Input</text>
+      </svg>
+    </div>
+  </div>
+</body>
+</html>

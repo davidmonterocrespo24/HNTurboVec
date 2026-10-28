@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Inside the 5.34 GB block</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --color-paper: #1c1c1a; --color-ink: #f6f6ef; --color-muted: #c9c7bc; --color-accent: #ff7a1f;
+            --font-sans: 'Geist', system-ui, sans-serif; --font-serif: 'Instrument Serif', 'Noto Serif', serif; --font-mono: 'Geist Mono', ui-monospace, monospace; }
+    body { font-family: var(--font-sans); background: var(--color-paper); color: var(--color-ink); min-height: 100vh;
+           display: flex; align-items: center; justify-content: center; padding: 3rem 2rem; }
+    .frame { max-width: 1200px; width: 100%; min-width: 0; }
+    .diagram-container { width: 100%; overflow-x: auto; }
+    .eyebrow { font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500; letter-spacing: 0.18em;
+               text-transform: uppercase; color: var(--color-muted); margin-bottom: 0.5rem; }
+    h1 { font-family: var(--font-serif); font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem); font-weight: 400;
+         letter-spacing: -0.02em; line-height: 1.15; color: var(--color-ink); margin-bottom: 1.5rem; }
+    svg { width: 100%; min-width: 1000px; display: block; }
+    @media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Treemap · hnz</p>
+    <h1>Inside the 5.34 GB block</h1>
+    <div class="diagram-container">
+      <svg viewBox="0 0 1000 500" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="block-dark-title block-dark-desc">
+        <title id="block-dark-title">Inside the 5.34 GB block</title>
+        <desc id="block-dark-desc">Treemap of the block by bytes: the LM-coded text is 53 percent, the semantic vectors 28 percent, the word index, the models and the metadata 5 to 7 percent each.</desc>
+        <defs><marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#c9c7bc"/></marker><marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#ff7a1f"/></marker><marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#739fdf"/></marker></defs>
+        <rect width="100%" height="100%" fill="#1c1c1a"/>
+        <rect x="40" y="40" width="476" height="380" rx="2" fill="#1c1c1a"/>
+        <rect x="40" y="40" width="476" height="380" rx="2" data-share="52.65" fill="rgba(255,102,0,0.18)" stroke="#ff7a1f" stroke-width="1.5"/>
+        <text x="56" y="68" fill="#f6f6ef" font-size="14" font-family="'Geist', system-ui, sans-serif" font-weight="600">Text</text>
+        <text x="56" y="86" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace">2.81 GB · 53%</text>
+        <text x="56" y="100" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace">coded by the LM · 59 B per item</text>
+        <rect x="520" y="40" width="436" height="224" rx="2" fill="#1c1c1a"/>
+        <rect x="520" y="40" width="436" height="224" rx="2" data-share="28.38" fill="rgba(246,246,239,0.14)" stroke="rgba(246,246,239,0.3)" stroke-width="1"/>
+        <text x="536" y="68" fill="#f6f6ef" font-size="14" font-family="'Geist', system-ui, sans-serif" font-weight="600">Semantic vectors</text>
+        <text x="536" y="86" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace">1.52 GB · 28%</text>
+        <text x="536" y="100" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace">256 bits per item</text>
+        <rect x="520" y="268" width="156" height="152" rx="2" fill="#1c1c1a"/>
+        <rect x="520" y="268" width="156" height="152" rx="2" data-share="6.83" fill="rgba(246,246,239,0.1)" stroke="rgba(246,246,239,0.3)" stroke-width="1"/>
+        <text x="536" y="296" fill="#f6f6ef" font-size="12" font-family="'Geist', system-ui, sans-serif" font-weight="600">Word index</text>
+        <text x="536" y="314" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace">0.37 GB · 7%</text>
+        <text x="536" y="328" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace">4.2 M rare terms</text>
+        <rect x="680" y="268" width="148" height="152" rx="2" fill="#1c1c1a"/>
+        <rect x="680" y="268" width="148" height="152" rx="2" data-share="6.59" fill="rgba(246,246,239,0.07)" stroke="rgba(246,246,239,0.3)" stroke-width="1"/>
+        <text x="696" y="296" fill="#f6f6ef" font-size="12" font-family="'Geist', system-ui, sans-serif" font-weight="600">Models</text>
+        <text x="696" y="314" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace">0.35 GB · 7%</text>
+        <text x="696" y="328" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace">embedder + LM</text>
+        <rect x="832" y="268" width="124" height="152" rx="2" fill="#1c1c1a"/>
+        <rect x="832" y="268" width="124" height="152" rx="2" data-share="5.55" fill="rgba(246,246,239,0.04)" stroke="rgba(246,246,239,0.3)" stroke-width="1"/>
+        <text x="848" y="296" fill="#f6f6ef" font-size="12" font-family="'Geist', system-ui, sans-serif" font-weight="600">Metadata</text>
+        <text x="848" y="314" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace">0.30 GB · 6%</text>
+        <text x="848" y="328" fill="#c9c7bc" font-size="9" font-family="'Geist Mono', ui-monospace, monospace">+ 12 MB directory</text>
+        <line x1="40" y1="462" x2="960" y2="462" stroke="rgba(246,246,239,0.1)" stroke-width="0.8"/>
+        <text x="40" y="478" fill="#c9c7bc" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.18em">LEGEND</text>
+        <text x="960" y="478" fill="#c9c7bc" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="end" letter-spacing="0.06em">AREA = BYTES · HN-2026-08.HNZ · 5,343,133,431 BYTES · OCT 2026</text>
+        <rect x="40" y="488" width="16" height="10" rx="2" fill="rgba(255,102,0,0.18)" stroke="#ff7a1f" stroke-width="1"/>
+        <text x="64" y="497" fill="#c9c7bc" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Text · the focal part, more than half the block</text>
+        <rect x="300" y="488" width="16" height="10" rx="2" fill="rgba(246,246,239,0.14)" stroke="rgba(246,246,239,0.3)" stroke-width="1"/>
+        <text x="324" y="497" fill="#c9c7bc" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Other parts · stronger contrast is larger</text>
+      </svg>
+    </div>
+  </div>
+</body>
+</html>

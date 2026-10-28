@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>How the block is built</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500;600&amp;display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root { --color-paper: #f6f6ef; --color-ink: #222220; --color-muted: #5a5a55; --color-accent: #b84a00;
+            --font-sans: 'Geist', system-ui, sans-serif; --font-serif: 'Instrument Serif', 'Noto Serif', serif; --font-mono: 'Geist Mono', ui-monospace, monospace; }
+    body { font-family: var(--font-sans); background: var(--color-paper); color: var(--color-ink); min-height: 100vh;
+           display: flex; align-items: center; justify-content: center; padding: 3rem 2rem; }
+    .frame { max-width: 1200px; width: 100%; min-width: 0; }
+    .diagram-container { width: 100%; overflow-x: auto; }
+    .eyebrow { font-family: var(--font-mono); font-size: 0.66rem; font-weight: 500; letter-spacing: 0.18em;
+               text-transform: uppercase; color: var(--color-muted); margin-bottom: 0.5rem; }
+    h1 { font-family: var(--font-serif); font-size: clamp(1.5rem, 2.4vw + 0.75rem, 2rem); font-weight: 400;
+         letter-spacing: -0.02em; line-height: 1.15; color: var(--color-ink); margin-bottom: 1.5rem; }
+    svg { width: 100%; min-width: 960px; display: block; }
+    @media print { .diagram-container { overflow-x: visible; } svg { min-width: 0; } }
+  </style>
+</head>
+<body>
+  <div class="frame">
+    <p class="eyebrow">Architecture · hnz</p>
+    <h1>How the block is built</h1>
+    <div class="diagram-container">
+      <svg viewBox="0 0 960 456" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="build-title build-desc">
+        <title id="build-title">How the block is built</title>
+        <desc id="build-desc">The monthly Parquet files are compressed by the language model, embedded on the integrated GPU and indexed in parallel, then packed month by month into one 5.07 GB block plus the query embedder.</desc>
+        <defs><marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#5a5a55"/></marker><marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#b84a00"/></marker><marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/></marker></defs>
+        <rect width="100%" height="100%" fill="#f6f6ef"/>
+        <path d="M176,198 H200 Q208,198 208,190 V116 Q208,108 216,108 H240" fill="none" stroke="#5a5a55" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="176" y1="220" x2="240" y2="220" stroke="#5a5a55" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <path d="M176,242 H200 Q208,242 208,250 V324 Q208,332 216,332 H240" fill="none" stroke="#5a5a55" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <path d="M480,108 H504 Q512,108 512,116 V190 Q512,198 520,198 H544" fill="none" stroke="#5a5a55" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="480" y1="220" x2="544" y2="220" stroke="#5a5a55" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <path d="M480,332 H504 Q512,332 512,324 V250 Q512,242 520,242 H544" fill="none" stroke="#5a5a55" stroke-width="1.2" marker-end="url(#arrow)"/>
+        <line x1="704" y1="220" x2="768" y2="220" stroke="#b84a00" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+        <rect x="16" y="176" width="160" height="88" rx="6" fill="#f6f6ef"/>
+        <rect x="16" y="176" width="160" height="88" rx="6" fill="rgba(34,34,32,0.03)" stroke="rgba(34,34,32,0.3)" stroke-width="1"/>
+        <rect x="24" y="184" width="20" height="12" rx="2" fill="none" stroke="#6b6b66" stroke-opacity="0.6" stroke-width="0.8"/>
+        <text x="34.0" y="193" fill="#6b6b66" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">IN</text>
+        <text x="96.0" y="216.0" fill="#222220" font-size="12" font-family="'Geist', system-ui, sans-serif" font-weight="600" text-anchor="middle">Parquet files</text>
+        <text x="96.0" y="233.0" fill="#5a5a55" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">239 months · 12.4 GB</text>
+        <text x="96.0" y="246.0" fill="#5a5a55" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">open-index/hacker-news</text>
+        <rect x="240" y="64" width="240" height="88" rx="6" fill="#f6f6ef"/>
+        <rect x="240" y="64" width="240" height="88" rx="6" fill="rgba(255,102,0,0.12)" stroke="#b84a00" stroke-width="1.2"/>
+        <rect x="248" y="72" width="24" height="12" rx="2" fill="none" stroke="#b84a00" stroke-opacity="0.6" stroke-width="0.8"/>
+        <text x="260.0" y="81" fill="#b84a00" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">CPU</text>
+        <text x="360.0" y="104.0" fill="#222220" font-size="12" font-family="'Geist', system-ui, sans-serif" font-weight="600" text-anchor="middle">LM compression</text>
+        <text x="360.0" y="121.0" fill="#5a5a55" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">pythia-70m trained on HN</text>
+        <text x="360.0" y="134.0" fill="#5a5a55" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">arithmetic coding · ~7 days</text>
+        <rect x="240" y="176" width="240" height="88" rx="6" fill="#f6f6ef"/>
+        <rect x="240" y="176" width="240" height="88" rx="6" fill="#ffffff" stroke="#222220" stroke-width="1"/>
+        <rect x="248" y="184" width="28" height="12" rx="2" fill="none" stroke="#6b6b66" stroke-opacity="0.6" stroke-width="0.8"/>
+        <text x="262.0" y="193" fill="#6b6b66" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">iGPU</text>
+        <text x="360.0" y="216.0" fill="#222220" font-size="12" font-family="'Geist', system-ui, sans-serif" font-weight="600" text-anchor="middle">Document vectors</text>
+        <text x="360.0" y="233.0" fill="#5a5a55" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">EmbeddingGemma 2 → 256 bits</text>
+        <text x="360.0" y="246.0" fill="#5a5a55" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">~4.5 days, alongside</text>
+        <rect x="240" y="288" width="240" height="88" rx="6" fill="#f6f6ef"/>
+        <rect x="240" y="288" width="240" height="88" rx="6" fill="#ffffff" stroke="#222220" stroke-width="1"/>
+        <rect x="248" y="296" width="24" height="12" rx="2" fill="none" stroke="#6b6b66" stroke-opacity="0.6" stroke-width="0.8"/>
+        <text x="260.0" y="305" fill="#6b6b66" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">CPU</text>
+        <text x="360.0" y="328.0" fill="#222220" font-size="12" font-family="'Geist', system-ui, sans-serif" font-weight="600" text-anchor="middle">Word index and metadata</text>
+        <text x="360.0" y="345.0" fill="#5a5a55" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">BM25 of rare terms</text>
+        <text x="360.0" y="358.0" fill="#5a5a55" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">time-ordered columns</text>
+        <rect x="544" y="176" width="160" height="88" rx="6" fill="#f6f6ef"/>
+        <rect x="544" y="176" width="160" height="88" rx="6" fill="#ffffff" stroke="#222220" stroke-width="1"/>
+        <rect x="552" y="184" width="24" height="12" rx="2" fill="none" stroke="#6b6b66" stroke-opacity="0.6" stroke-width="0.8"/>
+        <text x="564.0" y="193" fill="#6b6b66" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">CPU</text>
+        <text x="624.0" y="216.0" fill="#222220" font-size="12" font-family="'Geist', system-ui, sans-serif" font-weight="600" text-anchor="middle">hnz pack</text>
+        <text x="624.0" y="233.0" fill="#5a5a55" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">month by month</text>
+        <text x="624.0" y="246.0" fill="#5a5a55" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">~1 h · 3.2 GB RAM</text>
+        <rect x="768" y="176" width="176" height="88" rx="6" fill="#f6f6ef"/>
+        <rect x="768" y="176" width="176" height="88" rx="6" fill="rgba(34,34,32,0.05)" stroke="#5a5a55" stroke-width="1"/>
+        <rect x="776" y="184" width="28" height="12" rx="2" fill="none" stroke="#6b6b66" stroke-opacity="0.6" stroke-width="0.8"/>
+        <text x="790.0" y="193" fill="#6b6b66" font-size="7" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle" letter-spacing="0.08em">FILE</text>
+        <text x="856.0" y="216.0" fill="#222220" font-size="12" font-family="'Geist', system-ui, sans-serif" font-weight="600" text-anchor="middle">The block</text>
+        <text x="856.0" y="233.0" fill="#5a5a55" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">hn.hnzb 5.07 GB</text>
+        <text x="856.0" y="246.0" fill="#5a5a55" font-size="9" font-family="'Geist Mono', ui-monospace, monospace" text-anchor="middle">+ embedder 0.28 GB</text>
+        <line x1="16" y1="404" x2="944" y2="404" stroke="rgba(34,34,32,0.1)" stroke-width="0.8"/>
+        <text x="16" y="420" fill="#5a5a55" font-size="8" font-family="'Geist Mono', ui-monospace, monospace" letter-spacing="0.18em">LEGEND</text>
+        <rect x="16" y="430" width="14" height="10" rx="2" fill="rgba(255,102,0,0.12)" stroke="#b84a00" stroke-width="1"/>
+        <text x="36" y="438" fill="#5a5a55" font-size="8.5" font-family="'Geist', system-ui, sans-serif">The slow part: ~7 days of CPU</text>
+        <rect x="204" y="430" width="14" height="10" rx="2" fill="#ffffff" stroke="#222220" stroke-width="1"/>
+        <text x="224" y="438" fill="#5a5a55" font-size="8.5" font-family="'Geist', system-ui, sans-serif">A build step</text>
+        <rect x="312" y="430" width="14" height="10" rx="2" fill="rgba(34,34,32,0.05)" stroke="#5a5a55" stroke-width="1"/>
+        <text x="332" y="438" fill="#5a5a55" font-size="8.5" font-family="'Geist', system-ui, sans-serif">The result</text>
+        <rect x="411" y="430" width="14" height="10" rx="2" fill="rgba(34,34,32,0.03)" stroke="rgba(34,34,32,0.3)" stroke-width="1"/>
+        <text x="431" y="438" fill="#5a5a55" font-size="8.5" font-family="'Geist', system-ui, sans-serif">Input</text>
+      </svg>
+    </div>
+  </div>
+</body>
+</html>

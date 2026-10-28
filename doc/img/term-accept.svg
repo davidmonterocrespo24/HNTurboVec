@@ -6,7 +6,7 @@
 <circle cx="36" cy="15" r="5.5" fill="#febc2e"/>
 <circle cx="54" cy="15" r="5.5" fill="#28c840"/>
 <text x="505.0" y="20.0" fill="#7d828c" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="middle">acceptance on the block of all of HN (the installed wheel, public API only)</text>
-<text x="18" y="52" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve"><tspan fill="#6cb6ff">$ </tspan><tspan fill="#d6d8dc">python scripts/accept_full.py --root work/p6/hn-2026-08.hnz --ram 2GB</tspan></text>
+<text x="18" y="52" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve"><tspan fill="#ff6600">$ </tspan><tspan fill="#d6d8dc">python scripts/accept_full.py --root work/p6/hn-2026-08.hnz --ram 2GB</tspan></text>
 <text x="18" y="71" fill="#7d828c" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve">hnz 0.1.0 from site-packages</text>
 <text x="18" y="90" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve"><tspan fill="#4cc38a">PASS</tspan><tspan fill="#d6d8dc">  verify_block(&#x27;quick&#x27;)</tspan><tspan fill="#7d828c">  (401 ms)</tspan></text>
 <text x="18" y="109" font-family="ui-monospace, SFMono-Regular, 'Cascadia Mono', Consolas, Menlo, monospace" font-size="13" xml:space="preserve"><tspan fill="#4cc38a">PASS</tspan><tspan fill="#d6d8dc">  open with the embedder loaded</tspan><tspan fill="#7d828c">  (49,324,111 docs, 3.8 s)</tspan></text>

@@ -1,200 +1,219 @@
 # All of Hacker News in 5.3 GB, searchable on a laptop
 
-*Every story, comment, job and poll ever posted to Hacker News — 49.3 million items, October 2006
-to August 2026 — losslessly compressed into one 5.34 GB read-only block, with hybrid semantic +
-keyword search, filters by date, type and author, and byte-exact retrieval. It runs on a laptop
-CPU within a RAM budget you choose (2 GB is plenty), from Python, over HTTP or from the command
-line.*
+*This article describes hnz, a Rust library with a Python API that stores every Hacker News item
+(49.3 million of them, from October 2006 to August 2026) in a single 5.34 GB file and searches it
+with hybrid semantic and keyword search on a laptop CPU. It explains how a small language model
+compresses the text, why the search indexes can stay small, and what the results look like.*
+
+## Why I built it
+
+I wanted all of Hacker News on my laptop, searchable the way a search engine is: a question in
+plain words, a few keywords, a date range, the top results with their full text. No server, no
+GPU card. The public Parquet dump of HN is 12.4 GB and has no search at all, so I set myself a
+target of 4 to 5 GB for everything. In exchange I was willing to wait up to 10 seconds for an
+answer, and to let the archive take days to build.
+
+The machine is a laptop with an Intel Core Ultra 7 265H, 31 GB of RAM and an integrated GPU.
+Everything in this article was built and measured on it, in October 2026.
+
+Before going further, what you need to use it today: hnz runs on Windows on x86-64 with AVX2, and
+the archive (I call it the block) is not published for download yet. You rebuild it from the
+public dataset with the scripts in the repository, which takes about a week on a laptop like mine.
+
+## Where the numbers start
 
 ![All of HN on disk](img/size.svg)
 
-## The goal
+| Format | Size | Search |
+|---|---|---|
+| Raw JSON from the HN API | ~24 GB | none |
+| Parquet dump ([open-index/hacker-news](https://huggingface.co/datasets/open-index/hacker-news)) | 12.4 GB | none |
+| zstd-19 with a trained dictionary, item by item | 9.1 GB | none |
+| hnz block | 5.34 GB | hybrid, with filters |
 
-The constraints were simple to state:
+The 5.34 GB include the text, the metadata, a semantic index, a word index and the two models
+that hnz needs to read them.
 
-- **All of HN**, not a sample: ~49.3 M items.
-- **The smallest disk footprint possible.** Building can take days; daily use has to be fast.
-- **Search like a search engine:** a free-form question, keywords, *k* results, date ranges.
-- **Lossless:** every result's original HTML, byte for byte.
-- **One ordinary laptop** (Intel Core Ultra 7 265H, 31 GB RAM, an integrated GPU, no NVIDIA).
+## Compressing the text with a language model
 
-The starting points: the raw JSON from HN's API is ~24 GB; the
-[open-index/hacker-news](https://huggingface.co/datasets/open-index/hacker-news) Parquet dump is
-12.4 GB; the best general-purpose baseline with random access, zstd-19 with a trained dictionary
-per item, is 9.1 GB — for the text and metadata alone, with no search at all.
+My first experiments used ordinary compressors. Grouping items into small blocks before zstd took
+text and metadata from 181 to 124 bytes per item. After that, stronger compressors stopped
+helping. zstd at level 22, brotli and xz all landed between 106 and 114 bytes, and even xz over a
+whole month in one stream, with no random access at all, only reached 91.
 
-The result is 5.34 GB *including* a semantic index, a word index and both models. Here is how,
-with the numbers from the [experiment log](BITACORA.md) (36 entries; every claim below has one).
+The paper [Language Modeling Is Compression](https://arxiv.org/abs/2309.10668) (DeepMind, 2023)
+shows that a model that predicts the next token well, driving an arithmetic coder, is a very good
+compressor. A quick test with SmolLM2-135M suggested about 50 bytes per record, so I tried it for
+real. Three problems came up.
 
-## 1. Records → blocks: the cheap 30 %
+1. **The decoder has to compute exactly the same probabilities as the encoder.** One different
+   bit and the rest of the record decodes as garbage. Floating-point inference libraries do not
+   promise this across machines or batch sizes, so I wrote a small inference engine in Rust for
+   Pythia models: int8 weights and activations, exact integer matrix products, and LayerNorm,
+   softmax and GELU with my own exp and erf, summed in a fixed order. The AVX-VNNI kernels produce
+   the same bytes as the plain scalar code, and the block records which version of the arithmetic
+   it was made with, so a mismatched reader refuses it.
+2. **Speed.** Compression runs one record per thread and reaches 122 records per second on 16
+   threads. Decompression decodes many records in lock-step, with a KV cache.
+3. **A model that knows HN.** I trained pythia-70m for another 93 minutes on 1% of HN, on the
+   laptop's integrated GPU. It now compresses HN text 7 to 11% better (1.33 bits per byte instead
+   of 1.49 on comments from 2024), at the same cost per token. One surprise along the way: bf16
+   broke Pythia completely (loss 5.71, against 4.00 in fp32), while fp16 with loss scaling matched
+   fp32.
 
-Compressing each item on its own wastes the redundancy between neighbours. Grouping items into
-small blocks before zstd took the text + metadata from **181 to 124 bytes per item**. Stronger
-compressors barely moved it: zstd-22, brotli-11 and xz-9e on blocks all land at 106-114 B, and
-even xz over *the whole month in one stream* (no random access at all) only reaches 91 B.
+The text now takes 59 bytes per item. The same text with zstd-19 and a trained dictionary takes
+137. The model itself is 72 MB and travels inside the block, the same way a compression
+dictionary would.
 
-That floor said general-purpose compressors were done. What they do not know is English, HTML and
-the way HN people write.
+## Small indexes, with the text as a second index
 
-## 2. A language model as the compressor
+Decoding the first tokens of a record takes milliseconds. That changes the usual trade of a search
+engine, which keeps rich indexes so it never has to touch the documents. Here the indexes can be
+small, and the search pays a little at query time instead:
 
-[Language Modeling Is Compression](https://arxiv.org/abs/2309.10668) (DeepMind, 2023) makes the
-point formally: an LM that predicts the next token well, driving an arithmetic coder, is a very
-good compressor. A first estimate with SmolLM2-135M gave ~50 B per record. Getting from an
-estimate to a compressor took three things.
+- The **semantic index** keeps 256 bits per item. Every item was embedded with EmbeddingGemma 2 on
+  the integrated GPU (about 200 documents per second) and reduced to a binary code. 256 bits on
+  their own lose quality, so they are only used to find candidates.
+- The **word index** only covers rare terms, the ones in at most 0.02% of the documents: names,
+  identifiers, products, error messages. In my tests it was 73% smaller than a full index, with the
+  same hybrid quality. Frequent words get scored later, on the decoded text.
+- For each query, the 80 best vector candidates and the 20 best keyword candidates get their
+  **first 128 tokens decoded** by a language model service shared by all running queries. Every
+  word of the query is scored with BM25 over that prefix, and the best 50 candidates are embedded
+  again on the CPU and reordered.
 
-**A bit-exact engine.** Arithmetic decoding only works if the decoder computes *exactly* the same
-probabilities as the encoder, on any machine, at any batch size. Floating-point libraries do not
-promise that. So hnz has its own Rust inference engine for GPT-NeoX / Pythia models: int8 weights
-and activations with exact integer matmuls, LayerNorm / softmax / GELU with hand-written exp and
-erf and sums in a fixed order, and a binary arithmetic coder with 16-bit probabilities. The
-AVX-VNNI kernels produce the same bytes as the scalar reference, and the numerical definition is
-versioned (`MATH_VERSION`): a block made with another version is refused instead of decoded wrong.
+![How a query runs](img/diagram-query.svg)
 
-**Speed.** Compression runs one record per thread (122 records/s on 16 threads, after moving
-attention to transposed keys: +42 %); decompression decodes many records in lock-step with a KV
-cache.
+On a three-month sample, this reranking raised P@10 from 0.211 to 0.238, and with it 384 bits
+did as well as 768 bits without it. Results are also deterministic: each prompt is embedded alone,
+at a fixed shape, so the answer does not depend on timing or on how many queries run at once.
 
-**An LM that knows HN.** pythia-70m, further trained for **93 minutes** on 1 % of HN on the
-laptop's integrated GPU, compresses **7-11 % better** than the original (1.33 vs 1.49 bits per
-byte on 2024 comments) at the same cost per token. One surprise on the way: **bf16 breaks Pythia**
-(loss 5.71 vs 4.00 in fp32); fp16 with loss scaling matches fp32.
+## Inside the block
 
-Result: **59 bytes of text per item**, against 137 for the same text with zstd-19 and a trained
-dictionary. The 71.7 MB model ships inside the block — without it the text cannot be read, like a
-dictionary.
+![Inside the 5.34 GB block](img/diagram-block.svg)
 
-## 3. Spend time on reading, not on storing
+The block is one read-only file, `hn.hnzb`, next to the two files of the query embedder.
 
-A search engine normally keeps rich indexes so it never has to touch the documents. Here the
-documents *are* compressed with a model that can decode a prefix in milliseconds. That suggests
-the opposite trade: keep the indexes tiny and pay at query time.
+- Items are stored in order of time and id, so a date filter is a contiguous range, found
+  exactly from the metadata index. About 310,000 HN ids (0.63%) have a timestamp later than a
+  higher id, and those are listed separately.
+- Metadata lives in delta-coded columns, about 6 bytes per item for the time, author, score,
+  parent and children. Deleted items stay as metadata, so threads never break.
+- Every part has a hash (XXH3-128), and a few known records are decoded when the block opens. The
+  deepest check, `verify-block --level deep`, compares every record with its Parquet source. On the
+  final block it found 0 differences in 49.3 million items, after 9.7 hours.
 
-- **Semantic index: 256 bits per item** (32 B). Each item is embedded with EmbeddingGemma 2
-  (on the integrated GPU, ~200 docs/s, ~3 days for all of HN) and reduced to a binary code, scored
-  asymmetrically against the full query vector. At 256 bits alone it loses quality, so it only
-  has to *find candidates*.
-- **Word index: rare terms only.** BM25 postings for terms in ≤ 0.02 % of documents — names,
-  identifiers, products, error messages. That is **−73 % in size at the same hybrid quality**:
-  in hybrid search, the rare terms are what the word index contributes. 4.2 M terms, 7.4 B per item.
-- **Rerank by decoding.** For each query, the 80 best vector candidates (plus 20 from BM25) have
-  their **first 128 tokens decoded** by a shared LM service that batches the work of concurrent
-  queries; every query word — frequent ones included — is scored with BM25 over that prefix; the
-  50 best are **re-embedded on the CPU** and reordered by cosine + BM25.
+## Memory
 
-The stored text becomes a free second index: on the 3-month sample, reranking lifted the 256-bit
-block from 0.211 to 0.238 P@10, and with reranking 384 bits already matched 768 bits without it. Everything is deterministic: each prompt is embedded alone at a canonical
-shape, so results never depend on timing or on how many queries run at once.
+`hnz.open(path, ram="2GB")` decides what to keep in memory (the models, the most used parts of
+the indexes, caches) and reads the rest from disk, with the same results either way. The working
+memory of each query is charged to the same budget, so when it runs out, new queries wait or get a
+`BusyError` instead of pushing the process over the limit. With `ram="2GB"` the process used about
+1.45 GB.
 
-![What is inside the block](img/block.svg)
+## Building it
 
-## 4. One file, time-ordered, paranoid
+![How the block is built](img/diagram-build.svg)
 
-The block is one read-only container, `hn.hnzb`, plus the query embedder's two files:
+Two workers ran side by side for about a week. One compressed the text with the language model on
+the CPU (about 7 days), the other computed the embeddings on the integrated GPU (about 4.5 days).
+Both could resume after a reboot, which turned out to matter. Packing the final block took about
+an hour.
 
-- Documents in **(time, id) order**, so a date filter is a contiguous range found exactly from
-  the metadata index (309,761 HN ids — 0.63 % — have a time later than a higher id; they are
-  listed apart).
-- Metadata in delta-coded columns: ~6 bytes per item for time, author, score, parent and kids.
-  Deleted items are kept as metadata so no thread breaks.
-- Every part hashed (XXH3-128), canary records decoded at open, and four verification levels up
-  to `--level deep`, which compares every record with its Parquet source. On the final block:
-  **0 differences** in 49.3 M items (9.7 hours).
+Windows gave me most of the trouble:
 
-## 5. A RAM budget instead of a RAM requirement
-
-`hnz.open(path, ram="2GB")` plans what lives in memory — the models, the hottest parts of the
-indexes, caches — and reads the rest from disk with **identical results**. Every query's working
-memory is admitted against the same ledger, so concurrent queries wait (or get a `BusyError`)
-instead of pushing the process over. With 2 GB the process uses ~1.45 GB.
-
-## 6. Building it: a week on one laptop
-
-Two resumable workers ran side by side: LM compression on the CPU (~7 days, sharing the machine)
-and embeddings on the integrated GPU (~4.5 days); packing the final block then took about an hour. The machine fought
-back:
-
-- **Windows' power throttling** treats a process without a window as background work and parks it
-  on efficient cores: 79 records/s instead of 129. Opting out
-  (`SetProcessInformation(ProcessPowerThrottling)`) brought it back to 119.
-- **Priority starvation:** the GPU feeder at below-normal priority fed the GPU 12 docs/s instead
-  of ~200. It needs little CPU, but promptly; it now runs *above* normal.
-- **A GPU hang** right after the charger was unplugged and plugged back: the embedder sat for 3 h.
-  A watchdog now kills and retries a month that takes 3× its normal time.
-- **Modern Standby**: on battery with the lid closed the laptop freezes; one pack paused for
-  3.9 hours and simply carried on. Every stage is resumable and restarts at logon.
+- Its power throttling treats a process without a window as background work and moves it to the
+  efficient cores. Compression dropped from 129 to 79 records per second. Opting out with
+  `SetProcessInformation(ProcessPowerThrottling)` brought it back to 119.
+- At below-normal priority, the process feeding the GPU starved: 12 documents per second instead
+  of about 200. It needs little CPU, but it needs it promptly, so it now runs above normal.
+- Once, right after I unplugged and plugged back the charger, the GPU run hung for 3 hours. A
+  watchdog now kills and retries any month that takes three times longer than usual.
+- On battery with the lid closed, the laptop goes into Modern Standby and everything freezes. One
+  packing run paused for 3.9 hours and continued on its own when the laptop woke up.
 
 ## Results
 
 ![Search quality](img/quality.svg)
 
-Each evaluation query is a story's title; the relevant items are the comments of that story's own
-thread (300 queries per set, three months, test and dev sets). Searched within the query's month
-among all 49.3 M items, the default hybrid search puts **3.2 relevant comments in the top 10** on
-average; keyword search alone 2.6.
+To measure quality I used 300 queries per month for three months, in a test set and a dev set.
+Each query is a story's title, and the relevant results are the comments in that story's own
+thread. Searching within the query's month, among all 49.3 million items, the default hybrid
+search puts on average 3.2 relevant comments in the top 10. Keyword search alone puts 2.6.
 
-An honest caveat about this eval: without the month filter the score drops to ~0.05, because
-similar threads from 20 years of HN now count as misses — the eval rewards finding *that* thread,
-not finding good answers. The same queries on a 3-month block scored 0.24, so the search did not
-get worse with 16× more data. A better eval for the full archive is on the list.
+Without the month filter the score drops to about 0.05, and that number needs some context. This
+eval only counts the query's own thread as relevant, so similar threads from other years count as
+misses even when they answer the question. The same queries on a three-month block scored 0.24, so
+the search itself did not get worse with 16 times more data. A better eval for the whole archive
+is on my list.
 
 ![Latency](img/latency.svg)
 
-A cold reranked search takes ~2.3 s, most of it decoding the candidates' prefixes; keyword search
-~0.2 s; fetching an item ~80 ms. For a 5 GB archive of 20 years of discussion, on a laptop, that
-is the trade I wanted.
+A cold reranked search takes about 2.3 seconds, and most of that is decoding the candidates'
+prefixes. A keyword search takes about 0.2 seconds, and fetching an item about 80 ms. That is well
+inside the 10 seconds I was ready to accept.
 
-## What did not make it
+![The built-in search page](img/web-burnout.png)
 
-- **A cross-encoder reranker:** +6-10 % P@10, but it needs the full text of every candidate:
-  5-7× the latency.
-- **A bigger LM** (pythia-160m): −8.8 % text, but decompression 2.3× slower.
-- **TurboQuant-style vector quantization:** at equal size, within the noise of the 768-bit
-  asymmetric binary index, and it needs training.
-- **Stronger general-purpose compressors:** see section 1.
+## Ideas I tried and dropped
 
-## Tested
+| Idea | What it gave | Why I dropped it |
+|---|---|---|
+| A cross-encoder reranker | +6 to 10% P@10 | it needs the full text of every candidate: 5 to 7 times slower |
+| A bigger LM (pythia-160m) | 8.8% less text | decompression 2.3 times slower |
+| TurboQuant-style vectors | within the noise at the same size | needs training, no clear gain |
+| Stronger general compressors | 106 to 114 bytes per item | far from what the LM reaches |
 
-![Acceptance](img/term-accept.svg)
+## Testing
 
-73 Python tests (lossless retrieval against Parquet, disk = RAM, concurrency, a changed byte
-anywhere is detected and never crashes, memory limits, the HTTP server), 35 Rust tests (bit-exact
-kernels, a corruption matrix), 24 acceptance checks of the installed wheel on the full block, and
-four rounds of adversarial review with ~100 findings fixed.
+![Acceptance checks](img/term-accept.svg)
 
-## Try it
+The Python suite has 73 tests. They check that every item comes back byte for byte against the
+Parquet files, that results are the same from disk and from RAM, concurrency, that a changed byte
+anywhere in the block is detected without crashing, the memory limits and the HTTP server. The
+Rust core has 35 more, including bit-exact kernels and a corruption matrix. A separate script runs
+24 checks of the installed package against the full block in about 30 seconds.
 
-```python
-import hnz
+## Trying it
 
-with hnz.open(r"D:\hn\hn-2026-08.hnz", ram="2GB") as hn:
-    for h in hn.search("how do I deal with burnout as a software engineer", k=5,
-                       since="2015", until="2018", types="comment"):
-        print(h.date, h.by, h.text[:120])
-```
+1. Build the block with the steps in the [README](../README.md#build-the-block-yourself)
+   (about a week), or copy one you already have.
+2. Install the package: `pip install hnz-0.1.0-cp310-abi3-win_amd64.whl`.
+3. Search from Python:
 
-```
-hnz serve --root D:\hn\hn-2026-08.hnz --ram 2GB     # web page + JSON API on localhost
-```
+   ```python
+   import hnz
 
-Today it is Windows on x86-64 with AVX2; the block is rebuilt from the public dataset with the
-scripts in the repository (about a week of laptop time). Code, design notes and the full experiment
-log: see the [README](../README.md).
+   with hnz.open(r"D:\hn\hn-2026-08.hnz", ram="2GB") as hn:
+       for h in hn.search("how do I deal with burnout as a software engineer", k=5,
+                          since="2015", until="2018", types="comment"):
+           print(h.date, h.by, h.text[:120])
+   ```
+
+4. Or start the web page with `hnz serve --root D:\hn\hn-2026-08.hnz --ram 2GB` and open
+   `http://127.0.0.1:8088/?q=sqlite+in+production`.
+
+The code, the design notes and the full experiment log, including the experiments that failed,
+are in the repository.
 
 ---
 
-### Show HN text
+## Show HN text
 
-> **Show HN: All of Hacker News in 5.3 GB, with semantic search on a laptop**
->
-> I compressed every HN item (49.3 M stories and comments, 2006–2026) losslessly into a single
-> 5.34 GB file — the Parquet dump is 12.4 GB — with hybrid semantic + keyword search and
-> byte-exact retrieval, running on a laptop CPU in 2 GB of RAM.
->
-> The text is arithmetic-coded with a 70 M-parameter LM fine-tuned on HN (59 bytes per item vs 137
-> with zstd + dictionary), run by a bit-exact int8 engine in Rust. Because decoding a prefix is
-> cheap, the indexes stay tiny (256-bit vectors, BM25 for rare terms only) and the candidates are
-> reranked by decoding their first 128 tokens and re-embedding them. A cold search takes ~2.3 s.
->
-> Python (`import hnz`), an HTTP server and a CLI. The experiment log has every number, including
-> what did not work.
+**Show HN: All of Hacker News in 5.3 GB, with semantic search on a laptop**
+
+I wanted all of HN on my laptop with real search, so I compressed every item (49.3M stories and
+comments, 2006 to 2026) into one 5.34 GB file. For comparison, the Parquet dump is 12.4 GB and
+has no search. Retrieval is lossless, byte for byte.
+
+The text is arithmetic-coded with pythia-70m, which I fine-tuned on 1% of HN. It takes 59 bytes
+per item, against 137 with zstd and a dictionary. To make that work I had to write a small int8
+inference engine in Rust that gives the same probabilities on every run, because one different
+bit breaks the decoding.
+
+Since decoding the start of an item is cheap, the indexes are small: 256-bit vectors and BM25 for
+rare terms only. Each query decodes the first 128 tokens of 100 candidates and reranks them. A cold
+search takes about 2.3 s on the CPU, inside a 2 GB RAM budget.
+
+It's a Python package (`import hnz`) with a CLI and a small HTTP server, Windows only for now. The
+repo has the experiment log with every number, including what didn't work.

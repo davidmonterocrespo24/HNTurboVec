@@ -1,4 +1,4 @@
-# hnz — all of Hacker News, compressed, searchable from Python
+# hnz: all of Hacker News, compressed and searchable from Python
 
 `hnz` opens a compact, read-only block holding every Hacker News item (49.3 M stories, comments,
 jobs and polls from 2006-10 to 2026-08), losslessly, in about 5.3 GB, and searches it the way a
