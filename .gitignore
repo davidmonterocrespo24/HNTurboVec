@@ -57,3 +57,5 @@ logs/
 
 # Claude Code (scheduled-task lock)
 .claude/scheduled_tasks.lock
+.agents/*
+.claude/*
