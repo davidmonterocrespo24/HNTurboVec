@@ -2,6 +2,7 @@
 name = "hnz-py"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Módulo de Python de hnz (PyO3): import hnz"
 
 [lib]

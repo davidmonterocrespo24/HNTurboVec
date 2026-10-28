@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "All of Hacker News, compressed losslessly, with hybrid (semantic + keyword) search and verbatim retrieval, within a RAM budget"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
 # only OpenVINO's DLLs are used (the query embedder); the openvino package is never imported
 dependencies = ["openvino>=2025.1"]
 classifiers = ["Programming Language :: Rust", "Operating System :: Microsoft :: Windows"]

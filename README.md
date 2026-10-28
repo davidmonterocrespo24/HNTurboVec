@@ -5,6 +5,8 @@ Every Hacker News item ever posted (49.3 million stories, comments, jobs and pol
 by meaning and by keywords, with filters by date, type and author. It runs on a laptop CPU, inside
 a RAM budget you choose.
 
+The story of how it fits, with the numbers and what did not work: **[the write-up](https://davidmonterocrespo24.github.io/HNTurboVec/)**.
+
 ```python
 import hnz
 
@@ -241,11 +243,16 @@ numbers and the experiments that failed, is in [doc/BITACORA.md](doc/BITACORA.md
 | Document | About |
 |---|---|
 | [hnz/py/README.md](hnz/py/README.md) | the Python library: API, HTTP server, performance |
-| [doc/POST.md](doc/POST.md) | the write-up: how all of HN fits in 5.3 GB |
+| [doc/POST.md](doc/POST.md) | the write-up: how all of HN fits in 5.3 GB ([web version](https://davidmonterocrespo24.github.io/HNTurboVec/)) |
 | [doc/README.md](doc/README.md) | project status and the index of the design documents |
 | [doc/BITACORA.md](doc/BITACORA.md) | the experiment log, E00 to E36 |
 | [doc/08-block.md](doc/08-block.md), [doc/09-rerank.md](doc/09-rerank.md), [doc/07-ram.md](doc/07-ram.md) | the block format, search, memory |
 | [doc/10-tests.md](doc/10-tests.md) | how to test and approve the library |
+
+## License
+
+The code is under the [MIT license](LICENSE). Hacker News content belongs to its authors and
+Y Combinator; the dataset and the models keep their own licenses.
 
 Data: [open-index/hacker-news](https://huggingface.co/datasets/open-index/hacker-news) on Hugging
 Face. Models: [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) (Google) and
