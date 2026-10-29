@@ -18,7 +18,7 @@
 
 <h2>Where the numbers start</h2>
 <figure><img src="https://davidmonterocrespo24.github.io/HNTurboVec/img/size.png" alt="All of Hacker News on disk, in GB."><figcaption>All of Hacker News on disk, in GB.</figcaption></figure>
-<ul><li>Raw JSON from the HN API: ~24 GB, search: none</li><li>Parquet dump (<a href="https://huggingface.co/datasets/open-index/hacker-news">open-index/hacker-news</a>): 12.4 GB, search: none</li><li>zstd-19 with a trained dictionary, item by item: 9.1 GB, search: none</li><li>hnz block: <strong>5.34 GB</strong>, search: hybrid, with filters</li></ul>
+<ul><li>Raw JSON from the HN API: 22.1 GB, search: none</li><li>Parquet dump (<a href="https://huggingface.co/datasets/open-index/hacker-news">open-index/hacker-news</a>): 12.4 GB, search: none</li><li>zstd-19 with a trained dictionary, item by item: 9.1 GB, search: none</li><li>hnz block: <strong>5.34 GB</strong>, search: hybrid, with filters</li></ul>
 <p>The 5.34 GB include the text, the metadata, a semantic index, a word index and the two models that hnz needs to read them.</p>
 
 <h2>Compressing the text with a language model</h2>
