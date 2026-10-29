@@ -19,7 +19,7 @@ with hnz.open(r"D:\hn\hn-2026-08.hnz", ram="2GB") as hn:
 
 | | |
 |---|---|
-| **5.34 GB** | all of HN: text, metadata, semantic index, word index and both models. The Parquet dump is 12.4 GB, the raw JSON about 24 GB |
+| **5.34 GB** | all of HN: text, metadata, semantic index, word index and both models. The Parquet dump is 12.4 GB, the raw JSON 22.1 GB |
 | **Lossless** | every item's original HTML, byte for byte. Checked against the sources: 0 differences in 49.3 M items |
 | **~2.3 s** | a cold hybrid search with reranking over all 49.3 M items, on a 16-thread laptop CPU. Keyword search ~0.2 s, `get()` ~80 ms |
 | **`ram="2GB"`** | models, indexes, caches and the working memory of every query stay inside the budget (the process used ~1.45 GB) |
@@ -45,7 +45,7 @@ dataset in about a week on a laptop.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="doc/img/size-dark.svg">
-  <img src="doc/img/size.svg" alt="All of HN on disk: raw JSON 24 GB, Parquet 12.4 GB, zstd per item 9.1 GB, hnz v1 10.4 GB, hnz block 5.34 GB" width="860">
+  <img src="doc/img/size.svg" alt="All of HN on disk: raw JSON 22.1 GB, Parquet 12.4 GB, zstd per item 9.1 GB, hnz v1 10.4 GB, hnz block 5.34 GB" width="860">
 </picture>
 
 zstd-19 with a trained dictionary needs 9.1 GB for the text and metadata alone, without any search.

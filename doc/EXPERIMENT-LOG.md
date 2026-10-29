@@ -11,7 +11,7 @@ Default sample: `data/2024/2024-01.parquet` = **382,681 items** (346,509 comment
 
 ### E00 — Prior research (Hermes session, 2026-10-13)
 - HN: `maxitem` = 50,064,927; ~96.8% of ids with data → **~49.3 M items**; ~86% comments.
-- Raw JSON ≈ 24 GB; Parquet dump of `open-index/hacker-news` = 12.4 GB (252 B/item).
+- Raw JSON = 22.1 GB (measured, see E37; first estimated at ≈ 24 GB); Parquet dump of `open-index/hacker-news` = 12.4 GB (252 B/item).
 - Baseline: zstd-19 + 64 KB dictionary **per record** = 185 B/rec → **9.1 GB**, 3 µs/read.
 - turbovec (TurboQuant) 384d: 2-bit 101 B/vec (4.99 GB), 4-bit 198 B/vec (9.78 GB). 3-bit = same
   cost as 4-bit (padding) → do not use. Needs `calibrate()`. Flat index → it has to be split up.
@@ -1374,3 +1374,17 @@ the multi-day all-HN runs (P5) start after P3.
   The budget holds at both sizes. Open question: the decoded-prefix cache gets only ~250 KB at
   either budget (the plan gives the extra 2 GB to the index), so a repeated search costs ~1.5 s
   instead of the ~0.1-0.2 s seen on the sample block; the plan should leave room for that cache.
+
+### E37 — All of HN as raw JSON, measured (2026-10-29)
+
+`experiments/measure_raw_json.py` rebuilds every row of the 239 Parquet files as one item of the
+official HN API (type as a string, Unix time, empty and zero fields left out, no `words` column)
+and adds up the UTF-8 length of each compact JSON line, newline included. Nothing is written.
+
+| | bytes | per item |
+|---|---|---|
+| Compact JSON lines (`separators=(',', ':')`, UTF-8) | **22.14 GB** | 448.9 B |
+| Python's default `json.dumps` (spaces, `\u` escapes) | 22.80 GB | 462.3 B |
+
+49,324,111 items, 529 s. The earlier ≈ 24 GB came from a sample (492 B/item) and was about 9% high.
+The block (5.34 GB) is 4.1x smaller than the raw JSON, search included.

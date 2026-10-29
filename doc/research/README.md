@@ -7,7 +7,7 @@ What came out of it, and is used throughout the project:
 
 - The size of Hacker News: about 49.3 M items (`maxitem` 50,064,927; about 96.8% of the ids hold
   data; about 86% are comments).
-- The starting points: about 24 GB of raw JSON; 12.4 GB for the Parquet dump of
+- The starting points: 22.1 GB of raw JSON (measured); 12.4 GB for the Parquet dump of
   `open-index/hacker-news`; 9.1 GB for zstd-19 with a 64 KB dictionary per record.
 - The first ideas tried later in the experiment log: small compressed blocks, binary and
   quantized vectors (turbovec), BM25, a language model as the compressor, and a cross-encoder

@@ -18,8 +18,8 @@
 <line x1="300" y1="78" x2="300" y2="314" stroke="#c9c7bc" stroke-width="1"/>
 <text x="286.0" y="99.0" fill="#222220" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="end">Raw JSON (HN API)</text>
 <text x="286.0" y="116.0" fill="#6b6b66" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">text and metadata, no search</text>
-<path d="M300.0,88.0 H729.8 Q733.8,88.0 733.8,92.0 V106.0 Q733.8,110.0 729.8,110.0 H300.0 Z" fill="#d3d1c4"/>
-<text x="741.8" y="104.0" fill="#222220" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="start">24.0 GB</text>
+<path d="M300.0,88.0 H695.5 Q699.5,88.0 699.5,92.0 V106.0 Q699.5,110.0 695.5,110.0 H300.0 Z" fill="#d3d1c4"/>
+<text x="707.5" y="104.0" fill="#222220" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="start">22.1 GB</text>
 <text x="286.0" y="145.0" fill="#222220" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" font-weight="400" text-anchor="end">Parquet dump</text>
 <text x="286.0" y="162.0" fill="#6b6b66" font-family="system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="400" text-anchor="end">open-index/hacker-news, no search</text>
 <path d="M300.0,134.0 H520.5 Q524.5,134.0 524.5,138.0 V152.0 Q524.5,156.0 520.5,156.0 H300.0 Z" fill="#d3d1c4"/>

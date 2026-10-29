@@ -87,7 +87,7 @@ def bars_chart(t, title, subtitle, rows, unit_fmt, xmax, ticks, note=None, w=860
 
 def size_chart(t):
     rows = [
-        ('Raw JSON (HN API)', 'text and metadata, no search', 24.0, False),
+        ('Raw JSON (HN API)', 'text and metadata, no search', 22.1, False),
         ('Parquet dump', 'open-index/hacker-news, no search', 12.42, False),
         ('zstd-19 + dictionary, per item', 'random access, no search', 9.1, False),
         ('hnz v1 segments', 'zstd + LM tiers, hybrid search', 10.4, False),

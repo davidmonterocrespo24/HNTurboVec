@@ -26,7 +26,7 @@ public dataset with the scripts in the repository, which takes about a week on a
 
 | Format | Size | Search |
 |---|---|---|
-| Raw JSON from the HN API | ~24 GB | none |
+| Raw JSON from the HN API | 22.1 GB | none |
 | Parquet dump ([open-index/hacker-news](https://huggingface.co/datasets/open-index/hacker-news)) | 12.4 GB | none |
 | zstd-19 with a trained dictionary, item by item | 9.1 GB | none |
 | hnz block | 5.34 GB | hybrid, with filters |
